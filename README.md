@@ -54,7 +54,8 @@ with `--re`.
 packets (`needs-review`, `blocked`, `handoff`, `question`) are unread — so peers
 do not go idle until you manually poke them. Off by default. Per-packet
 `MAX_SHOWS` still applies; a separate per-seat `WAKE_BUDGET` (default 3, resets
-on `agent-bus read`) bounds distinct-packet wake storms. A seat sitting at an
+only on `resolve` / `watch reset`) bounds well-behaved ping-pong. Exhaustion
+with pending mail shows in `watch status` and `doctor`. A seat sitting at an
 empty prompt with no recent turn still needs one poke; Stop only fires after a
 turn ends.
 

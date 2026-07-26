@@ -49,8 +49,8 @@ Rules:
 4. Post before finishing a turn that changed code another seat cares about.
 5. When the user is coordinating multiple seats, `agent-bus watch on` so Stop
    continues you on `needs-review` / `blocked` / `handoff` / `question` without
-   a manual poll loop. Ack with `agent-bus read` to reset the wake budget.
-   Turn watch off when done.
+   a manual poll loop. `agent-bus read` acks packets but does **not** reset the
+   wake budget — only `resolve` (or `watch reset`) does. Turn watch off when done.
 
 ## Layout
 

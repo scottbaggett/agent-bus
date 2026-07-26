@@ -152,12 +152,13 @@ shown_counts() {
 # MAX_SHOWS so an undeliverable packet can't spam every prompt forever.
 MAX_SHOWS="${AGENT_BUS_MAX_SHOWS:-3}"
 # Per-seat Stop-hook wake budget across DISTINCT packets (not per id). Bounds
-# watch ping-pong. Resets when the seat acks via `read` (not peek/digest).
+# watch ping-pong between well-behaved seats. Resets only on `resolve` (thread
+# closed) — never on `read`, which is exactly what a woken agent must do.
 WAKE_BUDGET="${AGENT_BUS_WAKE_BUDGET:-3}"
 
-# Rewrite seat state preserving fields not being updated.
+# Rewrite seat state preserving unrelated fields (e.g. wake_pending).
 write_state() {
-  local f read_json shown_json wake_n epoch_field epoch_val
+  local f read_json shown_json wake_n epoch_field epoch_val prev
   f=$(STATE_FILE)
   read_json="$1"
   shown_json="$2"
@@ -170,19 +171,25 @@ write_state() {
   [ -n "$wake_n" ] || wake_n=0
   [[ "$wake_n" =~ ^[0-9]+$ ]] || wake_n=0
   [[ "$epoch_val" =~ ^[0-9]+$ ]] || epoch_val=$(now_epoch)
+  prev='{}'
+  [ -f "$f" ] && prev=$(jq -c . "$f" 2>/dev/null || echo '{}')
+  [ -n "$prev" ] || prev='{}'
   jq -n -c \
+    --argjson prev "$prev" \
     --argjson read "$read_json" --argjson shown "$shown_json" --argjson wake "$wake_n" \
     --arg ef "$epoch_field" --argjson ev "$epoch_val" \
-    '{read:$read, shown:$shown, wake_count:$wake} + {($ef): $ev}' >"$f.tmp"
+    '$prev * {read:$read, shown:$shown, wake_count:$wake} + {($ef): $ev}' >"$f.tmp"
   mv "$f.tmp" "$f"
 }
 
 mark_read() {
-  # Acking resets the per-seat wake budget — human/agent intentional consumption.
-  local merged
+  # Preserve wake_count — read is what woken agents do; resetting here made
+  # well-behaved ping-pong unbounded (PM blocker 1).
+  local merged wake
   merged="${1:-[]}"
   [ -n "$merged" ] || merged='[]'
-  write_state "$merged" "$(shown_counts)" 0 last_read "$(now_epoch)"
+  wake=$(wake_count)
+  write_state "$merged" "$(shown_counts)" "$wake" last_read "$(now_epoch)"
 }
 
 bump_shown() {
@@ -207,6 +214,7 @@ bump_wake() {
 
 reset_wake() {
   write_state "$(read_ids)" "$(shown_counts)" 0 last_wake_reset "$(now_epoch)"
+  set_wake_pending 0
 }
 
 wake_count() {
@@ -217,6 +225,24 @@ wake_count() {
   fi
   [[ "$n" =~ ^[0-9]+$ ]] || n=0
   printf '%s' "$n"
+}
+
+# Supervisory unread count ignoring MAX_SHOWS (for exhaustion diagnostics).
+pending_wake_count() {
+  local n
+  n=$(select_unread 0 0 1 2>/dev/null | grep -c . || true)
+  printf '%s' "${n:-0}"
+}
+
+set_wake_pending() {
+  local pending="${1:-0}" f
+  f=$(STATE_FILE)
+  [[ "$pending" =~ ^[0-9]+$ ]] || pending=0
+  if [ ! -f "$f" ]; then
+    write_state '[]' '{}' "$(wake_count)" last_wake_pending "$(now_epoch)"
+  fi
+  jq -c --argjson p "$pending" --argjson e "$(now_epoch)" \
+    '. + {wake_pending:$p, last_wake_pending:$e}' "$f" >"$f.tmp" && mv "$f.tmp" "$f"
 }
 
 resolved_ids() { jq -sc '[.[] | select(.kind=="resolve") | .msg]' "$LEDGER"; }
@@ -320,13 +346,24 @@ claim_file_new() { printf '%s/claims/%s.json' "$BUS" "$(claim_key "$REPO_ID" "$1
 claim_file_legacy() { printf '%s/claims/%s.json' "$BUS" "$(claim_key "$REPO" "$1")"; }
 
 # Move a legacy-keyed claim to the repo_id key when the new file is absent.
+# Lock + non-fatal mv so a concurrent claim cannot crash the process under set -e.
 migrate_claim_file() {
-  local np="$1" newf legacyf
+  local np="$1" newf legacyf lock key
   newf=$(claim_file_new "$np"); legacyf=$(claim_file_legacy "$np")
   [ "$newf" = "$legacyf" ] && return 0
-  if [ -f "$legacyf" ] && [ ! -f "$newf" ]; then
-    mv "$legacyf" "$newf"
+  [ -f "$legacyf" ] || return 0
+  [ -f "$newf" ] && return 0
+  key=$(claim_key "$REPO_ID" "$np")
+  lock="$BUS/claims/.migrate-${key}.lock"
+  if mkdir "$lock" 2>/dev/null; then
+    # Re-check inside the lock.
+    if [ -f "$legacyf" ] && [ ! -f "$newf" ]; then
+      mv "$legacyf" "$newf" 2>/dev/null || true
+    fi
+    rmdir "$lock" 2>/dev/null || true
   fi
+  # Loser of the race: new may now exist (winner migrated) or legacy remains.
+  return 0
 }
 
 # Print "addr epoch" of a live FOREIGN holder on either key scheme, or empty.
@@ -529,9 +566,7 @@ cmd_read() {
 
   if ((peek)); then :
   elif ((digest)); then bump_shown "$ids"
-  else
-    # Intentional ack resets the per-seat Stop-hook wake budget.
-    mark_read "$(jq -c --argjson new "$ids" '. + $new | unique' <<<"$(read_ids)")"
+  else mark_read "$(jq -c --argjson new "$ids" '. + $new | unique' <<<"$(read_ids)")"
   fi
 }
 
@@ -555,6 +590,8 @@ cmd_resolve() {
       '{kind:"resolve",msg:$msg,by:$by,epoch:$epoch}')"
     printf 'resolved %s\n' "$id"
   done
+  # Closing a thread is the only automatic wake-budget reset — read must not.
+  reset_wake
 }
 
 cmd_claim() {
@@ -644,6 +681,33 @@ cmd_doctor() {
     printf '  %s\n' "$(jq -r '.addr // empty' "$f")"
   done
   ((any_watch)) || printf '  (none)\n'
+
+  # Wake budget exhaustion with unseen supervisory mail — distinct from quiet.
+  local any_exh=0
+  for f in "$BUS"/state/*.json; do
+    [ -f "$f" ] || continue
+    local seat wc wp
+    seat=$(basename "$f" .json)
+    wc=$(jq -r '.wake_count // 0' "$f" 2>/dev/null || echo 0)
+    wp=$(jq -r '.wake_pending // 0' "$f" 2>/dev/null || echo 0)
+    [[ "$wc" =~ ^[0-9]+$ ]] || wc=0
+    [[ "$wp" =~ ^[0-9]+$ ]] || wp=0
+    ((wc < WAKE_BUDGET)) && continue
+    # Live pending for this seat; fall back to last recorded wake_pending.
+    if [ "$seat" = "$SEAT" ]; then
+      wp=$(pending_wake_count)
+    fi
+    ((any_exh)) || printf '\nwake budget exhausted (Stop will not continue):\n'
+    any_exh=1
+    if ((wp > 0)); then
+      printf '  %-22s wake %s/%s — %s supervisory pending (unseen by Stop)\n' \
+        "$seat" "$wc" "$WAKE_BUDGET" "$wp"
+    else
+      printf '  %-22s wake %s/%s — exhausted, nothing pending\n' \
+        "$seat" "$wc" "$WAKE_BUDGET"
+    fi
+  done
+
   printf '\nlifecycle hooks per seat:\n'
   local any=0
   for f in "$BUS"/seats/*.json; do
@@ -771,24 +835,40 @@ cmd_gc() {
 cmd_watch() {
   case "${1:-}" in
     on)
+      # Do not reset wake_count — toggling watch must not bypass the budget.
       watch_set 1
-      reset_wake
-      printf 'watch on for %s — Stop hook will continue on supervisory unread (budget %s)\n' \
+      printf 'watch on for %s — Stop hook will continue on supervisory unread (budget %s; resets on resolve)\n' \
         "$ADDR" "$WAKE_BUDGET"
       ;;
     off)
       watch_set 0
-      reset_wake
       printf 'watch off for %s\n' "$ADDR"
+      ;;
+    reset)
+      reset_wake
+      printf 'wake budget reset for %s (0/%s)\n' "$ADDR" "$WAKE_BUDGET"
       ;;
     ''|status)
       if watch_on; then
-        printf 'watch on for %s (wake %s/%s)\n' "$ADDR" "$(wake_count)" "$WAKE_BUDGET"
+        local wc pending
+        wc=$(wake_count)
+        pending=$(pending_wake_count)
+        if ((wc >= WAKE_BUDGET)); then
+          if ((pending > 0)); then
+            printf 'watch on for %s (wake EXHAUSTED %s/%s, %s supervisory pending)\n' \
+              "$ADDR" "$wc" "$WAKE_BUDGET" "$pending"
+          else
+            printf 'watch on for %s (wake EXHAUSTED %s/%s, nothing pending)\n' \
+              "$ADDR" "$wc" "$WAKE_BUDGET"
+          fi
+        else
+          printf 'watch on for %s (wake %s/%s)\n' "$ADDR" "$wc" "$WAKE_BUDGET"
+        fi
       else
         printf 'watch off for %s\n' "$ADDR"
       fi
       ;;
-    *) die "watch: expected on|off|status" ;;
+    *) die "watch: expected on|off|status|reset" ;;
   esac
 }
 
@@ -802,6 +882,7 @@ build_wake_payload() {
     printf 'agent-bus: %s supervisory packet(s) for %s — act before new work.\n' "$count" "$ADDR"
     printf 'Run: agent-bus read\n'
     printf 'Wake states: needs-review, blocked, handoff, question. Ack with read or --re.\n'
+    printf 'Wake budget resets only on agent-bus resolve (not on read).\n'
     while IFS= read -r m; do
       [ -n "$m" ] || continue
       n=$((n + 1))
@@ -843,6 +924,7 @@ cmd_stop_hook() {
 
   # Per-seat budget across distinct packets — stops watch ping-pong.
   if (( $(wake_count) >= WAKE_BUDGET )); then
+    set_wake_pending "$(pending_wake_count)"
     printf '{}\n'
     return 0
   fi
@@ -850,6 +932,7 @@ cmd_stop_hook() {
   local msgs
   msgs=$(select_unread 0 1 1)
   if [ -z "$msgs" ]; then
+    set_wake_pending 0
     printf '{}\n'
     return 0
   fi
@@ -857,6 +940,7 @@ cmd_stop_hook() {
   WAKE_REASON="" WAKE_IDS='[]' WAKE_COUNT=0
   build_wake_payload "$msgs"
   bump_wake "$WAKE_IDS"
+  set_wake_pending 0
 
   jq -n -c \
     --arg reason "$WAKE_REASON" \
@@ -885,7 +969,7 @@ agent-bus — handoff bus for coding agents sharing repos/worktrees.
   claims                          list active claims
   log [n]                         recent packets
   role [pm] [--repo <r>] [--clear]  show/take/release the repo's PM seat
-  watch [on|off|status]           opt-in Stop-hook wake on supervisory unread
+  watch [on|off|status|reset]     opt-in Stop-hook wake on supervisory unread
   doctor                          bus health
   gc                              prune expired claims, stale seats, old bodies
   stop-hook                       lifecycle Stop entry (JSON; used by install-hooks)
@@ -902,7 +986,9 @@ worktree-local, and a supervising seat is never in the worker's worktree.
 Watch: agent-bus watch on enables Stop-hook continuation when supervisory
 packets (needs-review, blocked, handoff, question) are unread. Per-packet
 MAX_SHOWS still applies; a separate per-seat WAKE_BUDGET (default 3) caps
-distinct-packet wake storms and resets on agent-bus read. Off by default.
+distinct-packet wake storms and resets only on agent-bus resolve (or
+watch reset) — never on read or watch on/off. Exhaustion with pending mail
+is visible in watch status and doctor. Off by default.
 A seat idle at an empty prompt (no recent turn) still needs one poke.
 EOF
 }

@@ -169,12 +169,55 @@ AGENT_BUS_TOOL=claude "$BIN" post --to @repo --state question -m $'# wb3\n\nthre
 out=$(printf '{}' | AGENT_BUS_TOOL=cursor AGENT_BUS_WT=wake-budget AGENT_BUS_WAKE_BUDGET=2 \
   "$BIN" stop-hook)
 assert_eq "wake budget exhausted ignores new packet" "{}" "$(echo "$out" | jq -c .)"
-# read resets budget
+
+# read must NOT reset — well-behaved ping-pong would otherwise be unbounded
 AGENT_BUS_TOOL=cursor AGENT_BUS_WT=wake-budget "$BIN" read >/dev/null
 AGENT_BUS_TOOL=claude "$BIN" post --to @repo --state question -m $'# wb4\n\nfour' >/dev/null
 out=$(printf '{}' | AGENT_BUS_TOOL=cursor AGENT_BUS_WT=wake-budget AGENT_BUS_WAKE_BUDGET=2 \
   "$BIN" stop-hook)
-assert_eq "wake budget resets on read" "block" "$(echo "$out" | jq -r '.decision // empty')"
+assert_eq "wake budget NOT reset by read" "{}" "$(echo "$out" | jq -c .)"
+
+# watch off/on must NOT bypass
+AGENT_BUS_TOOL=cursor AGENT_BUS_WT=wake-budget "$BIN" watch off >/dev/null
+AGENT_BUS_TOOL=cursor AGENT_BUS_WT=wake-budget "$BIN" watch on >/dev/null
+out=$(printf '{}' | AGENT_BUS_TOOL=cursor AGENT_BUS_WT=wake-budget AGENT_BUS_WAKE_BUDGET=2 \
+  "$BIN" stop-hook)
+assert_eq "wake budget NOT reset by watch toggle" "{}" "$(echo "$out" | jq -c .)"
+
+# exhaustion visible with pending
+out=$(AGENT_BUS_TOOL=cursor AGENT_BUS_WT=wake-budget AGENT_BUS_WAKE_BUDGET=2 "$BIN" watch)
+assert_contains "watch status shows EXHAUSTED" "EXHAUSTED" "$out"
+assert_contains "watch status shows pending" "pending" "$out"
+out=$(AGENT_BUS_TOOL=cursor AGENT_BUS_WT=wake-budget AGENT_BUS_WAKE_BUDGET=2 "$BIN" doctor)
+assert_contains "doctor flags wake exhaustion" "wake budget exhausted" "$out"
+
+# resolve resets budget
+rid=$(jq -r 'select(.kind=="msg") | .id' "$BUS_HOME/ledger.jsonl" | tail -1)
+AGENT_BUS_TOOL=cursor AGENT_BUS_WT=wake-budget "$BIN" resolve "$rid" >/dev/null
+out=$(AGENT_BUS_TOOL=cursor AGENT_BUS_WT=wake-budget AGENT_BUS_WAKE_BUDGET=2 "$BIN" watch)
+assert_contains "resolve resets wake budget" "wake 0/2" "$out"
+AGENT_BUS_TOOL=claude "$BIN" post --to @repo --state blocked -m $'# wb5\n\nfive' >/dev/null
+out=$(printf '{}' | AGENT_BUS_TOOL=cursor AGENT_BUS_WT=wake-budget AGENT_BUS_WAKE_BUDGET=2 \
+  "$BIN" stop-hook)
+assert_eq "wake works again after resolve" "block" "$(echo "$out" | jq -r '.decision // empty')"
+
+# Simulated well-behaved ping-pong: wake + read + reply, no resolve → exhausts
+export AGENT_BUS_WAKE_BUDGET=2
+AGENT_BUS_TOOL=codex AGENT_BUS_WT=pong-a "$BIN" watch on >/dev/null
+AGENT_BUS_TOOL=claude AGENT_BUS_WT=pong-b "$BIN" watch on >/dev/null
+for round in 1 2; do
+  AGENT_BUS_TOOL=claude AGENT_BUS_WT=pong-b \
+    "$BIN" post --to @repo --state question -m $'# pong-'$round$'\n\nping' >/dev/null
+  out=$(printf '{}' | AGENT_BUS_TOOL=codex AGENT_BUS_WT=pong-a AGENT_BUS_WAKE_BUDGET=2 \
+    "$BIN" stop-hook)
+  assert_eq "ping-pong round $round wakes" "block" "$(echo "$out" | jq -r '.decision // empty')"
+  AGENT_BUS_TOOL=codex AGENT_BUS_WT=pong-a "$BIN" read >/dev/null
+done
+AGENT_BUS_TOOL=claude AGENT_BUS_WT=pong-b \
+  "$BIN" post --to @repo --state question -m $'# pong-3\n\nping' >/dev/null
+out=$(printf '{}' | AGENT_BUS_TOOL=codex AGENT_BUS_WT=pong-a AGENT_BUS_WAKE_BUDGET=2 \
+  "$BIN" stop-hook)
+assert_eq "ping-pong exhausts despite read" "{}" "$(echo "$out" | jq -c .)"
 unset AGENT_BUS_WAKE_BUDGET
 
 # --- BLOCKER 2: legacy claim key still contests / releases ---

@@ -99,8 +99,10 @@ Two caps apply:
   id stops being surfaced.
 - **Per-seat `WAKE_BUDGET`** (`AGENT_BUS_WAKE_BUDGET`, default 3) — bounds how
   many Stop continuations a seat may receive across *distinct* packets, so two
-  watch-enabled seats cannot ping-pong forever. Resets when the seat acks via
-  `agent-bus read` (not peek/digest), or when watch is toggled.
+  well-behaved watch-enabled seats cannot ping-pong forever. Resets only on
+  `agent-bus resolve` (thread closed) or explicit `agent-bus watch reset` —
+  never on `read` or `watch on|off`. Exhaustion with supervisory mail still
+  waiting is visible in `watch status` and `doctor`.
 
 Watch is per-seat and off by default. A seat idle at an empty prompt with no
 recent turn still needs one human poke — Stop only fires after a turn ends.

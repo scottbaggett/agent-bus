@@ -1,0 +1,38 @@
+---
+description: Always use Conventional Commits for git commit messages
+alwaysApply: true
+---
+
+# Conventional Commits
+
+Always write git commit messages in [Conventional Commits](https://www.conventionalcommits.org/) form:
+
+```
+<type>(<optional-scope>): <short description>
+
+<optional body>
+```
+
+## Types
+
+Use one of: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert`.
+
+## Rules
+
+- Subject line: imperative mood, lowercase after the type, no trailing period, ~72 chars or less
+- Prefer a scope when it clarifies the area (`feat(hooks):`, `fix(claims):`)
+- Body (optional) explains **why**, not a file list
+- Breaking changes: add `!` after type/scope (`feat(api)!: ...`) and/or a `BREAKING CHANGE:` footer
+- Never use unstructured subjects like "Harden X" or "Update stuff" — pick a type first
+
+## Examples
+
+```
+feat(claims): refuse release of another seat's live claim
+
+fix(repo): key PM and claims on stable repo_id
+
+test: add smoke coverage for PM auto-CC and claims
+
+chore: extract agent-bus into its own repo
+```

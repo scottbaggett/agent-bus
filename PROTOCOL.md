@@ -91,7 +91,16 @@ When watch is on, the lifecycle **Stop** hook runs `agent-bus stop-hook`. If
 there are unread **supervisory** packets (`needs-review`, `blocked`, `handoff`,
 `question`), it blocks the stop and feeds the digest back as the next turn
 (Claude/Codex `decision: block`; Cursor `followup_message`). `fyi` and `done`
-never wake. Surfacing is capped by `MAX_SHOWS` (default 3), same as digests.
+never wake.
+
+Two caps apply:
+
+- **Per-packet `MAX_SHOWS`** (default 3) — same as digests; a stuck undeliverable
+  id stops being surfaced.
+- **Per-seat `WAKE_BUDGET`** (`AGENT_BUS_WAKE_BUDGET`, default 3) — bounds how
+  many Stop continuations a seat may receive across *distinct* packets, so two
+  watch-enabled seats cannot ping-pong forever. Resets when the seat acks via
+  `agent-bus read` (not peek/digest), or when watch is toggled.
 
 Watch is per-seat and off by default. A seat idle at an empty prompt with no
 recent turn still needs one human poke — Stop only fires after a turn ends.

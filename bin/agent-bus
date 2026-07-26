@@ -151,21 +151,72 @@ shown_counts() {
 # `digest` merely counts how many times it has been surfaced, and gives up after
 # MAX_SHOWS so an undeliverable packet can't spam every prompt forever.
 MAX_SHOWS="${AGENT_BUS_MAX_SHOWS:-3}"
+# Per-seat Stop-hook wake budget across DISTINCT packets (not per id). Bounds
+# watch ping-pong. Resets when the seat acks via `read` (not peek/digest).
+WAKE_BUDGET="${AGENT_BUS_WAKE_BUDGET:-3}"
 
-mark_read() {
-  local f ids; f=$(STATE_FILE); ids="$1"
-  jq -n -c --argjson read "$ids" --argjson shown "$(shown_counts)" --argjson epoch "$(now_epoch)" \
-    '{read:$read,shown:$shown,last_read:$epoch}' >"$f.tmp"
+# Rewrite seat state preserving fields not being updated.
+write_state() {
+  local f read_json shown_json wake_n epoch_field epoch_val
+  f=$(STATE_FILE)
+  read_json="$1"
+  shown_json="$2"
+  wake_n="$3"
+  epoch_field="$4"
+  epoch_val="$5"
+  # Do not use ${var:-{}} — bash parses the nested } as end of expansion.
+  [ -n "$read_json" ] || read_json='[]'
+  [ -n "$shown_json" ] || shown_json='{}'
+  [ -n "$wake_n" ] || wake_n=0
+  [[ "$wake_n" =~ ^[0-9]+$ ]] || wake_n=0
+  [[ "$epoch_val" =~ ^[0-9]+$ ]] || epoch_val=$(now_epoch)
+  jq -n -c \
+    --argjson read "$read_json" --argjson shown "$shown_json" --argjson wake "$wake_n" \
+    --arg ef "$epoch_field" --argjson ev "$epoch_val" \
+    '{read:$read, shown:$shown, wake_count:$wake} + {($ef): $ev}' >"$f.tmp"
   mv "$f.tmp" "$f"
 }
 
+mark_read() {
+  # Acking resets the per-seat wake budget — human/agent intentional consumption.
+  local merged
+  merged="${1:-[]}"
+  [ -n "$merged" ] || merged='[]'
+  write_state "$merged" "$(shown_counts)" 0 last_read "$(now_epoch)"
+}
+
 bump_shown() {
-  local f ids; f=$(STATE_FILE); ids="$1"
-  jq -n -c --argjson read "$(read_ids)" --argjson shown "$(shown_counts)" \
-    --argjson ids "$ids" --argjson epoch "$(now_epoch)" \
-    '{read:$read, shown:(reduce $ids[] as $i ($shown; .[$i] = ((.[$i] // 0) + 1))),
-      last_shown:$epoch}' >"$f.tmp"
-  mv "$f.tmp" "$f"
+  local ids="$1" new_shown wake
+  # -n required: $(...) provides empty stdin and jq would emit nothing.
+  new_shown=$(jq -n -c --argjson ids "$ids" --argjson cur "$(shown_counts)" \
+    'reduce $ids[] as $i ($cur; .[$i] = ((.[$i] // 0) + 1))')
+  [ -n "$new_shown" ] || new_shown='{}'
+  wake=$(wake_count)
+  [[ "$wake" =~ ^[0-9]+$ ]] || wake=0
+  write_state "$(read_ids)" "$new_shown" "$wake" last_shown "$(now_epoch)"
+}
+
+bump_wake() {
+  local ids="$1" new_shown wake
+  new_shown=$(jq -n -c --argjson ids "$ids" --argjson cur "$(shown_counts)" \
+    'reduce $ids[] as $i ($cur; .[$i] = ((.[$i] // 0) + 1))')
+  [ -n "$new_shown" ] || new_shown='{}'
+  wake=$(( $(wake_count) + 1 ))
+  write_state "$(read_ids)" "$new_shown" "$wake" last_wake "$(now_epoch)"
+}
+
+reset_wake() {
+  write_state "$(read_ids)" "$(shown_counts)" 0 last_wake_reset "$(now_epoch)"
+}
+
+wake_count() {
+  local f n=0
+  f=$(STATE_FILE)
+  if [ -f "$f" ]; then
+    n=$(jq -r '.wake_count // 0' "$f" 2>/dev/null || echo 0)
+  fi
+  [[ "$n" =~ ^[0-9]+$ ]] || n=0
+  printf '%s' "$n"
 }
 
 resolved_ids() { jq -sc '[.[] | select(.kind=="resolve") | .msg]' "$LEDGER"; }
@@ -262,7 +313,42 @@ seat_watch_on() {
 
 # ------------------------------------------------------------------ claims
 
-claim_key() { printf '%s' "$1:$2" | shasum -a 256 | cut -c1-16; } # args: repo_id path
+claim_key() { printf '%s' "$1:$2" | shasum -a 256 | cut -c1-16; } # args: repo_key path
+
+# New (repo_id) and legacy (display-name) claim file paths for a normalized path.
+claim_file_new() { printf '%s/claims/%s.json' "$BUS" "$(claim_key "$REPO_ID" "$1")"; }
+claim_file_legacy() { printf '%s/claims/%s.json' "$BUS" "$(claim_key "$REPO" "$1")"; }
+
+# Move a legacy-keyed claim to the repo_id key when the new file is absent.
+migrate_claim_file() {
+  local np="$1" newf legacyf
+  newf=$(claim_file_new "$np"); legacyf=$(claim_file_legacy "$np")
+  [ "$newf" = "$legacyf" ] && return 0
+  if [ -f "$legacyf" ] && [ ! -f "$newf" ]; then
+    mv "$legacyf" "$newf"
+  fi
+}
+
+# Print "addr epoch" of a live FOREIGN holder on either key scheme, or empty.
+# Checks both new (repo_id) and legacy (display-name) files so pre-upgrade
+# claims still contest and remain releasable by their holder.
+claim_foreign_holder() {
+  local np="$1" cut=$(( $(now_epoch) - CLAIM_TTL ))
+  local newf legacyf f holder hepoch
+  newf=$(claim_file_new "$np"); legacyf=$(claim_file_legacy "$np")
+  for f in "$newf" "$legacyf"; do
+    [ -f "$f" ] || continue
+    holder=$(jq -r '.addr // empty' "$f" 2>/dev/null || true)
+    hepoch=$(jq -r '.epoch // 0' "$f" 2>/dev/null || echo 0)
+    [[ "$hepoch" =~ ^[0-9]+$ ]] || hepoch=0
+    ((hepoch < cut)) && continue
+    [ "$holder" = "$ADDR" ] && continue
+    [ -z "$holder" ] && continue
+    printf '%s %s' "$holder" "$hepoch"
+    return 0
+  done
+  printf ''
+}
 
 # Repo-relative where possible so the same file claimed from two worktrees collides.
 normalize_path() {
@@ -278,7 +364,11 @@ normalize_path() {
 live_claims() {
   local cut=$(( $(now_epoch) - CLAIM_TTL ))
   find "$BUS/claims" -name '*.json' -type f 2>/dev/null | while read -r f; do
-    jq -c --argjson cut "$cut" 'select(.epoch >= $cut)' "$f" 2>/dev/null || true
+    local e
+    e=$(jq -r '.epoch // 0' "$f" 2>/dev/null || echo 0)
+    [[ "$e" =~ ^[0-9]+$ ]] || continue
+    ((e < cut)) && continue
+    jq -c . "$f" 2>/dev/null || true
   done
 }
 
@@ -439,7 +529,9 @@ cmd_read() {
 
   if ((peek)); then :
   elif ((digest)); then bump_shown "$ids"
-  else mark_read "$(jq -c --argjson new "$ids" '. + $new | unique' <<<"$(read_ids)")"
+  else
+    # Intentional ack resets the per-seat Stop-hook wake budget.
+    mark_read "$(jq -c --argjson new "$ids" '. + $new | unique' <<<"$(read_ids)")"
   fi
 }
 
@@ -468,19 +560,21 @@ cmd_resolve() {
 cmd_claim() {
   [ $# -ge 1 ] || die "claim: needs one or more paths"
   for p in "$@"; do
-    local np key f
-    np=$(normalize_path "$p"); key=$(claim_key "$REPO_ID" "$np"); f="$BUS/claims/$key.json"
-    if [ -f "$f" ]; then
-      local holder hepoch cut=$(( $(now_epoch) - CLAIM_TTL ))
-      holder=$(jq -r '.addr' "$f"); hepoch=$(jq -r '.epoch' "$f")
-      if [ "$holder" != "$ADDR" ] && ((hepoch >= cut)); then
-        printf 'CONTESTED %s — held by %s (%s ago)\n' "$np" "$holder" "$(age "$hepoch")" >&2
-        continue
-      fi
+    local np newf legacyf info holder hepoch
+    np=$(normalize_path "$p")
+    migrate_claim_file "$np"
+    newf=$(claim_file_new "$np"); legacyf=$(claim_file_legacy "$np")
+    info=$(claim_foreign_holder "$np")
+    if [ -n "$info" ]; then
+      holder=${info%% *}; hepoch=${info##* }
+      printf 'CONTESTED %s — held by %s (%s ago)\n' "$np" "$holder" "$(age "$hepoch")" >&2
+      continue
     fi
+    # One path → one record under the repo_id key; drop leftover legacy.
+    [ "$legacyf" != "$newf" ] && rm -f "$legacyf"
     jq -n -c --arg addr "$ADDR" --arg repo "$REPO" --arg repo_id "$REPO_ID" \
       --arg path "$np" --arg branch "$BRANCH" --argjson epoch "$(now_epoch)" \
-      '{addr:$addr,repo:$repo,repo_id:$repo_id,path:$path,branch:$branch,epoch:$epoch}' >"$f"
+      '{addr:$addr,repo:$repo,repo_id:$repo_id,path:$path,branch:$branch,epoch:$epoch}' >"$newf"
     ledger_append "$(jq -n -c --arg addr "$ADDR" --arg repo "$REPO" --arg repo_id "$REPO_ID" \
       --arg path "$np" --argjson epoch "$(now_epoch)" \
       '{kind:"claim",addr:$addr,repo:$repo,repo_id:$repo_id,path:$path,epoch:$epoch}')"
@@ -499,19 +593,22 @@ cmd_release() {
   fi
   [ $# -ge 1 ] || die "release: needs paths or --all"
   for p in "$@"; do
-    local np key f holder hepoch cut
-    np=$(normalize_path "$p"); key=$(claim_key "$REPO_ID" "$np"); f="$BUS/claims/$key.json"
-    if [ ! -f "$f" ]; then
+    local np newf legacyf info holder hepoch
+    np=$(normalize_path "$p")
+    newf=$(claim_file_new "$np"); legacyf=$(claim_file_legacy "$np")
+    if [ ! -f "$newf" ] && [ ! -f "$legacyf" ]; then
       printf 'released %s (not held)\n' "$np"
       continue
     fi
-    holder=$(jq -r '.addr' "$f"); hepoch=$(jq -r '.epoch' "$f")
-    cut=$(( $(now_epoch) - CLAIM_TTL ))
-    if [ "$holder" != "$ADDR" ] && ((hepoch >= cut)); then
+    info=$(claim_foreign_holder "$np")
+    if [ -n "$info" ]; then
+      holder=${info%% *}; hepoch=${info##* }
       printf 'agent-bus: %s held by %s — not releasing\n' "$np" "$holder" >&2
       continue
     fi
-    rm -f "$f"; printf 'released %s\n' "$np"
+    # Holder (or expired) on either key scheme — clear both.
+    rm -f "$newf" "$legacyf"
+    printf 'released %s\n' "$np"
   done
 }
 
@@ -582,19 +679,25 @@ cmd_doctor() {
 }
 
 cmd_role() {
-  local clear=0 role='' key="$REPO_ID" label="$REPO"
+  local clear=0 role='' key="$REPO_ID" label="$REPO" use_default=1
   while [ $# -gt 0 ]; do
     case "$1" in
       --clear) clear=1; shift ;;
-      --repo) label="$2"; key="$2"; shift 2 ;;
+      --repo) label="$2"; key="$2"; use_default=0; shift 2 ;;
       pm) role=pm; shift ;;
       *) die "role: unknown argument $1 (expected: pm, --clear, --repo <name-or-id>)" ;;
     esac
   done
 
   local f cur legacy_f=""
-  f=$(pm_file "$key"); cur=$(pm_seat "$key")
-  [ "$key" = "$REPO_ID" ] && legacy_f=$(pm_file "$REPO")
+  # Default lookup must call pm_seat with no args so legacy name-based files migrate.
+  if ((use_default)); then
+    cur=$(pm_seat)
+    f=$(pm_file "$REPO_ID")
+    legacy_f=$(pm_file "$REPO")
+  else
+    f=$(pm_file "$key"); cur=$(pm_seat "$key")
+  fi
 
   if ((clear)); then
     if [ -z "$cur" ] && { [ -z "$legacy_f" ] || [ ! -f "$legacy_f" ]; }; then
@@ -629,6 +732,9 @@ cmd_role() {
 # ledger rows are outside the lookback window. Ledger lines are kept (append-only)
 # but orphaned bodies and dead registry files are removed.
 cmd_gc() {
+  if (( GC_DAYS < LOOKBACK_DAYS )); then
+    die "gc: AGENT_BUS_GC_DAYS ($GC_DAYS) must be >= AGENT_BUS_LOOKBACK_DAYS ($LOOKBACK_DAYS)"
+  fi
   local cut_claim=$(( $(now_epoch) - CLAIM_TTL ))
   local cut_seat=$(( $(now_epoch) - SEAT_TTL ))
   local cut_msg=$(( $(now_epoch) - GC_DAYS * 86400 ))
@@ -637,23 +743,26 @@ cmd_gc() {
   for f in "$BUS"/claims/*.json; do
     [ -f "$f" ] || continue
     local e; e=$(jq -r '.epoch // 0' "$f" 2>/dev/null || echo 0)
+    [[ "$e" =~ ^[0-9]+$ ]] || continue
     if ((e < cut_claim)); then rm -f "$f"; n_claim=$((n_claim + 1)); fi
   done
 
   for f in "$BUS"/seats/*.json; do
     [ -f "$f" ] || continue
     local e; e=$(jq -r '.epoch // 0' "$f" 2>/dev/null || echo 0)
+    [[ "$e" =~ ^[0-9]+$ ]] || continue
     if ((e < cut_seat)); then rm -f "$f"; n_seat=$((n_seat + 1)); fi
   done
 
-  # Remove body files for messages older than GC_DAYS. Keep ledger rows for history.
+  # Only purge bodies older than GC_DAYS (and therefore outside lookback).
   while IFS= read -r id; do
     [ -n "$id" ] || continue
     [ -f "$BUS/msg/$id.md" ] || continue
     rm -f "$BUS/msg/$id.md"
     n_msg=$((n_msg + 1))
   done < <(jq -r --argjson cut "$cut_msg" \
-    'select(.kind=="msg" and .epoch < $cut) | .id' "$LEDGER" 2>/dev/null || true)
+    'select(.kind=="msg" and (.epoch | type == "number") and .epoch < $cut) | .id' \
+    "$LEDGER" 2>/dev/null || true)
 
   printf 'gc: removed %s expired claims, %s stale seats, %s old message bodies (>%sd)\n' \
     "$n_claim" "$n_seat" "$n_msg" "$GC_DAYS"
@@ -661,11 +770,23 @@ cmd_gc() {
 
 cmd_watch() {
   case "${1:-}" in
-    on) watch_set 1; printf 'watch on for %s — Stop hook will continue on supervisory unread\n' "$ADDR" ;;
-    off) watch_set 0; printf 'watch off for %s\n' "$ADDR" ;;
+    on)
+      watch_set 1
+      reset_wake
+      printf 'watch on for %s — Stop hook will continue on supervisory unread (budget %s)\n' \
+        "$ADDR" "$WAKE_BUDGET"
+      ;;
+    off)
+      watch_set 0
+      reset_wake
+      printf 'watch off for %s\n' "$ADDR"
+      ;;
     ''|status)
-      if watch_on; then printf 'watch on for %s\n' "$ADDR"
-      else printf 'watch off for %s\n' "$ADDR"; fi
+      if watch_on; then
+        printf 'watch on for %s (wake %s/%s)\n' "$ADDR" "$(wake_count)" "$WAKE_BUDGET"
+      else
+        printf 'watch off for %s\n' "$ADDR"
+      fi
       ;;
     *) die "watch: expected on|off|status" ;;
   esac
@@ -707,15 +828,21 @@ build_wake_payload() {
 }
 
 # Lifecycle Stop hook entrypoint. Always emits a single JSON object on stdout.
-# When watch is on and supervisory unread exists (under MAX_SHOWS), blocks stop
-# with the digest as the continuation reason (Claude/Codex). Cursor maps this
-# to followup_message via agent-bus-cursor-hook.
+# When watch is on and supervisory unread exists (under MAX_SHOWS and the
+# per-seat WAKE_BUDGET), blocks stop with the digest as the continuation
+# reason (Claude/Codex). Cursor maps this to followup_message via the adapter.
 cmd_stop_hook() {
-  # Drain host payload; stop_hook_active is informational (MAX_SHOWS is the cap).
+  # Drain host payload; stop_hook_active is informational.
   cat >/dev/null || true
   touch_seat
 
   if ! watch_on; then
+    printf '{}\n'
+    return 0
+  fi
+
+  # Per-seat budget across distinct packets — stops watch ping-pong.
+  if (( $(wake_count) >= WAKE_BUDGET )); then
     printf '{}\n'
     return 0
   fi
@@ -729,11 +856,11 @@ cmd_stop_hook() {
 
   WAKE_REASON="" WAKE_IDS='[]' WAKE_COUNT=0
   build_wake_payload "$msgs"
-  bump_shown "$WAKE_IDS"
+  bump_wake "$WAKE_IDS"
 
   jq -n -c \
     --arg reason "$WAKE_REASON" \
-    --arg msg "agent-bus: $WAKE_COUNT supervisory packet(s) — continuing" \
+    --arg msg "agent-bus: $WAKE_COUNT supervisory packet(s) — continuing (wake $(wake_count)/$WAKE_BUDGET)" \
     '{decision:"block",reason:$reason,systemMessage:$msg}'
 }
 
@@ -773,9 +900,10 @@ regardless of the sender's --to — because --to defaults to @here, which is
 worktree-local, and a supervising seat is never in the worker's worktree.
 
 Watch: agent-bus watch on enables Stop-hook continuation when supervisory
-packets (needs-review, blocked, handoff, question) are unread. Capped by
-MAX_SHOWS. Off by default. A seat idle at an empty prompt (no recent turn)
-still needs one poke — Stop only fires after a turn ends.
+packets (needs-review, blocked, handoff, question) are unread. Per-packet
+MAX_SHOWS still applies; a separate per-seat WAKE_BUDGET (default 3) caps
+distinct-packet wake storms and resets on agent-bus read. Off by default.
+A seat idle at an empty prompt (no recent turn) still needs one poke.
 EOF
 }
 

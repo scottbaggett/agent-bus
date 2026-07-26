@@ -154,5 +154,66 @@ out=$(printf '{}' | AGENT_BUS_HOME="$BUS_HOME" AGENT_BUS_TOOL=cursor AGENT_BUS_W
 assert_contains "cursor stop followup_message" "cursor-wake" \
   "$(echo "$out" | jq -r '.followup_message // empty')"
 
+# --- BLOCKER 1: per-seat wake budget across distinct packets ---
+export AGENT_BUS_WAKE_BUDGET=2
+AGENT_BUS_TOOL=cursor AGENT_BUS_WT=wake-budget "$BIN" watch on >/dev/null
+AGENT_BUS_TOOL=claude "$BIN" post --to @repo --state question -m $'# wb1\n\none' >/dev/null
+out=$(printf '{}' | AGENT_BUS_TOOL=cursor AGENT_BUS_WT=wake-budget AGENT_BUS_WAKE_BUDGET=2 \
+  "$BIN" stop-hook)
+assert_eq "wake budget 1/2 blocks" "block" "$(echo "$out" | jq -r '.decision // empty')"
+AGENT_BUS_TOOL=claude "$BIN" post --to @repo --state question -m $'# wb2\n\ntwo' >/dev/null
+out=$(printf '{}' | AGENT_BUS_TOOL=cursor AGENT_BUS_WT=wake-budget AGENT_BUS_WAKE_BUDGET=2 \
+  "$BIN" stop-hook)
+assert_eq "wake budget 2/2 blocks" "block" "$(echo "$out" | jq -r '.decision // empty')"
+AGENT_BUS_TOOL=claude "$BIN" post --to @repo --state question -m $'# wb3\n\nthree' >/dev/null
+out=$(printf '{}' | AGENT_BUS_TOOL=cursor AGENT_BUS_WT=wake-budget AGENT_BUS_WAKE_BUDGET=2 \
+  "$BIN" stop-hook)
+assert_eq "wake budget exhausted ignores new packet" "{}" "$(echo "$out" | jq -c .)"
+# read resets budget
+AGENT_BUS_TOOL=cursor AGENT_BUS_WT=wake-budget "$BIN" read >/dev/null
+AGENT_BUS_TOOL=claude "$BIN" post --to @repo --state question -m $'# wb4\n\nfour' >/dev/null
+out=$(printf '{}' | AGENT_BUS_TOOL=cursor AGENT_BUS_WT=wake-budget AGENT_BUS_WAKE_BUDGET=2 \
+  "$BIN" stop-hook)
+assert_eq "wake budget resets on read" "block" "$(echo "$out" | jq -r '.decision // empty')"
+unset AGENT_BUS_WAKE_BUDGET
+
+# --- BLOCKER 2: legacy claim key still contests / releases ---
+REPO_NAME=$(awk '/^repo /{print $2}' <<<"$("$BIN" whoami)")
+legacy_key=$(printf '%s' "$REPO_NAME:LEGACY.md" | shasum -a 256 | cut -c1-16)
+jq -n -c --arg addr "codex/other" --arg repo "$REPO_NAME" --arg path "LEGACY.md" \
+  --argjson epoch "$(date -u +%s)" \
+  '{addr:$addr,repo:$repo,path:$path,branch:"main",epoch:$epoch}' \
+  >"$BUS_HOME/claims/$legacy_key.json"
+out=$(AGENT_BUS_TOOL=claude "$BIN" claim LEGACY.md 2>&1 || true)
+assert_contains "legacy claim contested" "CONTESTED" "$out"
+out=$(AGENT_BUS_TOOL=codex AGENT_BUS_WT=other "$BIN" release LEGACY.md 2>&1)
+assert_contains "legacy holder can release" "released LEGACY.md" "$out"
+out=$("$BIN" claims)
+assert_contains "legacy claim cleared" "no active claims" "$out"
+
+# Dual-key hazard: foreign on legacy + self on new must still contest
+legacy_key=$(printf '%s' "$REPO_NAME:DUAL.md" | shasum -a 256 | cut -c1-16)
+jq -n -c --arg addr "codex/other" --arg repo "$REPO_NAME" --arg path "DUAL.md" \
+  --argjson epoch "$(date -u +%s)" \
+  '{addr:$addr,repo:$repo,path:$path,branch:"main",epoch:$epoch}' \
+  >"$BUS_HOME/claims/$legacy_key.json"
+AGENT_BUS_TOOL=claude "$BIN" claim DUAL.md >/dev/null 2>&1 || true
+# If claim succeeded despite legacy, that is the bug — force dual by writing new too
+# After fix, claim should have been CONTESTED; verify foreign still wins:
+out=$(AGENT_BUS_TOOL=claude "$BIN" claim DUAL.md 2>&1 || true)
+assert_contains "dual-key still contested" "CONTESTED" "$out"
+AGENT_BUS_TOOL=codex AGENT_BUS_WT=other "$BIN" release DUAL.md >/dev/null
+
+# --- BLOCKER 3: role status migrates legacy PM file ---
+REPO_SLUG=$(printf '%s' "$REPO_NAME" | tr '/:@ ' '____')
+rm -f "$BUS_HOME/state/roles/"*.pm
+printf 'claude/main' >"$BUS_HOME/state/roles/${REPO_SLUG}.pm"
+out=$("$BIN" role)
+assert_contains "role status migrates legacy PM" "PM for $REPO_NAME: claude/main" "$out"
+# Migration should have written the repo_id file
+REPO_ID=$(awk '/^repo_id/{print $2}' <<<"$("$BIN" whoami)")
+[ -f "$BUS_HOME/state/roles/${REPO_ID}.pm" ]
+assert_eq "legacy PM migrated to repo_id file" "0" "$?"
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 ((fail == 0))

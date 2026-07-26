@@ -95,8 +95,9 @@ that apart from a quiet repo. With it, every `needs-review`, `blocked`,
 
 `watch on` makes the Stop hook continue this seat when those supervisory packets
 are unread, so you do not need the human to poke you into a poll loop. It does
-not wake on `fyi`/`done`. A seat sitting at an empty prompt with no recent turn
-still needs one poke. `watch off` when coordinating ends.
+not wake on `fyi`/`done`. A per-seat `WAKE_BUDGET` (default 3) caps distinct-packet
+wake storms and resets on `agent-bus read`. A seat sitting at an empty prompt
+with no recent turn still needs one poke. `watch off` when coordinating ends.
 
 Release the PM role with `agent-bus role --clear` when the supervising session
 ends, otherwise the next PM has to take it over.

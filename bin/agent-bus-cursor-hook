@@ -3,13 +3,12 @@
 #
 # Cursor hooks speak JSON on stdin/stdout (unlike Claude/Codex command hooks,
 # which inject raw stdout). This wrapper consumes the event payload, runs the
-# bus, and returns {additional_context} when there is something to surface.
+# bus, and returns Cursor-shaped JSON.
 #
 # Note: Cursor's sessionStart additional_context injection has been unreliable
 # in the IDE; delivery for Cursor still rests primarily on the skill /
-# AGENTS.md instruction layer. Hooks still matter: they update seat telemetry
-# so `agent-bus doctor` can see cursor seats firing, and they best-effort inject
-# digests when the host cooperates.
+# AGENTS.md instruction layer. Opt-in `agent-bus watch on` uses the stop hook's
+# followup_message to continue the agent when supervisory packets are unread.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -22,14 +21,13 @@ if [ -z "$BIN" ]; then
 fi
 
 EVENT="${1:-sessionStart}"
-# Drain stdin so Cursor doesn't block on a full pipe.
-cat >/dev/null || true
-
+# Preserve stdin for stop-hook (it drains); other events just discard.
 export AGENT_BUS_VIA=hook
 export AGENT_BUS_TOOL="${AGENT_BUS_TOOL:-cursor}"
 
 case "$EVENT" in
   sessionStart)
+    cat >/dev/null || true
     "$BIN" heartbeat >/dev/null 2>&1 || true
     digest=$("$BIN" digest 2>/dev/null || true)
     if [ -n "${digest:-}" ]; then
@@ -39,10 +37,23 @@ case "$EVENT" in
     fi
     ;;
   sessionEnd)
+    cat >/dev/null || true
     "$BIN" release --all >/dev/null 2>&1 || true
     printf '{}\n'
     ;;
+  stop)
+    # Map Claude/Codex-shaped stop-hook JSON to Cursor followup_message.
+    raw=$("$BIN" stop-hook 2>/dev/null || echo '{}')
+    echo "$raw" | jq -c '
+      if .decision == "block" and ((.reason // "") | length) > 0 then
+        {followup_message: .reason}
+      else
+        {}
+      end
+    '
+    ;;
   *)
+    cat >/dev/null || true
     printf '{}\n'
     ;;
 esac

@@ -42,6 +42,8 @@ done
 digest_cmd() { printf 'AGENT_BUS_VIA=hook %s digest 2>/dev/null || true %s' "$BIN" "$MARKER"; }
 heartbeat_cmd() { printf 'AGENT_BUS_VIA=hook AGENT_BUS_TOOL=%s %s heartbeat 2>/dev/null || true %s' "$1" "$BIN" "$MARKER"; }
 release_cmd() { printf '%s release --all >/dev/null 2>&1 || true %s' "$BIN" "$MARKER"; }
+# Stop hook: always emit JSON ({} or decision:block). Heartbeat is inside stop-hook.
+stop_cmd() { printf 'AGENT_BUS_VIA=hook AGENT_BUS_TOOL=%s %s stop-hook 2>/dev/null || echo "{}" %s' "$1" "$BIN" "$MARKER"; }
 cursor_cmd() { printf 'AGENT_BUS_VIA=hook AGENT_BUS_TOOL=cursor %s %s 2>/dev/null || echo "{}" %s' "$CURSOR_HOOK" "$1" "$MARKER"; }
 
 strip_marked() { jq --arg m "$MARKER" '
@@ -85,6 +87,8 @@ install_claude() {
     # so a silent-when-empty digest surfaces handoffs with zero noise.
     out=$(printf '%s' "$out" | add_group SessionStart "$(heartbeat_cmd claude)" "$(digest_cmd)")
     out=$(printf '%s' "$out" | add_group UserPromptSubmit "$(digest_cmd)")
+    # Stop continues the agent when watch is on and supervisory mail is unread.
+    out=$(printf '%s' "$out" | add_group Stop "$(stop_cmd claude)")
     out=$(printf '%s' "$out" | add_group SessionEnd "$(release_cmd)")
   fi
   printf '%s\n' "$out" | jq . >"$CLAUDE_SETTINGS.tmp" && mv "$CLAUDE_SETTINGS.tmp" "$CLAUDE_SETTINGS"
@@ -99,7 +103,8 @@ install_codex() {
   if ((!uninstall)); then
     out=$(printf '%s' "$out" | add_group SessionStart "$(heartbeat_cmd codex)" "$(digest_cmd)")
     out=$(printf '%s' "$out" | add_group UserPromptSubmit "$(digest_cmd)")
-    out=$(printf '%s' "$out" | add_group Stop "$(heartbeat_cmd codex)")
+    # Codex Stop requires JSON on stdout; stop-hook emits {} or decision:block.
+    out=$(printf '%s' "$out" | add_group Stop "$(stop_cmd codex)")
   fi
   printf '%s\n' "$out" | jq . >"$CODEX_HOOKS.tmp" && mv "$CODEX_HOOKS.tmp" "$CODEX_HOOKS"
   echo "codex:  $( ((uninstall)) && echo removed || echo installed ) (backup: $CODEX_HOOKS.agent-bus.bak)"
@@ -114,14 +119,15 @@ install_cursor() {
   local out
   out=$(strip_marked_cursor <"$CURSOR_HOOKS")
   if ((!uninstall)); then
-    # sessionStart best-effort injects digests; sessionEnd drops claims.
-    # beforeSubmitPrompt cannot inject context (continue/user_message only).
+    # sessionStart best-effort injects digests; sessionEnd drops claims;
+    # stop maps watch wake to followup_message.
     out=$(printf '%s' "$out" | add_cursor_hook sessionStart "$(cursor_cmd sessionStart)")
     out=$(printf '%s' "$out" | add_cursor_hook sessionEnd "$(cursor_cmd sessionEnd)")
+    out=$(printf '%s' "$out" | add_cursor_hook stop "$(cursor_cmd stop)")
   fi
   printf '%s\n' "$out" | jq . >"$CURSOR_HOOKS.tmp" && mv "$CURSOR_HOOKS.tmp" "$CURSOR_HOOKS"
   echo "cursor: $( ((uninstall)) && echo removed || echo installed ) (backup: $CURSOR_HOOKS.agent-bus.bak)"
-  ((uninstall)) || echo "cursor: delivery still rests on the skill/AGENTS.md layer — sessionStart additional_context is unreliable in the IDE; hooks mainly provide doctor telemetry"
+  ((uninstall)) || echo "cursor: delivery still rests on the skill/AGENTS.md layer — sessionStart additional_context is unreliable in the IDE; enable agent-bus watch on for Stop-hook wake"
 }
 
 ((do_claude)) && install_claude

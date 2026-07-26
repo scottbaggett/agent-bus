@@ -84,16 +84,32 @@ register for it before anything else:
 
 ```sh
 agent-bus role pm
+agent-bus watch on
 ```
 
-Without it you receive only packets addressed to your exact seat, and since
-workers default to `@here` — their own worktree, never yours — a supervising seat
-polling `agent-bus read` sees an empty inbox indefinitely and cannot tell that
-apart from a quiet repo. With it, every `needs-review`, `blocked`, `handoff`, and
-`question` in the repo arrives regardless of how it was addressed.
+Without the PM role you receive only packets addressed to your exact seat, and
+since workers default to `@here` — their own worktree, never yours — a supervising
+seat polling `agent-bus read` sees an empty inbox indefinitely and cannot tell
+that apart from a quiet repo. With it, every `needs-review`, `blocked`,
+`handoff`, and `question` in the repo arrives regardless of how it was addressed.
 
-Release it with `agent-bus role --clear` when the supervising session ends,
-otherwise the next PM has to take it over.
+`watch on` makes the Stop hook continue this seat when those supervisory packets
+are unread, so you do not need the human to poke you into a poll loop. It does
+not wake on `fyi`/`done`. A seat sitting at an empty prompt with no recent turn
+still needs one poke. `watch off` when coordinating ends.
+
+Release the PM role with `agent-bus role --clear` when the supervising session
+ends, otherwise the next PM has to take it over.
+
+### "keep checking the bus / don't go idle"
+
+```sh
+agent-bus watch on
+```
+
+Opt-in per seat. Workers and PMs should enable this while multi-window work is
+active. The Stop hook then continues the agent with a digest when supervisory
+mail is waiting (capped at three surfacings per packet).
 
 ### "make sure we don't collide"
 

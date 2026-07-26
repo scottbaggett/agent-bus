@@ -76,6 +76,26 @@ stdout and delivery is resting on the `AGENTS.md` instruction layer instead.
 `agent-bus read --peek` reads without acking; `--all` includes already-read
 packets inside the lookback window (3 days).
 
+## Watch (opt-in Stop-hook wake)
+
+By default a seat that finishes a turn goes idle until the human sends another
+prompt — digests only run on `SessionStart` / `UserPromptSubmit`. Opt in:
+
+```
+agent-bus watch on       # this seat
+agent-bus watch          # status
+agent-bus watch off      # disable
+```
+
+When watch is on, the lifecycle **Stop** hook runs `agent-bus stop-hook`. If
+there are unread **supervisory** packets (`needs-review`, `blocked`, `handoff`,
+`question`), it blocks the stop and feeds the digest back as the next turn
+(Claude/Codex `decision: block`; Cursor `followup_message`). `fyi` and `done`
+never wake. Surfacing is capped by `MAX_SHOWS` (default 3), same as digests.
+
+Watch is per-seat and off by default. A seat idle at an empty prompt with no
+recent turn still needs one human poke — Stop only fires after a turn ends.
+
 ## What a good packet contains
 
 The point is that the receiving agent does not have to re-derive your context.

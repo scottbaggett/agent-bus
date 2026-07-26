@@ -11,6 +11,7 @@
 #   $AGENT_BUS_HOME/msg/<id>.md    packet bodies
 #   $AGENT_BUS_HOME/state/<seat>   per-seat read cursor
 #   $AGENT_BUS_HOME/state/roles/   per-repo role registry (<repo>.pm holds a seat addr)
+#   $AGENT_BUS_HOME/state/watch/   per-seat opt-in Stop-hook wake flags
 #   $AGENT_BUS_HOME/seats/<seat>   seat registry (last seen, branch, cwd)
 #   $AGENT_BUS_HOME/claims/<hash>  advisory file claims
 #
@@ -18,6 +19,9 @@
 # (needs-review, blocked, handoff, question) from anywhere in the repo regardless
 # of the sender's --to scope, because the default scope is worktree-local and a
 # supervisor is by definition in a different worktree from the work.
+#
+# Watch: opt-in per seat. When on, the Stop hook continues the agent if there are
+# unread supervisory packets (same states as PM auto-CC), capped by MAX_SHOWS.
 set -euo pipefail
 
 BUS="${AGENT_BUS_HOME:-$HOME/.agents/bus}"
@@ -33,9 +37,13 @@ require_cmd jq
 require_cmd shasum
 require_cmd xxd
 
-ensure_bus() { mkdir -p "$BUS/msg" "$BUS/state" "$BUS/state/roles" "$BUS/seats" "$BUS/claims"; : >>"$LEDGER"; }
+ensure_bus() {
+  mkdir -p "$BUS/msg" "$BUS/state" "$BUS/state/roles" "$BUS/state/watch" "$BUS/seats" "$BUS/claims"
+  : >>"$LEDGER"
+}
 
 # States that a repo's PM seat receives regardless of the sender's --to scope.
+# Also the only states that opt-in watch may wake a seat for on Stop.
 PM_STATES='["needs-review","blocked","handoff","question"]'
 
 now_epoch() { date -u +%s; }
@@ -188,18 +196,19 @@ pm_seat() {
   printf ''
 }
 
-# True when a ledger message belongs to this clone. New packets carry repo_id;
-# older packets fall back to the display name (may collide across same-named clones).
 # Messages this seat should see: addressed to it (directly or by scope),
 # not sent by it, not resolved, not already read, within the lookback window.
+# Args: include_read digest_mode wake_mode
+# wake_mode=1 keeps only supervisory states (PM_STATES) for Stop-hook wake.
 select_unread() {
-  local include_read="${1:-0}" digest_mode="${2:-0}" cut
+  local include_read="${1:-0}" digest_mode="${2:-0}" wake_mode="${3:-0}" cut
   cut=$(( $(now_epoch) - LOOKBACK_DAYS * 86400 ))
   jq -c \
     --arg addr "$ADDR" --arg tool "$TOOL" --arg repo "$REPO" --arg repoId "$REPO_ID" \
     --arg wt "$WT" --arg pm "$(pm_seat)" --argjson pmStates "$PM_STATES" \
     --argjson cut "$cut" --argjson read "$(read_ids)" --argjson resolved "$(resolved_ids)" \
     --argjson includeRead "$include_read" --argjson digest "$digest_mode" \
+    --argjson wake "$wake_mode" \
     --argjson shown "$(shown_counts)" --argjson maxShows "$MAX_SHOWS" '
     def same_repo:
       (((.repo_id // "") != "") and (.repo_id == $repoId))
@@ -222,7 +231,33 @@ select_unread() {
     | select($resolved | index($m.id) | not)
     | select($includeRead == 1 or ($read | index($m.id) | not))
     | select($digest == 0 or (($shown[$m.id] // 0) < $maxShows))
+    | select($wake == 0 or ($pmStates | index($m.state)))
   ' "$LEDGER"
+}
+
+# ------------------------------------------------------------------- watch
+
+watch_file() { printf '%s/state/watch/%s.json' "$BUS" "$SEAT"; }
+
+watch_on() { [ -f "$(watch_file)" ] && jq -e '.on == true' "$(watch_file)" >/dev/null 2>&1; }
+
+watch_set() {
+  local on="$1" f
+  f=$(watch_file)
+  mkdir -p "$(dirname "$f")"
+  if [ "$on" = 1 ]; then
+    jq -n -c --arg addr "$ADDR" --argjson epoch "$(now_epoch)" \
+      '{on:true,addr:$addr,epoch:$epoch}' >"$f.tmp"
+    mv "$f.tmp" "$f"
+  else
+    rm -f "$f"
+  fi
+}
+
+seat_watch_on() {
+  local seat="$1" f
+  f="$BUS/state/watch/${seat}.json"
+  [ -f "$f" ] && jq -e '.on == true' "$f" >/dev/null 2>&1
 }
 
 # ------------------------------------------------------------------ claims
@@ -250,8 +285,10 @@ live_claims() {
 # ---------------------------------------------------------------- commands
 
 cmd_whoami() {
-  printf 'seat     %s\nsession  %s\nrepo     %s\nrepo_id  %s\nworktree %s\nbranch   %s\ncwd      %s\nbus      %s\n' \
-    "$ADDR" "$SESSION" "$REPO" "$REPO_ID" "$WT" "$BRANCH" "$TOP" "$BUS"
+  local watch_status=off
+  watch_on && watch_status=on
+  printf 'seat     %s\nsession  %s\nrepo     %s\nrepo_id  %s\nworktree %s\nbranch   %s\nwatch    %s\ncwd      %s\nbus      %s\n' \
+    "$ADDR" "$SESSION" "$REPO" "$REPO_ID" "$WT" "$BRANCH" "$watch_status" "$TOP" "$BUS"
 }
 
 cmd_who() {
@@ -259,12 +296,18 @@ cmd_who() {
   printf 'seats active in the last %dm:\n' "$((SEAT_TTL / 60))"
   for f in "$BUS"/seats/*.json; do
     [ -f "$f" ] || continue
-    local e; e=$(jq -r '.epoch' "$f")
+    local e seat_slug addr mark
+    e=$(jq -r '.epoch' "$f")
     ((e < cut)) && continue
     found=1
+    addr=$(jq -r '.addr' "$f")
+    seat_slug=$(basename "$f" .json)
+    mark=""
+    [ "$addr" = "$ADDR" ] && mark="  <- you"
+    seat_watch_on "$seat_slug" && mark="${mark}  watch"
     printf '  %-22s %-14s %-46s %s ago%s\n' \
-      "$(jq -r '.addr' "$f")" "$(jq -r '.repo' "$f")" "$(jq -r '.branch' "$f")" \
-      "$(age "$e")" "$([ "$(jq -r '.addr' "$f")" = "$ADDR" ] && echo '  <- you')"
+      "$addr" "$(jq -r '.repo' "$f")" "$(jq -r '.branch' "$f")" \
+      "$(age "$e")" "$mark"
   done
   ((found)) || printf '  (none)\n'
   local pm; pm=$(pm_seat)
@@ -495,6 +538,15 @@ cmd_doctor() {
     "$(find "$BUS/msg" -name '*.md' 2>/dev/null | wc -l | tr -d ' ')" \
     "$(find "$BUS/seats" -name '*.json' 2>/dev/null | wc -l | tr -d ' ')" \
     "$(find "$BUS/claims" -name '*.json' 2>/dev/null | wc -l | tr -d ' ')"
+  printf '\nwatch on:\n'
+  local any_watch=0
+  for f in "$BUS"/state/watch/*.json; do
+    [ -f "$f" ] || continue
+    jq -e '.on == true' "$f" >/dev/null 2>&1 || continue
+    any_watch=1
+    printf '  %s\n' "$(jq -r '.addr // empty' "$f")"
+  done
+  ((any_watch)) || printf '  (none)\n'
   printf '\nlifecycle hooks per seat:\n'
   local any=0
   for f in "$BUS"/seats/*.json; do
@@ -607,6 +659,84 @@ cmd_gc() {
     "$n_claim" "$n_seat" "$n_msg" "$GC_DAYS"
 }
 
+cmd_watch() {
+  case "${1:-}" in
+    on) watch_set 1; printf 'watch on for %s — Stop hook will continue on supervisory unread\n' "$ADDR" ;;
+    off) watch_set 0; printf 'watch off for %s\n' "$ADDR" ;;
+    ''|status)
+      if watch_on; then printf 'watch on for %s\n' "$ADDR"
+      else printf 'watch off for %s\n' "$ADDR"; fi
+      ;;
+    *) die "watch: expected on|off|status" ;;
+  esac
+}
+
+# Build WAKE_REASON + WAKE_IDS from supervisory unread (globals; no subshell).
+# Does not mark read; caller bumps shown so MAX_SHOWS caps loops.
+build_wake_payload() {
+  local msgs="$1" tmp count n=0 ids='[]'
+  count=$(printf '%s\n' "$msgs" | grep -c . || true)
+  tmp=$(mktemp)
+  {
+    printf 'agent-bus: %s supervisory packet(s) for %s — act before new work.\n' "$count" "$ADDR"
+    printf 'Run: agent-bus read\n'
+    printf 'Wake states: needs-review, blocked, handoff, question. Ack with read or --re.\n'
+    while IFS= read -r m; do
+      [ -n "$m" ] || continue
+      n=$((n + 1))
+      local id from state epoch branch subj
+      id=$(jq -r '.id' <<<"$m"); from=$(jq -r '.from' <<<"$m")
+      state=$(jq -r '.state' <<<"$m"); epoch=$(jq -r '.epoch' <<<"$m")
+      branch=$(jq -r '.branch' <<<"$m"); subj=$(jq -r '.subject' <<<"$m")
+      printf '\n[%d] from %s · %s · %s ago · %s\n' "$n" "$from" "$state" "$(age "$epoch")" "$branch"
+      [ -n "$subj" ] && printf '    %s\n' "$subj"
+      printf '    id: %s\n' "$id"
+      if ((n <= 3)) && [ -f "$BUS/msg/$id.md" ]; then
+        printf -- '    ---\n'
+        sed 's/^/    /' "$BUS/msg/$id.md"
+      elif [ -f "$BUS/msg/$id.md" ]; then
+        printf '    (body suppressed — agent-bus show %s)\n' "$id"
+      fi
+      ids=$(jq -c --arg id "$id" '. + [$id]' <<<"$ids")
+    done <<<"$msgs"
+  } >"$tmp"
+  WAKE_REASON=$(cat "$tmp")
+  rm -f "$tmp"
+  WAKE_IDS="$ids"
+  WAKE_COUNT="$count"
+}
+
+# Lifecycle Stop hook entrypoint. Always emits a single JSON object on stdout.
+# When watch is on and supervisory unread exists (under MAX_SHOWS), blocks stop
+# with the digest as the continuation reason (Claude/Codex). Cursor maps this
+# to followup_message via agent-bus-cursor-hook.
+cmd_stop_hook() {
+  # Drain host payload; stop_hook_active is informational (MAX_SHOWS is the cap).
+  cat >/dev/null || true
+  touch_seat
+
+  if ! watch_on; then
+    printf '{}\n'
+    return 0
+  fi
+
+  local msgs
+  msgs=$(select_unread 0 1 1)
+  if [ -z "$msgs" ]; then
+    printf '{}\n'
+    return 0
+  fi
+
+  WAKE_REASON="" WAKE_IDS='[]' WAKE_COUNT=0
+  build_wake_payload "$msgs"
+  bump_shown "$WAKE_IDS"
+
+  jq -n -c \
+    --arg reason "$WAKE_REASON" \
+    --arg msg "agent-bus: $WAKE_COUNT supervisory packet(s) — continuing" \
+    '{decision:"block",reason:$reason,systemMessage:$msg}'
+}
+
 usage() {
   cat <<'EOF'
 agent-bus — handoff bus for coding agents sharing repos/worktrees.
@@ -628,8 +758,10 @@ agent-bus — handoff bus for coding agents sharing repos/worktrees.
   claims                          list active claims
   log [n]                         recent packets
   role [pm] [--repo <r>] [--clear]  show/take/release the repo's PM seat
+  watch [on|off|status]           opt-in Stop-hook wake on supervisory unread
   doctor                          bus health
   gc                              prune expired claims, stale seats, old bodies
+  stop-hook                       lifecycle Stop entry (JSON; used by install-hooks)
 
 Scopes: @here = same repo+worktree, @repo = same repo any worktree,
 @pm = the repo's registered PM seat, @codex/@claude/@cursor = that tool in this
@@ -639,6 +771,11 @@ PM role: one seat per repo may hold it (agent-bus role pm). A PM additionally
 receives every needs-review, blocked, handoff, and question packet in the repo
 regardless of the sender's --to — because --to defaults to @here, which is
 worktree-local, and a supervising seat is never in the worker's worktree.
+
+Watch: agent-bus watch on enables Stop-hook continuation when supervisory
+packets (needs-review, blocked, handoff, question) are unread. Capped by
+MAX_SHOWS. Off by default. A seat idle at an empty prompt (no recent turn)
+still needs one poke — Stop only fires after a turn ends.
 EOF
 }
 
@@ -661,8 +798,10 @@ case "$cmd" in
   claims) cmd_claims ;;
   log) cmd_log "$@" ;;
   role) touch_seat; cmd_role "$@" ;;
+  watch) touch_seat; cmd_watch "$@" ;;
   doctor) cmd_doctor ;;
   gc) cmd_gc ;;
+  stop-hook) cmd_stop_hook ;;
   help|-h|--help) usage ;;
   *) usage; exit 1 ;;
 esac

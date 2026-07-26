@@ -28,6 +28,7 @@ agent-bus read                   # your inbox
 agent-bus post --to @repo --state needs-review --touched auto --file handoff.md
 agent-bus claim src/thing.ts     # advisory, warns if contested
 agent-bus role pm                # take the supervising seat for this repo
+agent-bus watch on               # Stop-hook wake on supervisory unread (opt-in)
 ```
 
 Full protocol: [PROTOCOL.md](PROTOCOL.md). Runbook for agents:
@@ -46,6 +47,14 @@ rejected: it clobbers their input line mid-task.
 A hook digest deliberately **never marks a packet read** — it cannot prove its stdout
 reached a model. A packet is acked only when an agent acts: `agent-bus read`, or replying
 with `--re`.
+
+### Watch (opt-in wake)
+
+`agent-bus watch on` tells the Stop hook to continue the seat when supervisory
+packets (`needs-review`, `blocked`, `handoff`, `question`) are unread — so peers
+do not go idle until you manually poke them. Off by default. Capped by the same
+`MAX_SHOWS` (3) surfacing limit as digests. A seat sitting at an empty prompt with
+no recent turn still needs one poke; Stop only fires after a turn ends.
 
 ### Scopes
 
@@ -75,6 +84,7 @@ ledger.jsonl      append-only event log (msg | claim | release | resolve | seat)
 msg/<id>.md       packet bodies
 state/<seat>      per-seat read cursor
 state/roles/      per-repo PM registry
+state/watch/      per-seat opt-in Stop-hook wake flags
 seats/<seat>      seat registry (last seen, branch, cwd)
 claims/<hash>     advisory file claims
 ```

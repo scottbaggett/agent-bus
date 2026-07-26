@@ -106,5 +106,53 @@ assert_contains "cursor hook JSON object" "{" "$out"
 echo "$out" | jq -e 'type == "object"' >/dev/null
 assert_eq "cursor hook valid json" "0" "$?"
 
+# --- watch / stop-hook wake ---
+out=$("$BIN" watch)
+assert_contains "watch defaults off" "watch off" "$out"
+
+# Supervisory unread while watch off → no wake
+AGENT_BUS_TOOL=claude "$BIN" post --to @here --state needs-review \
+  -m $'# wake-target\n\nplease review' >/dev/null
+out=$(printf '{}' | AGENT_BUS_TOOL=codex "$BIN" stop-hook)
+assert_eq "stop-hook idle when watch off" "{}" "$(echo "$out" | jq -c .)"
+
+AGENT_BUS_TOOL=codex "$BIN" watch on >/dev/null
+out=$(printf '{}' | AGENT_BUS_TOOL=codex "$BIN" stop-hook)
+dec=$(echo "$out" | jq -r '.decision // empty')
+assert_eq "stop-hook blocks when watch on" "block" "$dec"
+assert_contains "stop-hook reason has subject" "wake-target" "$(echo "$out" | jq -r '.reason')"
+
+# Ack so fyi test starts clean
+AGENT_BUS_TOOL=codex "$BIN" read >/dev/null
+
+# fyi alone must not wake
+AGENT_BUS_TOOL=claude "$BIN" post --to @here --state fyi -m $'# chatter-only\n\nhi' >/dev/null
+out=$(printf '{}' | AGENT_BUS_TOOL=codex "$BIN" stop-hook)
+assert_eq "stop-hook ignores fyi" "{}" "$(echo "$out" | jq -c .)"
+
+# MAX_SHOWS cap: after three surfacings, further stop-hook is {}
+# Use @repo so a different worktree seat receives the packet.
+export AGENT_BUS_MAX_SHOWS=3
+AGENT_BUS_TOOL=claude "$BIN" post --to @repo --state question \
+  -m $'# cap-me\n\nwhy?' >/dev/null
+AGENT_BUS_TOOL=cursor AGENT_BUS_WT=wake-cap "$BIN" watch on >/dev/null
+for i in 1 2 3; do
+  out=$(printf '{}' | AGENT_BUS_TOOL=cursor AGENT_BUS_WT=wake-cap AGENT_BUS_MAX_SHOWS=3 \
+    "$BIN" stop-hook)
+  assert_eq "stop-hook surfacing $i blocks" "block" "$(echo "$out" | jq -r '.decision // empty')"
+done
+out=$(printf '{}' | AGENT_BUS_TOOL=cursor AGENT_BUS_WT=wake-cap AGENT_BUS_MAX_SHOWS=3 \
+  "$BIN" stop-hook)
+assert_eq "stop-hook silent after MAX_SHOWS" "{}" "$(echo "$out" | jq -c .)"
+
+# Cursor stop adapter maps block → followup_message
+AGENT_BUS_TOOL=cursor AGENT_BUS_WT=wake-map "$BIN" watch on >/dev/null
+AGENT_BUS_TOOL=claude "$BIN" post --to @cursor --state handoff \
+  -m $'# cursor-wake\n\ntake it' >/dev/null
+out=$(printf '{}' | AGENT_BUS_HOME="$BUS_HOME" AGENT_BUS_TOOL=cursor AGENT_BUS_WT=wake-map \
+  "$HOOK" stop)
+assert_contains "cursor stop followup_message" "cursor-wake" \
+  "$(echo "$out" | jq -r '.followup_message // empty')"
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 ((fail == 0))

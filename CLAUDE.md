@@ -31,10 +31,11 @@ A digest never marks packets read. Ack with `agent-bus read` or by replying
 
 ```sh
 agent-bus whoami                 # your seat: <tool>/<worktree>
-agent-bus who                    # live peers, PM, claims
+agent-bus who                    # live peers, PM, claims, watch
 agent-bus post --to @here --state needs-review --touched auto --file handoff.md
 agent-bus claim path/to/file     # before editing when another seat shares your worktree
 agent-bus role pm                # if you are supervising, not implementing
+agent-bus watch on               # when coordinating — Stop-hook wake on supervisory mail
 ```
 
 Rules:
@@ -46,6 +47,9 @@ Rules:
 3. Claims are advisory. `CONTESTED` → post a `question`, don't overwrite. Only the
    holder can `release` a live claim.
 4. Post before finishing a turn that changed code another seat cares about.
+5. When the user is coordinating multiple seats, `agent-bus watch on` so Stop
+   continues you on `needs-review` / `blocked` / `handoff` / `question` without
+   a manual poll loop. Turn it off when done.
 
 ## Layout
 

@@ -23,9 +23,13 @@ the last two hours, its branch, and what files it holds.
 | `codex/64ef` | that exact seat |
 | `@here` (default) | same repo **and** same worktree — the other window on your branch |
 | `@repo` | every seat in this repo, any worktree |
-| `@codex` / `@claude` | that tool's seats in this repo, any worktree |
+| `@codex` / `@claude` / `@cursor` | that tool's seats in this repo, any worktree |
 | `@pm` | the repo's registered PM seat, wherever it is |
 | `@all` | every seat on the machine |
+
+Scopes that mean "this repo" match on a stable `repo_id` (hash of the git common
+directory), not the directory basename. `agent-bus whoami` prints both. Legacy
+packets without `repo_id` still match on the display name.
 
 ## The PM role
 
@@ -111,8 +115,9 @@ agent-bus claims                    # who holds what
 agent-bus release --all             # dropped automatically at session end
 ```
 
-A claim never blocks anything. It expires after 4 hours. Contested output is a
-signal to post a `question` packet, not to give up.
+A claim never blocks anything. It expires after 4 hours. Only the holding seat
+can `release` a live claim (expired claims may be cleared by anyone). Contested
+output is a signal to post a `question` packet, not to give up.
 
 ## Agent rules
 
@@ -137,5 +142,10 @@ Everything lives in `~/.agents/bus/` and is never committed:
 read cursors), `state/roles/` (per-repo PM registry), `seats/` (peer registry),
 `claims/`.
 
-Install or remove the lifecycle hooks with `~/.agents/bus/install-hooks.sh`
-(`--uninstall` to revert; both config files are backed up in place).
+Install or remove the lifecycle hooks from this repo with `./install-hooks.sh`
+(`--uninstall` to revert; Claude, Codex, and Cursor config files are backed up
+in place). On a machine that still has the symlink,
+`~/.agents/bus/install-hooks.sh` is the same script.
+
+`agent-bus gc` prunes expired claims, stale seats, and message bodies older than
+`AGENT_BUS_GC_DAYS` (default 14). The ledger itself stays append-only.

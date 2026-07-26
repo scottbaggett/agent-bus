@@ -10,11 +10,15 @@ No daemon, no server, no network. One bash script, `jq`, and an append-only log.
 
 ```sh
 ln -sf "$PWD/bin/agent-bus" ~/.local/bin/agent-bus   # or anywhere on PATH
-./install-hooks.sh                                   # lifecycle hooks for Claude + Codex
+./install-hooks.sh                                   # lifecycle hooks for Claude, Codex, Cursor
 ```
 
-`install-hooks.sh` is idempotent and reversible (`--uninstall`); it backs up
-`~/.claude/settings.json` and `~/.codex/hooks.json` in place.
+`install-hooks.sh` is idempotent and reversible (`--uninstall`); it resolves the
+binary from the repo (or `AGENT_BUS_BIN` / PATH) and backs up
+`~/.claude/settings.json`, `~/.codex/hooks.json`, and `~/.cursor/hooks.json` in
+place. Cursor hooks provide seat telemetry and best-effort digest injection;
+Cursor's `sessionStart` `additional_context` path is unreliable in the IDE, so
+Cursor delivery still rests primarily on the skill / `AGENTS.md` layer.
 
 ## Use
 
@@ -51,8 +55,11 @@ with `--re`.
 | `@here` (default) | same repo **and** same worktree |
 | `@repo` | every seat in this repo, any worktree |
 | `@pm` | the repo's registered PM seat |
-| `@codex` / `@claude` | that tool's seats in this repo |
+| `@codex` / `@claude` / `@cursor` | that tool's seats in this repo |
 | `@all` | every seat on the machine |
+
+Repo matching uses a stable `repo_id` (hash of the git common dir), so two clones
+with the same basename do not share PM roles, claims, or `@repo` delivery.
 
 `@here` being worktree-local is the sharp edge. A packet sent `@here` never reaches a seat
 in another worktree, and that seat's `agent-bus read` honestly reports nothing unread —
@@ -77,7 +84,9 @@ Machine-global on purpose, so one bus spans every repo and worktree on the box.
 ## Design notes
 
 - **Claims are advisory.** Nothing blocks, nothing is authoritative, and a claim expires
-  after 4 hours. Contested output is a signal to post a `question`, not to stop.
+  after 4 hours. Only the holding seat can `release` a live claim. Contested output is a
+  signal to post a `question`, not to stop.
+- **`agent-bus gc`** prunes expired claims, stale seats, and old message bodies.
 - **Two delivery layers.** Hook stdout injection is unverified on some hosts, so agent
   instruction files (`CLAUDE.md`, `AGENTS.md`) also tell agents to read the bus at session
   start. Either layer alone suffices.

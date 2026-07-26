@@ -25,9 +25,13 @@ LEDGER="$BUS/ledger.jsonl"
 LOOKBACK_DAYS="${AGENT_BUS_LOOKBACK_DAYS:-3}"
 SEAT_TTL="${AGENT_BUS_SEAT_TTL:-7200}"
 CLAIM_TTL="${AGENT_BUS_CLAIM_TTL:-14400}"
+GC_DAYS="${AGENT_BUS_GC_DAYS:-14}"
 
 die() { printf 'agent-bus: %s\n' "$1" >&2; exit 1; }
-command -v jq >/dev/null 2>&1 || die "jq is required"
+require_cmd() { command -v "$1" >/dev/null 2>&1 || die "$1 is required"; }
+require_cmd jq
+require_cmd shasum
+require_cmd xxd
 
 ensure_bus() { mkdir -p "$BUS/msg" "$BUS/state" "$BUS/state/roles" "$BUS/seats" "$BUS/claims"; : >>"$LEDGER"; }
 
@@ -65,7 +69,10 @@ resolve_identity() {
     local gd cd_
     gd=$(cd "$TOP" && git rev-parse --absolute-git-dir)
     cd_=$(cd "$TOP" && cd "$(git rev-parse --git-common-dir)" && pwd)
+    # Display name stays human-readable; stable id is a hash of the git common dir so
+    # two clones with the same basename don't share PM roles or claims.
     REPO=$(basename "$(dirname "$cd_")")
+    REPO_ID=$(printf '%s' "$cd_" | shasum -a 256 | cut -c1-16)
     if [ "$gd" = "$cd_" ]; then
       WT=main
     else
@@ -78,7 +85,12 @@ resolve_identity() {
     [ "$BRANCH" = "HEAD" ] && BRANCH="detached@$(cd "$TOP" && git rev-parse --short HEAD)"
   else
     REPO='-'; WT=$(basename "$PWD"); BRANCH='-'; TOP="$PWD"
+    REPO_ID=$(printf '%s' "$TOP" | shasum -a 256 | cut -c1-16)
   fi
+
+  # Optional overrides for tests / explicit seat pinning.
+  [ -n "${AGENT_BUS_WT:-}" ] && WT="$AGENT_BUS_WT"
+  [ -n "${AGENT_BUS_REPO_ID:-}" ] && REPO_ID="$AGENT_BUS_REPO_ID"
 
   ADDR="$TOOL/$WT"
   SEAT=$(slugify "$ADDR")
@@ -99,11 +111,12 @@ touch_seat() {
   fi
   [ "$via" = hook ] && prev_hook="$now" || prev_cli="$now"
   jq -n -c \
-    --arg addr "$ADDR" --arg tool "$TOOL" --arg repo "$REPO" --arg wt "$WT" \
-    --arg branch "$BRANCH" --arg cwd "$TOP" --arg session "$SESSION" --arg via "$via" \
-    --argjson epoch "$now" --argjson last_hook "$prev_hook" --argjson last_cli "$prev_cli" \
-    '{addr:$addr,tool:$tool,repo:$repo,wt:$wt,branch:$branch,cwd:$cwd,session:$session,
-      via:$via,epoch:$epoch,last_hook:$last_hook,last_cli:$last_cli}' >"$f.tmp"
+    --arg addr "$ADDR" --arg tool "$TOOL" --arg repo "$REPO" --arg repo_id "$REPO_ID" \
+    --arg wt "$WT" --arg branch "$BRANCH" --arg cwd "$TOP" --arg session "$SESSION" \
+    --arg via "$via" --argjson epoch "$now" --argjson last_hook "$prev_hook" \
+    --argjson last_cli "$prev_cli" \
+    '{addr:$addr,tool:$tool,repo:$repo,repo_id:$repo_id,wt:$wt,branch:$branch,cwd:$cwd,
+      session:$session,via:$via,epoch:$epoch,last_hook:$last_hook,last_cli:$last_cli}' >"$f.tmp"
   mv "$f.tmp" "$f"
 }
 
@@ -151,25 +164,46 @@ resolved_ids() { jq -sc '[.[] | select(.kind=="resolve") | .msg]' "$LEDGER"; }
 
 # ------------------------------------------------------------------- roles
 
-pm_file() { printf '%s/state/roles/%s.pm' "$BUS" "$(slugify "${1:-$REPO}")"; }
-
-# Seat address of the repo's PM, or empty. Never fails — callers treat "" as none.
-pm_seat() {
-  local f; f=$(pm_file "${1:-$REPO}")
-  if [ -f "$f" ]; then cat "$f"; else printf ''; fi
+# Stable key for PM/claims. Prefer repo_id; legacy callers may pass a display name.
+pm_file() {
+  local key="${1:-$REPO_ID}"
+  printf '%s/state/roles/%s.pm' "$BUS" "$(slugify "$key")"
 }
 
+# Seat address of the repo's PM, or empty. Never fails — callers treat "" as none.
+# Migrates legacy name-based role files (pre-repo_id) on first read.
+pm_seat() {
+  local id_f name_f
+  id_f=$(pm_file "${1:-$REPO_ID}")
+  if [ -f "$id_f" ]; then cat "$id_f"; return; fi
+  # Only migrate when looking up the current repo (no explicit override).
+  if [ -z "${1:-}" ]; then
+    name_f=$(pm_file "$REPO")
+    if [ -f "$name_f" ]; then
+      cp "$name_f" "$id_f"
+      cat "$id_f"
+      return
+    fi
+  fi
+  printf ''
+}
+
+# True when a ledger message belongs to this clone. New packets carry repo_id;
+# older packets fall back to the display name (may collide across same-named clones).
 # Messages this seat should see: addressed to it (directly or by scope),
 # not sent by it, not resolved, not already read, within the lookback window.
 select_unread() {
   local include_read="${1:-0}" digest_mode="${2:-0}" cut
   cut=$(( $(now_epoch) - LOOKBACK_DAYS * 86400 ))
   jq -c \
-    --arg addr "$ADDR" --arg tool "$TOOL" --arg repo "$REPO" --arg wt "$WT" \
-    --arg pm "$(pm_seat)" --argjson pmStates "$PM_STATES" \
+    --arg addr "$ADDR" --arg tool "$TOOL" --arg repo "$REPO" --arg repoId "$REPO_ID" \
+    --arg wt "$WT" --arg pm "$(pm_seat)" --argjson pmStates "$PM_STATES" \
     --argjson cut "$cut" --argjson read "$(read_ids)" --argjson resolved "$(resolved_ids)" \
     --argjson includeRead "$include_read" --argjson digest "$digest_mode" \
     --argjson shown "$(shown_counts)" --argjson maxShows "$MAX_SHOWS" '
+    def same_repo:
+      (((.repo_id // "") != "") and (.repo_id == $repoId))
+      or (((.repo_id // "") == "") and (.repo == $repo));
     select(.kind == "msg")
     | . as $m
     | select($m.epoch >= $cut)
@@ -177,13 +211,13 @@ select_unread() {
     | select(
         $m.to == $addr
         or $m.to == "@all"
-        or ($m.to == "@here" and $m.repo == $repo and $m.wt == $wt)
-        or ($m.to == "@repo" and $m.repo == $repo)
-        or ($m.to == ("@" + $tool) and $m.repo == $repo)
-        or ($m.to == "@pm" and $pm == $addr and $m.repo == $repo)
+        or ($m.to == "@here" and ($m | same_repo) and $m.wt == $wt)
+        or ($m.to == "@repo" and ($m | same_repo))
+        or ($m.to == ("@" + $tool) and ($m | same_repo))
+        or ($m.to == "@pm" and $pm == $addr and ($m | same_repo))
         # Supervisory auto-CC: the PM sees lifecycle traffic anywhere in the repo,
         # because senders default to @here and a PM is never in their worktree.
-        or ($pm == $addr and $m.repo == $repo and ($pmStates | index($m.state)))
+        or ($pm == $addr and ($m | same_repo) and ($pmStates | index($m.state)))
       )
     | select($resolved | index($m.id) | not)
     | select($includeRead == 1 or ($read | index($m.id) | not))
@@ -193,7 +227,7 @@ select_unread() {
 
 # ------------------------------------------------------------------ claims
 
-claim_key() { printf '%s' "$1:$2" | shasum -a 256 | cut -c1-16; }
+claim_key() { printf '%s' "$1:$2" | shasum -a 256 | cut -c1-16; } # args: repo_id path
 
 # Repo-relative where possible so the same file claimed from two worktrees collides.
 normalize_path() {
@@ -216,8 +250,8 @@ live_claims() {
 # ---------------------------------------------------------------- commands
 
 cmd_whoami() {
-  printf 'seat     %s\nsession  %s\nrepo     %s\nworktree %s\nbranch   %s\ncwd      %s\nbus      %s\n' \
-    "$ADDR" "$SESSION" "$REPO" "$WT" "$BRANCH" "$TOP" "$BUS"
+  printf 'seat     %s\nsession  %s\nrepo     %s\nrepo_id  %s\nworktree %s\nbranch   %s\ncwd      %s\nbus      %s\n' \
+    "$ADDR" "$SESSION" "$REPO" "$REPO_ID" "$WT" "$BRANCH" "$TOP" "$BUS"
 }
 
 cmd_who() {
@@ -286,10 +320,12 @@ cmd_post() {
   rec=$(jq -n -c \
     --arg id "$id" --arg ts "$(now_iso)" --argjson epoch "$(now_epoch)" \
     --arg from "$ADDR" --arg session "$SESSION" --arg to "$to" --arg state "$state" \
-    --arg repo "$REPO" --arg wt "$WT" --arg branch "$BRANCH" --arg cwd "$TOP" \
-    --arg subject "${subject:0:200}" --argjson touched "$touched" --argjson re "$re" \
+    --arg repo "$REPO" --arg repo_id "$REPO_ID" --arg wt "$WT" --arg branch "$BRANCH" \
+    --arg cwd "$TOP" --arg subject "${subject:0:200}" --argjson touched "$touched" \
+    --argjson re "$re" \
     '{kind:"msg",id:$id,ts:$ts,epoch:$epoch,from:$from,session:$session,to:$to,state:$state,
-      repo:$repo,wt:$wt,branch:$branch,cwd:$cwd,subject:$subject,touched:$touched,re:$re}')
+      repo:$repo,repo_id:$repo_id,wt:$wt,branch:$branch,cwd:$cwd,subject:$subject,
+      touched:$touched,re:$re}')
   ledger_append "$rec"
   # Replying is proof the agent saw the parent, so it counts as the ack a
   # hook-run digest can never give.
@@ -390,7 +426,7 @@ cmd_claim() {
   [ $# -ge 1 ] || die "claim: needs one or more paths"
   for p in "$@"; do
     local np key f
-    np=$(normalize_path "$p"); key=$(claim_key "$REPO" "$np"); f="$BUS/claims/$key.json"
+    np=$(normalize_path "$p"); key=$(claim_key "$REPO_ID" "$np"); f="$BUS/claims/$key.json"
     if [ -f "$f" ]; then
       local holder hepoch cut=$(( $(now_epoch) - CLAIM_TTL ))
       holder=$(jq -r '.addr' "$f"); hepoch=$(jq -r '.epoch' "$f")
@@ -399,11 +435,12 @@ cmd_claim() {
         continue
       fi
     fi
-    jq -n -c --arg addr "$ADDR" --arg repo "$REPO" --arg path "$np" --arg branch "$BRANCH" \
-      --argjson epoch "$(now_epoch)" \
-      '{addr:$addr,repo:$repo,path:$path,branch:$branch,epoch:$epoch}' >"$f"
-    ledger_append "$(jq -n -c --arg addr "$ADDR" --arg repo "$REPO" --arg path "$np" \
-      --argjson epoch "$(now_epoch)" '{kind:"claim",addr:$addr,repo:$repo,path:$path,epoch:$epoch}')"
+    jq -n -c --arg addr "$ADDR" --arg repo "$REPO" --arg repo_id "$REPO_ID" \
+      --arg path "$np" --arg branch "$BRANCH" --argjson epoch "$(now_epoch)" \
+      '{addr:$addr,repo:$repo,repo_id:$repo_id,path:$path,branch:$branch,epoch:$epoch}' >"$f"
+    ledger_append "$(jq -n -c --arg addr "$ADDR" --arg repo "$REPO" --arg repo_id "$REPO_ID" \
+      --arg path "$np" --argjson epoch "$(now_epoch)" \
+      '{kind:"claim",addr:$addr,repo:$repo,repo_id:$repo_id,path:$path,epoch:$epoch}')"
     printf 'claimed %s\n' "$np"
   done
 }
@@ -419,15 +456,30 @@ cmd_release() {
   fi
   [ $# -ge 1 ] || die "release: needs paths or --all"
   for p in "$@"; do
-    local np key; np=$(normalize_path "$p"); key=$(claim_key "$REPO" "$np")
-    rm -f "$BUS/claims/$key.json"; printf 'released %s\n' "$np"
+    local np key f holder hepoch cut
+    np=$(normalize_path "$p"); key=$(claim_key "$REPO_ID" "$np"); f="$BUS/claims/$key.json"
+    if [ ! -f "$f" ]; then
+      printf 'released %s (not held)\n' "$np"
+      continue
+    fi
+    holder=$(jq -r '.addr' "$f"); hepoch=$(jq -r '.epoch' "$f")
+    cut=$(( $(now_epoch) - CLAIM_TTL ))
+    if [ "$holder" != "$ADDR" ] && ((hepoch >= cut)); then
+      printf 'agent-bus: %s held by %s — not releasing\n' "$np" "$holder" >&2
+      continue
+    fi
+    rm -f "$f"; printf 'released %s\n' "$np"
   done
 }
 
 cmd_claims() {
   local c; c=$(live_claims)
   [ -n "$c" ] || { printf '(no active claims)\n'; return; }
-  printf '%s\n' "$c" | jq -r '"\(.addr)\t\(.repo)\t\(.path)"' | column -t -s "$(printf '\t')"
+  if command -v column >/dev/null 2>&1; then
+    printf '%s\n' "$c" | jq -r '"\(.addr)\t\(.repo)\t\(.path)"' | column -t -s "$(printf '\t')"
+  else
+    printf '%s\n' "$c" | jq -r '"\(.addr)  \(.repo)  \(.path)"'
+  fi
 }
 
 cmd_log() {
@@ -478,40 +530,81 @@ cmd_doctor() {
 }
 
 cmd_role() {
-  local clear=0 repo="$REPO" role=''
+  local clear=0 role='' key="$REPO_ID" label="$REPO"
   while [ $# -gt 0 ]; do
     case "$1" in
       --clear) clear=1; shift ;;
-      --repo) repo="$2"; shift 2 ;;
+      --repo) label="$2"; key="$2"; shift 2 ;;
       pm) role=pm; shift ;;
-      *) die "role: unknown argument $1 (expected: pm, --clear, --repo <name>)" ;;
+      *) die "role: unknown argument $1 (expected: pm, --clear, --repo <name-or-id>)" ;;
     esac
   done
 
-  local f cur; f=$(pm_file "$repo"); cur=$(pm_seat "$repo")
+  local f cur legacy_f=""
+  f=$(pm_file "$key"); cur=$(pm_seat "$key")
+  [ "$key" = "$REPO_ID" ] && legacy_f=$(pm_file "$REPO")
 
   if ((clear)); then
-    if [ -z "$cur" ]; then printf 'no PM registered for %s\n' "$repo"; return; fi
-    [ "$cur" = "$ADDR" ] || printf 'agent-bus: releasing PM held by another seat (%s)\n' "$cur" >&2
+    if [ -z "$cur" ] && { [ -z "$legacy_f" ] || [ ! -f "$legacy_f" ]; }; then
+      printf 'no PM registered for %s\n' "$label"; return
+    fi
+    [ -z "$cur" ] || [ "$cur" = "$ADDR" ] || \
+      printf 'agent-bus: releasing PM held by another seat (%s)\n' "$cur" >&2
     rm -f "$f"
-    printf 'PM role cleared for %s\n' "$repo"
+    [ -n "$legacy_f" ] && rm -f "$legacy_f"
+    printf 'PM role cleared for %s\n' "$label"
     return
   fi
 
   if [ -z "$role" ]; then
-    if [ -n "$cur" ]; then printf 'PM for %s: %s\n' "$repo" "$cur"
-    else printf 'no PM registered for %s\n' "$repo"; fi
+    if [ -n "$cur" ]; then printf 'PM for %s: %s\n' "$label" "$cur"
+    else printf 'no PM registered for %s\n' "$label"; fi
     return
   fi
 
   mkdir -p "$(dirname "$f")"
   printf '%s' "$ADDR" >"$f"
+  [ -n "$legacy_f" ] && rm -f "$legacy_f"
   if [ -n "$cur" ] && [ "$cur" != "$ADDR" ]; then
-    printf 'PM for %s: %s (took over from %s)\n' "$repo" "$ADDR" "$cur"
+    printf 'PM for %s: %s (took over from %s)\n' "$label" "$ADDR" "$cur"
   else
-    printf 'PM for %s: %s\n' "$repo" "$ADDR"
+    printf 'PM for %s: %s\n' "$label" "$ADDR"
   fi
   printf 'now receiving needs-review, blocked, handoff, question from any worktree\n'
+}
+
+# Drop expired claims, stale seats, and message bodies older than GC_DAYS whose
+# ledger rows are outside the lookback window. Ledger lines are kept (append-only)
+# but orphaned bodies and dead registry files are removed.
+cmd_gc() {
+  local cut_claim=$(( $(now_epoch) - CLAIM_TTL ))
+  local cut_seat=$(( $(now_epoch) - SEAT_TTL ))
+  local cut_msg=$(( $(now_epoch) - GC_DAYS * 86400 ))
+  local n_claim=0 n_seat=0 n_msg=0
+
+  for f in "$BUS"/claims/*.json; do
+    [ -f "$f" ] || continue
+    local e; e=$(jq -r '.epoch // 0' "$f" 2>/dev/null || echo 0)
+    if ((e < cut_claim)); then rm -f "$f"; n_claim=$((n_claim + 1)); fi
+  done
+
+  for f in "$BUS"/seats/*.json; do
+    [ -f "$f" ] || continue
+    local e; e=$(jq -r '.epoch // 0' "$f" 2>/dev/null || echo 0)
+    if ((e < cut_seat)); then rm -f "$f"; n_seat=$((n_seat + 1)); fi
+  done
+
+  # Remove body files for messages older than GC_DAYS. Keep ledger rows for history.
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    [ -f "$BUS/msg/$id.md" ] || continue
+    rm -f "$BUS/msg/$id.md"
+    n_msg=$((n_msg + 1))
+  done < <(jq -r --argjson cut "$cut_msg" \
+    'select(.kind=="msg" and .epoch < $cut) | .id' "$LEDGER" 2>/dev/null || true)
+
+  printf 'gc: removed %s expired claims, %s stale seats, %s old message bodies (>%sd)\n' \
+    "$n_claim" "$n_seat" "$n_msg" "$GC_DAYS"
 }
 
 usage() {
@@ -521,7 +614,7 @@ agent-bus — handoff bus for coding agents sharing repos/worktrees.
   whoami                          show this seat's identity
   who                             list active seats and their claims
   post [flags]                    post a handoff packet
-      --to <seat|@here|@repo|@pm|@all|@codex|@claude>   default @here
+      --to <seat|@here|@repo|@pm|@all|@codex|@claude|@cursor>   default @here
       --state needs-review|blocked|done|fyi|question|handoff
       --subject <text>            defaults to the body's first line
       -m <body> | --file <f> | (stdin)
@@ -531,15 +624,16 @@ agent-bus — handoff bus for coding agents sharing repos/worktrees.
   show <msg-id>                   full record + body
   resolve <msg-id>...             close a packet for every seat
   claim <path>...                 take an advisory claim (warns if contested)
-  release <path>... | --all       drop claims
+  release <path>... | --all       drop claims (own claims only)
   claims                          list active claims
   log [n]                         recent packets
   role [pm] [--repo <r>] [--clear]  show/take/release the repo's PM seat
   doctor                          bus health
+  gc                              prune expired claims, stale seats, old bodies
 
 Scopes: @here = same repo+worktree, @repo = same repo any worktree,
-@pm = the repo's registered PM seat, @codex/@claude = that tool in this repo,
-@all = everyone.
+@pm = the repo's registered PM seat, @codex/@claude/@cursor = that tool in this
+repo, @all = everyone. Repo matching uses a stable repo_id (git common-dir hash).
 
 PM role: one seat per repo may hold it (agent-bus role pm). A PM additionally
 receives every needs-review, blocked, handoff, and question packet in the repo
@@ -568,6 +662,7 @@ case "$cmd" in
   log) cmd_log "$@" ;;
   role) touch_seat; cmd_role "$@" ;;
   doctor) cmd_doctor ;;
+  gc) cmd_gc ;;
   help|-h|--help) usage ;;
   *) usage; exit 1 ;;
 esac

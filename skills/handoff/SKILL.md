@@ -63,10 +63,10 @@ agent-bus post --to @here --state needs-review --touched auto --file /tmp/handof
 Choose `--to` deliberately:
 
 - `@here` — the other window on this same branch (the usual case)
-- `@codex` / `@claude` — that tool anywhere in this repo
+- `@codex` / `@claude` / `@cursor` — that tool anywhere in this repo
 - `codex/<worktree>` — one specific seat, from `agent-bus who`
 - `@pm` — the repo's supervising seat, if one is registered (`agent-bus role`)
-- `@repo` — everyone in the repo; use sparingly, it interrupts unrelated work
+- `@repo` — everyone in this clone (stable `repo_id`); use sparingly
 
 `@here` is worktree-local. A packet sent `@here` never reaches a seat in another
 worktree, and that seat's `agent-bus read` will honestly report nothing unread —
@@ -103,7 +103,8 @@ agent-bus claim <paths...>
 
 Claim before editing when `agent-bus who` shows another seat on your worktree.
 If output says `CONTESTED`, do not silently proceed — post a `question` packet to
-the holder and tell the user there's an overlap.
+the holder and tell the user there's an overlap. Only the holder can
+`agent-bus release` a live claim.
 
 ### "that's handled / close it out"
 

@@ -1,0 +1,9 @@
+# Runtime state lives in ~/.agents/bus/, never here. These patterns exist so a
+# stray copy or a symlinked bus directory can't be committed by accident.
+ledger.jsonl
+msg/
+seats/
+claims/
+state/
+*.bak
+.DS_Store

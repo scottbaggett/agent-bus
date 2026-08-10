@@ -1043,10 +1043,22 @@ cmd_stop_hook() {
   bump_wake "$WAKE_IDS"
   set_wake_pending 0
 
-  jq -n -c \
-    --arg reason "$WAKE_REASON" \
-    --arg msg "agent-bus: $WAKE_COUNT supervisory packet(s) — continuing (wake $(wake_count)/$WAKE_BUDGET)" \
-    '{decision:"block",reason:$reason,systemMessage:$msg}'
+  local msg="agent-bus: $WAKE_COUNT supervisory packet(s) — continuing (wake $(wake_count)/$WAKE_BUDGET)"
+  # Claude and Codex read different Stop-hook continuation shapes. Claude blocks
+  # on `reason`; Codex ignores a block whose object carries no `prompt` (it logs
+  # "Stop hook requested continuation without a prompt; ignoring the block"), so
+  # the same {decision,reason} that wakes Claude is silently dropped by Codex.
+  # Emit `prompt` alongside `reason` so one object satisfies both hosts.
+  case "$TOOL" in
+    codex)
+      jq -n -c --arg reason "$WAKE_REASON" --arg msg "$msg" \
+        '{decision:"block",prompt:$reason,reason:$reason,systemMessage:$msg}'
+      ;;
+    *)
+      jq -n -c --arg reason "$WAKE_REASON" --arg msg "$msg" \
+        '{decision:"block",reason:$reason,systemMessage:$msg}'
+      ;;
+  esac
 }
 
 usage() {

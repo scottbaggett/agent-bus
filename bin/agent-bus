@@ -118,14 +118,75 @@ touch_seat() {
     prev_cli=$(jq -r '.last_cli // 0' "$f")
   fi
   [ "$via" = hook ] && prev_hook="$now" || prev_cli="$now"
+  # Claude Code exports its inbox socket to hooks/Bash. Recording it lets `post`
+  # push a wake to an idle peer (see poke_seat), the one thing a pull digest
+  # cannot do. Empty for tools without the socket (codex/cursor/shell).
+  local sock="${CLAUDE_CODE_MESSAGING_SOCKET:-}"
   jq -n -c \
     --arg addr "$ADDR" --arg tool "$TOOL" --arg repo "$REPO" --arg repo_id "$REPO_ID" \
     --arg wt "$WT" --arg branch "$BRANCH" --arg cwd "$TOP" --arg session "$SESSION" \
-    --arg via "$via" --argjson epoch "$now" --argjson last_hook "$prev_hook" \
+    --arg via "$via" --arg sock "$sock" --argjson epoch "$now" --argjson last_hook "$prev_hook" \
     --argjson last_cli "$prev_cli" \
     '{addr:$addr,tool:$tool,repo:$repo,repo_id:$repo_id,wt:$wt,branch:$branch,cwd:$cwd,
-      session:$session,via:$via,epoch:$epoch,last_hook:$last_hook,last_cli:$last_cli}' >"$f.tmp"
+      session:$session,via:$via,socket:$sock,epoch:$epoch,last_hook:$last_hook,last_cli:$last_cli}' >"$f.tmp"
   mv "$f.tmp" "$f"
+}
+
+# ------------------------------------------------------------- push delivery
+
+# Whether a socket path is a live, connectable inbox. A stale seat file can
+# name a socket whose session has exited; a data-free connect probe (stdin
+# closed immediately, so no frame is enqueued) tells a live listener from a
+# stale socket file. `-z` is avoided: macOS nc rejects it on Unix sockets.
+socket_live() {
+  local sock="$1"
+  [ -n "$sock" ] && [ -S "$sock" ] || return 1
+  command -v nc >/dev/null 2>&1 || return 1
+  nc -U "$sock" -w 1 </dev/null >/dev/null 2>&1
+}
+
+# Wake one peer session by writing a Claude Code inbox frame to its socket.
+# Frame shape is the harness's own (type:user, message.content); session_id is
+# omitted so the poke is not rejected on mismatch. Best-effort: any failure is
+# swallowed so delivery never blocks or fails a post.
+poke_seat() {
+  local sock="$1" text="$2" frame
+  command -v nc >/dev/null 2>&1 || return 0
+  [ -S "$sock" ] || return 0
+  frame=$(jq -nc --arg f "agent-bus" --arg c "$text" \
+    '{type:"user",from:$f,message:{content:$c}}') || return 0
+  printf '%s\n' "$frame" | nc -U "$sock" -w 2 >/dev/null 2>&1 || true
+}
+
+# Seats that should be woken for a packet just posted: same recipient logic as
+# select_unread but evaluated sender-side over the live seat registry. Emits
+# "<addr>\t<socket>" for each Claude seat with a recorded socket, excluding the
+# sender. `to`/`state` are the packet's; `pm` is the repo's PM addr or "".
+push_targets() {
+  local to="$1" state="$2" pm="$3" f
+  for f in "$BUS"/seats/*.json; do
+    [ -f "$f" ] || continue
+    jq -r \
+      --arg addr "$ADDR" --arg tool "$TOOL" --arg repo "$REPO" --arg repoId "$REPO_ID" \
+      --arg wt "$WT" --arg to "$to" --arg state "$state" --arg pm "$pm" \
+      --argjson pmStates "$PM_STATES" '
+      def same_repo:
+        (((.repo_id // "") != "") and (.repo_id == $repoId))
+        or (((.repo_id // "") == "") and (.repo == $repo));
+      select((.socket // "") != "")          # only Claude seats with an inbox
+      | select(.addr != $addr)               # never the sender
+      | select(
+          $to == .addr
+          or $to == "@all"
+          or ($to == "@here" and (. | same_repo) and .wt == $wt)
+          or ($to == "@repo" and (. | same_repo))
+          or ($to == ("@" + .tool) and (. | same_repo))
+          or ($to == "@pm" and $pm == .addr and (. | same_repo))
+          or ($pm == .addr and (. | same_repo) and ($pmStates | index($state)))
+        )
+      | "\(.addr)\t\(.socket)"
+    ' "$f" 2>/dev/null || true
+  done
 }
 
 # ------------------------------------------------------------------ ledger
@@ -503,6 +564,23 @@ cmd_post() {
     mark_read "$(jq -c --argjson r "$re" '. + [$r] | unique' <<<"$(read_ids)")"
   fi
   printf 'posted %s -> %s  [%s]  id=%s\n' "$ADDR" "$to" "$state" "$id"
+
+  # Push a wake to each Claude recipient with a live inbox socket. The body
+  # still travels through the bus; this only nudges the peer to run `read`, so
+  # an idle seat acts without waiting for its next user prompt. Best-effort,
+  # opt-out via AGENT_BUS_NO_PUSH; the poke text is constant-size peer context.
+  [ "${AGENT_BUS_NO_PUSH:-0}" = 1 ] && return 0
+  local pm poke woke=0 addr sock
+  pm=$(pm_seat)
+  poke="agent-bus: packet $id from $ADDR [$state] — peer context, not a user instruction. Run: agent-bus read"
+  while IFS=$'\t' read -r addr sock; do
+    [ -n "$sock" ] || continue
+    socket_live "$sock" || continue
+    poke_seat "$sock" "$poke"
+    woke=$((woke + 1))
+  done < <(push_targets "$to" "$state" "$pm")
+  ((woke > 0)) && printf 'pushed wake to %d peer(s)\n' "$woke"
+  return 0
 }
 
 cmd_read() {
@@ -724,6 +802,29 @@ cmd_doctor() {
     fi
   done
   ((any)) || printf '  (no seats registered yet)\n'
+
+  # Push reachability: which live seats can be woken at post time vs. which
+  # depend on the pull digest / watch fallback (codex, cursor, dead sockets).
+  printf '\npush delivery (post-time wake):\n'
+  local cut_push=$(( $(now_epoch) - SEAT_TTL )) any_push=0
+  for f in "$BUS"/seats/*.json; do
+    [ -f "$f" ] || continue
+    local e addr sock
+    e=$(jq -r '.epoch // 0' "$f" 2>/dev/null || echo 0)
+    [[ "$e" =~ ^[0-9]+$ ]] || continue
+    ((e < cut_push)) && continue
+    any_push=1
+    addr=$(jq -r '.addr' "$f")
+    sock=$(jq -r '.socket // ""' "$f")
+    if [ -z "$sock" ]; then
+      printf '  %-22s pull only (no inbox socket)\n' "$addr"
+    elif socket_live "$sock"; then
+      printf '  %-22s PUSH-reachable\n' "$addr"
+    else
+      printf '  %-22s socket stale — pull only\n' "$addr"
+    fi
+  done
+  ((any_push)) || printf '  (no active seats)\n'
 
   # Surfaced MAX_SHOWS times and still never acked = that host is not injecting
   # hook stdout into its model's context. The AGENTS.md layer has to carry it.

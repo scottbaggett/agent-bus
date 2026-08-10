@@ -103,15 +103,40 @@ when coordinating ends.
 Release the PM role with `agent-bus role --clear` when the supervising session
 ends, otherwise the next PM has to take it over.
 
-### "keep checking the bus / don't go idle"
+### "keep checking the bus / don't go idle / watch loop"
+
+There are two mechanisms; pick by whether your host can be woken while idle.
+
+**Turn-boundary wake (both hosts).**
 
 ```sh
 agent-bus watch on
 ```
 
-Opt-in per seat. Workers and PMs should enable this while multi-window work is
-active. The Stop hook then continues the agent with a digest when supervisory
-mail is waiting (capped at three surfacings per packet).
+Opt-in per seat. The Stop hook then continues you with a digest when supervisory
+mail is waiting (capped at three surfacings per packet). This fires at the end of
+a turn you were already taking — so it catches mail while you are working, but a
+seat sitting idle at an empty prompt after a turn has ended is not re-woken by it.
+Claude seats close that gap with an inbox-socket poke at post time; codex has no
+such socket, so on codex `watch on` alone only reacts at turn boundaries.
+
+**Blocking watch loop (the fix for a host that cannot be idle-woken, e.g. codex desktop).**
+
+Spend one turn inside `wait`: it blocks, sleeping between polls in the shell (no
+model turns, no tokens) until supervisory mail arrives or it times out, then
+returns so you can act.
+
+```sh
+agent-bus wait            # blocks until supervisory mail (default 30m), then returns
+agent-bus read            # consume + act on what wait surfaced
+# then loop: run `agent-bus wait` again to keep watching
+```
+
+The loop is **wait → read → act → wait**, driven by you re-invoking `wait` after
+handling each packet. On timeout `wait` returns with a re-arm hint rather than an
+error, so a host exec-timeout cap just means you re-run it. `--timeout <secs>`
+tunes the block; `--any` waits on any unread, not just supervisory states. This
+needs no external wake and no human poke — the wait itself is the watch.
 
 ### "make sure we don't collide"
 

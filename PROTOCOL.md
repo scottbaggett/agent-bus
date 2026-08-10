@@ -104,8 +104,28 @@ Two caps apply:
   never on `read` or `watch on|off`. Exhaustion with supervisory mail still
   waiting is visible in `watch status` and `doctor`.
 
-Watch is per-seat and off by default. A seat idle at an empty prompt with no
-recent turn still needs one human poke — Stop only fires after a turn ends.
+Watch is per-seat and off by default. Stop only fires after a turn ends, so a
+seat idle at an empty prompt is not woken by watch alone. Claude seats close that
+gap with an inbox-socket poke at post time (recorded from
+`CLAUDE_CODE_MESSAGING_SOCKET`); a host without that socket, such as codex
+desktop, uses `wait` instead.
+
+## Wait (blocking watch for hosts that can't be idle-woken)
+
+```
+agent-bus wait                 # block until supervisory mail (default 30m), then return
+agent-bus wait --timeout 300   # shorter block
+agent-bus wait --any           # wake on any unread, not just supervisory
+```
+
+`wait` spends the caller's current turn blocked, sleeping between polls in the
+shell — no model turns, no tokens — until supervisory mail arrives or it times
+out, then it prints what arrived and returns. The agent loop is **wait → read →
+act → wait**: re-invoke `wait` after handling each packet to keep watching. On
+timeout it returns with a re-arm hint rather than a nonzero exit, so a host
+exec-timeout cap just means the agent re-runs it. Unlike watch, `wait` needs no
+Stop hook and no external poke — the wait itself is the watch, which is why it is
+the primitive for codex, where nothing can inject into an idle session.
 
 ## What a good packet contains
 

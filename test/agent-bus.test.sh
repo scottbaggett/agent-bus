@@ -258,5 +258,51 @@ REPO_ID=$(awk '/^repo_id/{print $2}' <<<"$("$BIN" whoami)")
 [ -f "$BUS_HOME/state/roles/${REPO_ID}.pm" ]
 assert_eq "legacy PM migrated to repo_id file" "0" "$?"
 
+# --- wait + stop-hook shapes (isolated bus home; the shared ledger above would
+#     bleed earlier supervisory packets into these seats) ---
+WAIT_HOME=$(mktemp -d)
+SAVED_HOME="$AGENT_BUS_HOME"
+export AGENT_BUS_HOME="$WAIT_HOME"
+
+# Timeout path returns with a re-arm hint and no packets.
+out=$(AGENT_BUS_TOOL=codex AGENT_BUS_WT=waiter "$BIN" wait --timeout 1 --interval 1 2>&1)
+assert_contains "wait times out with re-arm hint" "Re-arm: agent-bus wait" "$out"
+assert_not_contains "wait timeout surfaces no packet" "packet(s) waiting" "$out"
+
+# Arrival path: a supervisory packet posted mid-wait is surfaced and wait returns.
+( sleep 1; AGENT_BUS_TOOL=claude AGENT_BUS_WT=poster "$BIN" post \
+    --to codex/waiter --state needs-review -m "wake the waiter" >/dev/null 2>&1 ) &
+out=$(AGENT_BUS_TOOL=codex AGENT_BUS_WT=waiter "$BIN" wait --timeout 10 --interval 1 2>&1)
+wait
+assert_contains "wait returns on supervisory arrival" "packet(s) waiting for codex/waiter" "$out"
+assert_contains "wait surfaces the packet subject" "wake the waiter" "$out"
+
+# --any surfaces a non-supervisory packet; supervisory-only wait skips it.
+AGENT_BUS_TOOL=claude AGENT_BUS_WT=poster "$BIN" post \
+  --to codex/quiet --state fyi -m "just an fyi" >/dev/null 2>&1
+out=$(AGENT_BUS_TOOL=codex AGENT_BUS_WT=quiet "$BIN" wait --any --timeout 1 --interval 1 2>&1)
+assert_contains "wait --any surfaces fyi" "just an fyi" "$out"
+out=$(AGENT_BUS_TOOL=codex AGENT_BUS_WT=quiet "$BIN" wait --timeout 1 --interval 1 2>&1)
+assert_not_contains "supervisory wait skips fyi" "packet(s) waiting" "$out"
+
+# codex Stop-hook continuation carries the `prompt` field codex requires;
+# claude's does not (jq without -e prints a single true/false line).
+AGENT_BUS_TOOL=claude AGENT_BUS_WT=poster "$BIN" post \
+  --to codex/stoptest --state needs-review -m "continue me" >/dev/null 2>&1
+AGENT_BUS_TOOL=codex AGENT_BUS_WT=stoptest "$BIN" watch on >/dev/null 2>&1
+out=$(echo '{}' | AGENT_BUS_TOOL=codex AGENT_BUS_WT=stoptest "$BIN" stop-hook 2>/dev/null)
+assert_eq "codex stop-hook emits prompt for continuation" "true" \
+  "$(jq -r 'has("prompt") and .decision=="block"' <<<"$out" 2>/dev/null)"
+
+AGENT_BUS_TOOL=claude AGENT_BUS_WT=poster "$BIN" post \
+  --to claude/stoptest --state needs-review -m "continue me" >/dev/null 2>&1
+AGENT_BUS_TOOL=claude AGENT_BUS_WT=stoptest "$BIN" watch on >/dev/null 2>&1
+out=$(echo '{}' | AGENT_BUS_TOOL=claude AGENT_BUS_WT=stoptest "$BIN" stop-hook 2>/dev/null)
+assert_eq "claude stop-hook omits prompt field" "false" \
+  "$(jq -r 'has("prompt")' <<<"$out" 2>/dev/null)"
+
+export AGENT_BUS_HOME="$SAVED_HOME"
+rm -rf "$WAIT_HOME"
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 ((fail == 0))

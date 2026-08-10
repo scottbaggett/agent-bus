@@ -648,6 +648,51 @@ cmd_read() {
   fi
 }
 
+# Block the caller's turn until supervisory mail arrives, then return so the
+# agent can act on it. This is the watch primitive for hosts that cannot be
+# woken while idle (codex desktop): the agent spends one turn inside `wait`,
+# and the shell sleep-loop — not a stream of model turns — does the polling, so
+# it costs no tokens while waiting. Loop shape for the agent: wait -> read ->
+# act -> wait. Returns 0 on arrival (mail is listed) and 0 on timeout (with a
+# re-arm hint), never blocking a host exec timeout into a hard failure.
+cmd_wait() {
+  local timeout=1800 interval=15 wake=1
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --timeout) timeout="$2"; shift 2 ;;
+      --interval) interval="$2"; shift 2 ;;
+      --any) wake=0; shift ;;
+      *) die "wait: unknown flag $1 (expected --timeout, --interval, --any)" ;;
+    esac
+  done
+  [[ "$timeout" =~ ^[0-9]+$ ]] || die "wait: --timeout must be an integer"
+  [[ "$interval" =~ ^[0-9]+$ ]] && ((interval > 0)) || die "wait: --interval must be a positive integer"
+  local deadline=$(( $(now_epoch) + timeout )) label="supervisory"
+  ((wake == 0)) && label="any"
+  printf 'agent-bus: waiting for %s mail as %s (timeout %ss, poll %ss)\n' \
+    "$label" "$ADDR" "$timeout" "$interval" >&2
+  while :; do
+    touch_seat
+    local msgs; msgs=$(select_unread 0 0 "$wake")
+    if [ -n "$msgs" ]; then
+      local count; count=$(printf '%s\n' "$msgs" | grep -c . || true)
+      printf '=== agent-bus: %s %s packet(s) waiting for %s ===\n' "$count" "$label" "$ADDR"
+      printf '%s\n' "$msgs" | jq -r '"  [\(.state)] \(.from): \(.subject) (\(.id))"'
+      printf '\nRun: agent-bus read   — to consume and act on them.\n'
+      return 0
+    fi
+    local now; now=$(now_epoch)
+    if ((now >= deadline)); then
+      printf 'agent-bus: no %s mail within %ss for %s.\n' "$label" "$timeout" "$ADDR"
+      printf 'Re-arm: agent-bus wait   — to keep watching.\n'
+      return 0
+    fi
+    local remaining=$(( deadline - now )) nap="$interval"
+    ((remaining < nap)) && nap="$remaining"
+    sleep "$nap"
+  done
+}
+
 cmd_show() {
   local json=0
   [ "${1:-}" = --json ] && { json=1; shift; }
@@ -1075,6 +1120,7 @@ agent-bus — handoff bus for coding agents sharing repos/worktrees.
       --touched a,b,c | --touched auto
       --re <msg-id>               reply to a packet
   read [--peek] [--all] [--quiet] show unread packets (marks read unless --peek)
+  wait [--timeout s] [--any]      block this turn until mail arrives, then return
   show <msg-id>                   full record + body
   resolve <msg-id>...             close a packet for every seat
   claim <path>...                 take an advisory claim (warns if contested)
@@ -1116,6 +1162,7 @@ case "$cmd" in
   who) touch_seat; cmd_who ;;
   post) touch_seat; cmd_post "$@" ;;
   read) touch_seat; cmd_read "$@" ;;
+  wait) touch_seat; cmd_wait "$@" ;;
   digest) touch_seat; cmd_read --digest ;;
   heartbeat) touch_seat ;;
   show) cmd_show "$@" ;;

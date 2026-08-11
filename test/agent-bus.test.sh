@@ -42,6 +42,11 @@ assert_not_contains() {
 BUS_HOME=$(mktemp -d)
 trap 'rm -rf "$BUS_HOME"' EXIT
 export AGENT_BUS_HOME="$BUS_HOME"
+# Isolate from live sessions: without these, fixture seats inherit the invoking
+# session's inbox socket and every test post pokes the real Claude session that
+# ran the suite. Belt and suspenders: no pokes, and no socket to record.
+export AGENT_BUS_NO_PUSH=1
+unset CLAUDE_CODE_MESSAGING_SOCKET
 
 # --- identity ---
 out=$("$BIN" whoami)
@@ -303,6 +308,119 @@ assert_eq "claude stop-hook omits prompt field" "false" \
 
 export AGENT_BUS_HOME="$SAVED_HOME"
 rm -rf "$WAIT_HOME"
+
+# --- hardening: tolerant ledger, caps, sanitize, id validation, resolve
+#     standing, gc rotation, PM --force (fresh bus home for independence) ---
+HARD_HOME=$(mktemp -d)
+export AGENT_BUS_HOME="$HARD_HOME"
+
+# Tolerant ledger parsing: a garbage line must not break any reader.
+echo 'THIS IS NOT JSON {' >>"$HARD_HOME/ledger.jsonl"
+id=$(AGENT_BUS_TOOL=codex "$BIN" post --to @here --state needs-review \
+  -m $'# after-garbage\n\nstill works' | awk -F= '/id=/{print $2}')
+out=$(AGENT_BUS_TOOL=claude "$BIN" read --peek 2>&1)
+assert_contains "read survives garbage ledger line" "after-garbage" "$out"
+out=$(AGENT_BUS_TOOL=claude "$BIN" log 2>&1)
+assert_contains "log survives garbage ledger line" "after-garbage" "$out"
+out=$(AGENT_BUS_TOOL=claude "$BIN" doctor 2>&1)
+assert_contains "doctor counts unparseable lines" "1 unparseable" "$out"
+AGENT_BUS_TOOL=claude "$BIN" read >/dev/null
+
+# Peer-context banner travels in the delivery channel.
+assert_contains "read carries peer-context banner" "peer context from other agents" \
+  "$(AGENT_BUS_TOOL=codex "$BIN" post --to @claude --state fyi -m $'# banner\n\nhi' >/dev/null; \
+     AGENT_BUS_TOOL=claude "$BIN" read --peek)"
+AGENT_BUS_TOOL=claude "$BIN" read >/dev/null
+
+# Body cap at post time.
+big=$(head -c 70000 /dev/zero | tr '\0' 'a')
+out=$(AGENT_BUS_TOOL=codex "$BIN" post --to @here --state fyi -m "$big" 2>&1 || true)
+assert_contains "oversized body refused" "max 65536" "$out"
+
+# Inline render cap: >2KB body is truncated with a show hint.
+long="$(printf '# big\n\n')$(head -c 4000 /dev/zero | tr '\0' 'b')"
+AGENT_BUS_TOOL=codex "$BIN" post --to @claude --state fyi -m "$long" >/dev/null
+out=$(AGENT_BUS_TOOL=claude "$BIN" read --peek)
+assert_contains "inline body truncated" "truncated — agent-bus show" "$out"
+AGENT_BUS_TOOL=claude "$BIN" read >/dev/null
+
+# Control characters are stripped at render time (body and subject).
+esc="$(printf '# esc\n\nred \033[31mtext\033[0m and \007bell')"
+AGENT_BUS_TOOL=codex "$BIN" post --to @claude --state fyi -m "$esc" >/dev/null
+out=$(AGENT_BUS_TOOL=claude "$BIN" read --peek)
+assert_not_contains "ESC stripped from read output" "$(printf '\033')" "$out"
+assert_not_contains "BEL stripped from read output" "$(printf '\007')" "$out"
+assert_contains "markdown body survives sanitize" "red" "$out"
+AGENT_BUS_TOOL=claude "$BIN" read >/dev/null
+
+# Id validation: traversal ids never become paths.
+out=$("$BIN" show "../../etc/hosts" 2>&1 || true)
+assert_contains "show rejects traversal id" "not a packet id" "$out"
+out=$(AGENT_BUS_TOOL=codex "$BIN" post --re "not-an-id" --to @here --state fyi -m hi 2>&1 || true)
+assert_contains "--re rejects malformed id" "--re expects a packet id" "$out"
+
+# A crafted ledger row must not read arbitrary files into a digest.
+printf 'TOPSECRET\n' >"$HARD_HOME/secret.md"
+RID=$(awk '/^repo_id/{print $2}' <<<"$(AGENT_BUS_TOOL=claude "$BIN" whoami)")
+RWT=$(awk '/^worktree/{print $2}' <<<"$(AGENT_BUS_TOOL=claude "$BIN" whoami)")
+jq -n -c --arg rid "$RID" --arg wt "$RWT" --argjson epoch "$(date -u +%s)" \
+  '{kind:"msg",id:"../secret",ts:"now",epoch:$epoch,from:"codex/evil",session:"x",
+    to:"@here",state:"needs-review",repo:"agent-bus",repo_id:$rid,wt:$wt,branch:"main",
+    cwd:"/",subject:"crafted",touched:[],re:null}' >>"$HARD_HOME/ledger.jsonl"
+out=$(AGENT_BUS_TOOL=claude "$BIN" read --peek 2>&1)
+assert_not_contains "crafted id cannot exfiltrate files" "TOPSECRET" "$out"
+assert_contains "crafted id flagged" "malformed id" "$out"
+AGENT_BUS_TOOL=claude "$BIN" read >/dev/null
+
+# Resolve standing: only sender, addressee, or PM.
+rid=$(AGENT_BUS_TOOL=codex "$BIN" post --to claude/"$RWT" --state question \
+  -m $'# rq\n\nwhy?' | awk -F= '/id=/{print $2}')
+out=$(AGENT_BUS_TOOL=cursor AGENT_BUS_WT=elsewhere AGENT_BUS_REPO_ID=deadbeefdeadbeef \
+  "$BIN" resolve "$rid" 2>&1 || true)
+assert_contains "unrelated seat cannot resolve" "skipped" "$out"
+out=$(AGENT_BUS_TOOL=claude "$BIN" resolve "$rid" 2>&1)
+assert_contains "addressee can resolve" "resolved $rid" "$out"
+out=$(AGENT_BUS_TOOL=claude "$BIN" resolve 20250101T000000Z-aaaaaaaa 2>&1 || true)
+assert_contains "resolve of unknown id skipped" "no such packet" "$out"
+out=$(AGENT_BUS_TOOL=claude "$BIN" resolve "not/even/an/id" 2>&1 || true)
+assert_contains "resolve of malformed id skipped" "not a packet id" "$out"
+
+# Failed resolve must NOT reset the wake budget.
+AGENT_BUS_TOOL=cursor AGENT_BUS_WT=budget2 "$BIN" watch on >/dev/null
+AGENT_BUS_TOOL=codex "$BIN" post --to cursor/budget2 --state question -m $'# b\n\n?' >/dev/null
+printf '{}' | AGENT_BUS_TOOL=cursor AGENT_BUS_WT=budget2 "$BIN" stop-hook >/dev/null
+out=$(AGENT_BUS_TOOL=cursor AGENT_BUS_WT=budget2 "$BIN" watch)
+assert_contains "wake counted before failed resolve" "wake 1/" "$out"
+AGENT_BUS_TOOL=cursor AGENT_BUS_WT=budget2 "$BIN" resolve 20250101T000000Z-ffffffff >/dev/null 2>&1 || true
+out=$(AGENT_BUS_TOOL=cursor AGENT_BUS_WT=budget2 "$BIN" watch)
+assert_contains "failed resolve keeps wake budget" "wake 1/" "$out"
+
+# gc: rotate old rows to archive, keep fresh ones, prune dead-seat state.
+old_epoch=$(( $(date -u +%s) - 20 * 86400 ))
+jq -n -c --argjson epoch "$old_epoch" \
+  '{kind:"msg",id:"20250101T000000Z-01234567",epoch:$epoch,from:"x/y",to:"@here",
+    state:"fyi",subject:"ancient",repo:"r",repo_id:"i",wt:"w",branch:"b"}' \
+  >>"$HARD_HOME/ledger.jsonl"
+printf '{}' >"$HARD_HOME/state/ghost_seat.json"
+touch -t 202501010000 "$HARD_HOME/state/ghost_seat.json"
+out=$("$BIN" gc)
+assert_contains "gc rotates old ledger rows" "rotated 1 ledger rows" "$out"
+assert_not_contains "old row gone from ledger" "01234567" "$(cat "$HARD_HOME/ledger.jsonl")"
+assert_contains "old row archived" "01234567" "$(cat "$HARD_HOME/ledger.archive.jsonl")"
+assert_contains "fresh rows survive rotation" "$rid" "$(cat "$HARD_HOME/ledger.jsonl")"
+assert_contains "unparseable line survives rotation" "THIS IS NOT JSON" "$(cat "$HARD_HOME/ledger.jsonl")"
+[ ! -f "$HARD_HOME/state/ghost_seat.json" ]
+assert_eq "dead-seat state pruned" "0" "$?"
+
+# PM takeover of a live holder requires --force.
+AGENT_BUS_TOOL=claude AGENT_BUS_WT=pmhold "$BIN" role pm >/dev/null
+out=$(AGENT_BUS_TOOL=codex AGENT_BUS_WT=usurper "$BIN" role pm 2>&1 || true)
+assert_contains "live PM takeover needs --force" "retry with --force" "$out"
+out=$(AGENT_BUS_TOOL=codex AGENT_BUS_WT=usurper "$BIN" role pm --force 2>&1)
+assert_contains "forced takeover succeeds" "took over from claude/pmhold" "$out"
+
+export AGENT_BUS_HOME="$SAVED_HOME"
+rm -rf "$HARD_HOME"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 ((fail == 0))

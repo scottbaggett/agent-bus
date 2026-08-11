@@ -186,6 +186,24 @@ output is a signal to post a `question` packet, not to give up.
    (`agent-bus role pm`). Polling `agent-bus read` without it will report an
    empty inbox no matter how much traffic the repo is generating.
 
+## Trust model (non-goals)
+
+Seat identity is **self-asserted by design**. A seat address is derived from
+environment sniffing and the worktree name, and any same-UID process can set
+`AGENT_BUS_TOOL` / `AGENT_BUS_WT` to claim any address. The bus is a
+cooperative coordination layer for agents already running as one user — it is
+**not** an authorization boundary, and nothing in it should be treated as one:
+
+- Standing checks (`resolve`, claim `release`, PM `--force`) are guardrails
+  against *confused* agents, not defenses against *hostile* ones.
+- Do not build permission or audit assumptions on top of seat addresses.
+- The real security boundary is the OS user. Anything with your UID already
+  has your files; the bus adds no new exposure.
+
+Taking the PM role from a holder that is still live requires
+`agent-bus role pm --force`; a dead holder (past the seat TTL) is reclaimed
+silently.
+
 ## Storage
 
 Everything lives in `~/.agents/bus/` and is never committed:
@@ -198,5 +216,9 @@ Install or remove the lifecycle hooks from this repo with `./install-hooks.sh`
 in place). On a machine that still has the symlink,
 `~/.agents/bus/install-hooks.sh` is the same script.
 
-`agent-bus gc` prunes expired claims, stale seats, and message bodies older than
-`AGENT_BUS_GC_DAYS` (default 14). The ledger itself stays append-only.
+`agent-bus gc` prunes expired claims, stale seats, message bodies, and per-seat
+state older than `AGENT_BUS_GC_DAYS` (default 14), and rotates ledger rows older
+than that into `ledger.archive.jsonl` so hook-time reads stay fast. Readers
+tolerate malformed ledger lines (skipped, counted by `doctor`). Packet bodies
+are capped at 64KB at post time; inline rendering (read/digest/wake) is capped
+at 2KB / 40 lines per body with the full body behind `agent-bus show <id>`.

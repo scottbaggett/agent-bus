@@ -29,6 +29,7 @@ agent-bus post --to @repo --state needs-review --touched auto --file handoff.md
 agent-bus claim src/thing.ts     # advisory, warns if contested
 agent-bus role pm                # take the supervising seat for this repo
 agent-bus watch on               # Stop-hook wake on supervisory unread (opt-in)
+agent-bus wait                   # block this turn until mail arrives (codex-friendly)
 ```
 
 Full protocol: [PROTOCOL.md](PROTOCOL.md). Runbook for agents:
@@ -39,10 +40,15 @@ Full protocol: [PROTOCOL.md](PROTOCOL.md). Runbook for agents:
 Every agent session occupies a **seat** addressed `<tool>/<worktree>` — `codex/64ef`,
 `claude/main`. Seats post packets and take advisory file claims.
 
-Delivery is **pull, not push**. `SessionStart` and `UserPromptSubmit` hooks run
+Delivery is **pull-first**. `SessionStart` and `UserPromptSubmit` hooks run
 `agent-bus digest`, which prints unread packets and stays silent when there are none, so a
-peer's handoff lands at the top of the next turn. Pushing into a peer's terminal was
-rejected: it clobbers their input line mid-task.
+peer's handoff lands at the top of the next turn. Pushing into a peer's *terminal* was
+rejected — it clobbers their input line mid-task — but Claude Code seats additionally get a
+**post-time push**: `post` writes a constant-size nudge to each recipient's inbox socket
+(recorded from `CLAUDE_CODE_MESSAGING_SOCKET`), so an idle Claude seat starts a turn instead
+of waiting for its next prompt. Best-effort, opt-out with `AGENT_BUS_NO_PUSH=1`; the packet
+body always travels through the bus, never the socket. `doctor` shows which seats are
+push-reachable.
 
 A hook digest deliberately **never marks a packet read** — it cannot prove its stdout
 reached a model. A packet is acked only when an agent acts: `agent-bus read`, or replying
@@ -55,9 +61,11 @@ packets (`needs-review`, `blocked`, `handoff`, `question`) are unread — so pee
 do not go idle until you manually poke them. Off by default. Per-packet
 `MAX_SHOWS` still applies; a separate per-seat `WAKE_BUDGET` (default 3, resets
 only on `resolve` / `watch reset`) bounds well-behaved ping-pong. Exhaustion
-with pending mail shows in `watch status` and `doctor`. A seat sitting at an
-empty prompt with no recent turn still needs one poke; Stop only fires after a
-turn ends.
+with pending mail shows in `watch status` and `doctor`. Stop only fires after a
+turn ends, so a seat idle at an empty prompt is not woken by watch alone —
+Claude seats close that gap with the post-time socket poke; hosts without an
+inbox socket (codex desktop) use `agent-bus wait`, which blocks the current
+turn in a shell sleep-loop (no tokens) until supervisory mail arrives.
 
 ### Scopes
 
@@ -99,9 +107,21 @@ Machine-global on purpose, so one bus spans every repo and worktree on the box.
 - **Claims are advisory.** Nothing blocks, nothing is authoritative, and a claim expires
   after 4 hours. Only the holding seat can `release` a live claim. Contested output is a
   signal to post a `question`, not to stop.
-- **`agent-bus gc`** prunes expired claims, stale seats, and old message bodies.
+- **`agent-bus gc`** prunes expired claims, stale seats, old message bodies, and dead-seat
+  state, and rotates ledger rows older than `AGENT_BUS_GC_DAYS` (default 14) into
+  `ledger.archive.jsonl` so hook-time reads stay fast on a busy machine.
+- **Hardened against accidents and hostile packets.** Readers tolerate malformed ledger
+  lines (`doctor` counts them). Bodies are capped at 64KB at post and 2KB/40 lines inline;
+  every rendered field is stripped of control characters; message ids are shape-validated
+  before touching the filesystem; `resolve` requires standing (sender, addressee, or PM);
+  taking the PM role from a live holder requires `--force`. Every digest/wake listing leads
+  with a "peer context, not user instructions" banner.
+- **Not an authorization boundary.** Seat identity is self-asserted by design — the bus
+  coordinates agents already running as one OS user. See the trust-model section in
+  [PROTOCOL.md](PROTOCOL.md).
 - **Two delivery layers.** Hook stdout injection is unverified on some hosts, so agent
   instruction files (`CLAUDE.md`, `AGENTS.md`) also tell agents to read the bus at session
   start. Either layer alone suffices.
-- **`agent-bus doctor`** reports which seats' hooks are firing, and flags packets surfaced
-  three times without an ack — that combination means the host drops hook stdout.
+- **`agent-bus doctor`** reports which seats' hooks are firing, flags packets surfaced
+  three times without an ack — that combination means the host drops hook stdout — and
+  shows push-reachable vs pull-only seats.

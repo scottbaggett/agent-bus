@@ -24,7 +24,7 @@ the last two hours, its branch, and what files it holds.
 | `@here` (default) | same repo **and** same worktree — the other window on your branch |
 | `@repo` | every seat in this repo, any worktree |
 | `@codex` / `@claude` / `@cursor` | that tool's seats in this repo, any worktree |
-| `@pm` | the repo's registered PM seat, wherever it is |
+| `@pm` | the PM(s) responsible for the sender: the repo PM, plus any PM scoped to the sender's worktree |
 | `@all` | every seat on the machine |
 
 Scopes that mean "this repo" match on a stable `repo_id` (hash of the git common
@@ -38,7 +38,7 @@ tracks tickets, and reviews what the worker seats produce:
 
 ```
 agent-bus role pm          # take it
-agent-bus role             # who holds it
+agent-bus role             # who holds it (repo PM and any worktree PMs)
 agent-bus role --clear     # release it
 ```
 
@@ -54,6 +54,25 @@ Worker seats should not have to remember a supervisor exists.
 `done` and `fyi` are deliberately excluded: they are how seats chatter at each
 other mid-task, and a PM that receives them stops reading the ones that matter.
 Address those explicitly with `--to @pm` when the PM genuinely needs them.
+
+### Worktree-scoped PMs
+
+A seat may instead take PM for a **single worktree** — useful when different
+supervisors own different feature worktrees of the same repo:
+
+```
+agent-bus role pm --wt <worktree>      # supervise just that worktree
+agent-bus role --wt <worktree>         # who holds it
+agent-bus role --wt <worktree> --clear # release it
+```
+
+A worktree PM gets the same supervisory escalation, but only for packets sent
+**from** that worktree, and gains `resolve` standing over them. One PM per
+(repo, worktree); several worktree PMs can coexist. Worktree PMs **union with**
+the repo PM — they never shadow it: the repo PM keeps seeing everything, and
+`@pm` reaches both the repo PM and the PM scoped to the sender's worktree.
+Taking a worktree PM role held by a live seat requires `--force`, same as the
+repo PM.
 
 ## Delivery
 
@@ -208,7 +227,8 @@ silently.
 
 Everything lives in `~/.agents/bus/` and is never committed:
 `ledger.jsonl` (append-only event log), `msg/` (packet bodies), `state/` (per-seat
-read cursors), `state/roles/` (per-repo PM registry), `seats/` (peer registry),
+read cursors), `state/roles/` (PM registry: `<repo>.pm` repo-wide,
+`<repo>.wt.<wt>.pm` worktree-scoped), `seats/` (peer registry),
 `claims/`.
 
 Install or remove the lifecycle hooks from this repo with `./install-hooks.sh`

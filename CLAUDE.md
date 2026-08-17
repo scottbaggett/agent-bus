@@ -35,6 +35,7 @@ agent-bus who                    # live peers, PM, claims, watch
 agent-bus post --to @here --state needs-review --touched auto --file handoff.md
 agent-bus claim path/to/file     # before editing when another seat shares your worktree
 agent-bus role pm                # if you are supervising, not implementing
+agent-bus role pm --wt <w>       # supervising just one worktree (coexists with the repo PM)
 agent-bus watch on               # when coordinating — Stop-hook wake on supervisory mail
 ```
 

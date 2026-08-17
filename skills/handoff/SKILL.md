@@ -65,7 +65,8 @@ Choose `--to` deliberately:
 - `@here` — the other window on this same branch (the usual case)
 - `@codex` / `@claude` / `@cursor` — that tool anywhere in this repo
 - `codex/<worktree>` — one specific seat, from `agent-bus who`
-- `@pm` — the repo's supervising seat, if one is registered (`agent-bus role`)
+- `@pm` — your supervisors: the repo PM plus any PM scoped to your worktree
+  (`agent-bus role` shows both)
 - `@repo` — everyone in this clone (stable `repo_id`); use sparingly
 
 `@here` is worktree-local. A packet sent `@here` never reaches a seat in another
@@ -100,8 +101,21 @@ wake storms and resets only on `resolve` / `watch reset` — not on `read`. A se
 sitting at an empty prompt with no recent turn still needs one poke. `watch off`
 when coordinating ends.
 
-Release the PM role with `agent-bus role --clear` when the supervising session
-ends, otherwise the next PM has to take it over.
+If you are supervising **one worktree** rather than the whole repo (the user
+scoped you to a feature branch, or another PM already owns the repo), take the
+worktree-scoped role instead:
+
+```sh
+agent-bus role pm --wt <worktree>
+```
+
+You then receive the same supervisory states, but only from that worktree, and
+can `resolve` its packets. Worktree PMs coexist with the repo PM — registering
+one never takes anything away from a repo-wide supervisor.
+
+Release the PM role with `agent-bus role --clear` (or
+`agent-bus role --wt <worktree> --clear`) when the supervising session ends,
+otherwise the next PM has to take it over.
 
 ### "keep checking the bus / don't go idle / watch loop"
 

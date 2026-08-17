@@ -79,6 +79,63 @@ AGENT_BUS_TOOL=claude AGENT_BUS_WT=worker \
 out=$(AGENT_BUS_TOOL=cursor AGENT_BUS_WT=pm-seat "$BIN" read --peek)
 assert_not_contains "PM skips fyi auto-CC" "chatter" "$out"
 
+# --- worktree-scoped PM ---
+# codex/wt-pm-seat supervises only worktree wt-a; supervisory traffic from
+# wt-b must not reach it, and the repo PM (cursor/pm-seat) still sees both.
+AGENT_BUS_TOOL=codex AGENT_BUS_WT=wt-pm-seat "$BIN" role pm --wt wt-a >/dev/null
+out=$(AGENT_BUS_TOOL=codex AGENT_BUS_WT=wt-pm-seat "$BIN" role --wt wt-a)
+assert_contains "wt PM registered" "codex/wt-pm-seat" "$out"
+out=$("$BIN" role)
+assert_contains "role status lists wt PM" "wt:wt-a: codex/wt-pm-seat" "$out"
+out=$("$BIN" who)
+assert_contains "who lists wt PM" "codex/wt-pm-seat -> wt:wt-a" "$out"
+
+# Live takeover of a wt PM needs --force, same as the repo PM.
+out=$(AGENT_BUS_TOOL=claude AGENT_BUS_WT=usurper "$BIN" role pm --wt wt-a 2>&1 || true)
+assert_contains "live wt PM takeover needs --force" "retry with --force" "$out"
+
+AGENT_BUS_TOOL=claude AGENT_BUS_WT=wt-a \
+  "$BIN" post --to @here --state blocked -m $'# wt-a stuck\n\nhelp' >/dev/null
+AGENT_BUS_TOOL=claude AGENT_BUS_WT=wt-b \
+  "$BIN" post --to @here --state blocked -m $'# wt-b stuck\n\nhelp' >/dev/null
+out=$(AGENT_BUS_TOOL=codex AGENT_BUS_WT=wt-pm-seat "$BIN" read --peek)
+assert_contains "wt PM auto-CC from scoped worktree" "wt-a stuck" "$out"
+assert_not_contains "wt PM skips other worktrees" "wt-b stuck" "$out"
+out=$(AGENT_BUS_TOOL=cursor AGENT_BUS_WT=pm-seat "$BIN" read --peek)
+assert_contains "repo PM still sees scoped worktree traffic" "wt-a stuck" "$out"
+assert_contains "repo PM still sees other worktree traffic" "wt-b stuck" "$out"
+
+# @pm from the scoped worktree reaches the wt PM; from elsewhere it does not.
+AGENT_BUS_TOOL=codex AGENT_BUS_WT=wt-pm-seat "$BIN" read >/dev/null
+AGENT_BUS_TOOL=claude AGENT_BUS_WT=wt-a \
+  "$BIN" post --to @pm --state fyi -m $'# for-wt-pm\n\nfyi' >/dev/null
+AGENT_BUS_TOOL=claude AGENT_BUS_WT=wt-b \
+  "$BIN" post --to @pm --state fyi -m $'# for-repo-pm\n\nfyi' >/dev/null
+out=$(AGENT_BUS_TOOL=codex AGENT_BUS_WT=wt-pm-seat "$BIN" read --peek)
+assert_contains "@pm from scoped wt reaches wt PM" "for-wt-pm" "$out"
+assert_not_contains "@pm from other wt skips wt PM" "for-repo-pm" "$out"
+out=$(AGENT_BUS_TOOL=cursor AGENT_BUS_WT=pm-seat "$BIN" read --peek)
+assert_contains "@pm still reaches repo PM" "for-repo-pm" "$out"
+
+# Resolve standing: a wt PM covers only its scoped worktree's packets.
+rid=$(AGENT_BUS_TOOL=claude AGENT_BUS_WT=wt-b "$BIN" post --to claude/wt-b-peer \
+  --state question -m $'# wt-b q\n\nwhy?' | awk -F= '/id=/{print $2}')
+out=$(AGENT_BUS_TOOL=codex AGENT_BUS_WT=wt-pm-seat "$BIN" resolve "$rid" 2>&1 || true)
+assert_contains "wt PM cannot resolve unscoped packet" "skipped" "$out"
+rid=$(AGENT_BUS_TOOL=claude AGENT_BUS_WT=wt-a "$BIN" post --to claude/wt-a-peer \
+  --state question -m $'# wt-a q\n\nwhy?' | awk -F= '/id=/{print $2}')
+out=$(AGENT_BUS_TOOL=codex AGENT_BUS_WT=wt-pm-seat "$BIN" resolve "$rid" 2>&1)
+assert_contains "wt PM can resolve scoped packet" "resolved $rid" "$out"
+
+# Clear releases only that worktree's role.
+AGENT_BUS_TOOL=codex AGENT_BUS_WT=wt-pm-seat "$BIN" role --wt wt-a --clear >/dev/null
+out=$("$BIN" role --wt wt-a)
+assert_contains "wt PM cleared" "no PM registered" "$out"
+out=$("$BIN" role)
+assert_contains "repo PM survives wt PM clear" "cursor/pm-seat" "$out"
+# Ack leftover @pm mail so later assertions start clean.
+AGENT_BUS_TOOL=cursor AGENT_BUS_WT=pm-seat "$BIN" read >/dev/null
+
 # --- claims: contest + release ownership ---
 "$BIN" claim README.md >/dev/null
 out=$(AGENT_BUS_TOOL=codex "$BIN" claim README.md 2>&1 || true)

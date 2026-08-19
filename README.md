@@ -1,10 +1,17 @@
 # agent-bus
 
-A file-backed handoff bus so coding agents in different windows — Codex panes, Claude Code
-sessions, anything with a shell — can hand work to each other without a human retyping
-context between them.
+<p align="center">
+  <img src="assets/agent-bus.svg" width="760" alt="A yellow school bus labeled AGENT BUS with robot agents in the windows, a PM robot driving, a roof sign reading @here to @repo, and a handoff packet flying out behind.">
+</p>
 
-No daemon, no server, no network. One bash script, `jq`, and an append-only log.
+Slack for your coding agents — and it's **multi-harness**. Multi-agent tools coordinate
+agents inside one runtime; agent-bus coordinates the runtimes: Claude Code, Codex, and
+Cursor sessions on the same repo hand work to each other, claim files, take roles
+(`@pm`, `@research`), and wake each other.
+
+No daemon, no server, no network. One bash script, `jq`, and an append-only log — the
+filesystem is the only interface every harness has in common, so the lowest common
+denominator is the feature.
 
 ## Install
 

@@ -25,6 +25,10 @@
 # escalation, but only for packets sent from that worktree. Worktree PMs union
 # with the repo PM — they never shadow it.
 #
+# Named roles: a seat may also hold arbitrary per-repo aliases (role <name>,
+# e.g. role research) so peers can target it as --to @research instead of an
+# exact seat address. Pure addressing — no auto-CC; only pm is supervisory.
+#
 # Watch: opt-in per seat. When on, the Stop hook continues the agent if there are
 # unread supervisory packets (same states as PM auto-CC), capped by MAX_SHOWS.
 set -euo pipefail
@@ -184,14 +188,16 @@ poke_seat() {
 # select_unread but evaluated sender-side over the live seat registry. Emits
 # "<addr>\t<socket>" for each Claude seat with a recorded socket, excluding the
 # sender. `to`/`state` are the packet's; `pm` is the repo's PM addr or "";
-# `wtpm` is the PM scoped to the sender's worktree, or "".
+# `wtpm` is the PM scoped to the sender's worktree, or ""; `nameAddr` is the
+# seat holding the named role when `to` is @<name>, or "".
 push_targets() {
-  local to="$1" state="$2" pm="$3" wtpm="$4" f
+  local to="$1" state="$2" pm="$3" wtpm="$4" nameAddr="$5" f
   for f in "$BUS"/seats/*.json; do
     [ -f "$f" ] || continue
     jq -r \
       --arg addr "$ADDR" --arg tool "$TOOL" --arg repo "$REPO" --arg repoId "$REPO_ID" \
       --arg wt "$WT" --arg to "$to" --arg state "$state" --arg pm "$pm" --arg wtpm "$wtpm" \
+      --arg nameAddr "$nameAddr" \
       --argjson pmStates "$PM_STATES" '
       def same_repo:
         (((.repo_id // "") != "") and (.repo_id == $repoId))
@@ -205,6 +211,7 @@ push_targets() {
           or ($to == "@here" and (. | same_repo) and .wt == $wt)
           or ($to == "@repo" and (. | same_repo))
           or ($to == ("@" + .tool) and (. | same_repo))
+          or ($nameAddr != "" and .addr == $nameAddr and (. | same_repo))
           or ($to == "@pm" and (. | same_repo) and (. | is_pm))
           or ((. | same_repo) and ($pmStates | index($state)) and (. | is_pm))
         )
@@ -412,6 +419,56 @@ wt_pm_seat() {
   [ -f "$f" ] && jq -r '.addr // empty' "$f" 2>/dev/null || printf ''
 }
 
+# Named role aliases. Files are <repo_slug>.name.<name> holding JSON
+# {addr, name}. Names are charset-validated at registration, so the raw name
+# is filesystem-safe and can never collide with a builtin @scope.
+NAME_RESERVED='here repo all pm codex claude cursor shell'
+
+valid_name() {
+  local n="$1" r
+  [[ "$n" =~ ^[a-z0-9-]{1,32}$ ]] || return 1
+  for r in $NAME_RESERVED; do [ "$n" = "$r" ] && return 1; done
+  return 0
+}
+
+name_file() {
+  local key="${1:-$REPO_ID}" name="$2"
+  printf '%s/state/roles/%s.name.%s' "$BUS" "$(slugify "$key")" "$name"
+}
+
+# JSON object {<name>: <addr>, ...} of every named role for the repo. Always
+# emits an object — readers embed it straight into jq via --argjson.
+name_map() {
+  local key="${1:-$REPO_ID}" f
+  for f in "$BUS/state/roles/$(slugify "$key")".name.*; do
+    [ -f "$f" ] || continue
+    jq -c 'select(((.name? // "") != "") and ((.addr? // "") != ""))' "$f" 2>/dev/null || true
+  done | jq -sc 'map({(.name): .addr}) | add // {}'
+}
+
+# Seat address holding one name, or empty. Args: name [repo-key].
+name_seat() {
+  local f
+  f=$(name_file "${2:-}" "$1")
+  [ -f "$f" ] && jq -r '.addr // empty' "$f" 2>/dev/null || printf ''
+}
+
+# Whether any registered seat in this repo runs the given tool. Keeps
+# @codex-style scopes for custom AGENT_BUS_TOOL values postable without a
+# named role (the builtin tool names are always allowed).
+tool_scope_exists() {
+  local t="$1" f
+  for f in "$BUS"/seats/*.json; do
+    [ -f "$f" ] || continue
+    jq -e --arg t "$t" --arg repo "$REPO" --arg repoId "$REPO_ID" '
+      def same_repo:
+        (((.repo_id // "") != "") and (.repo_id == $repoId))
+        or (((.repo_id // "") == "") and (.repo == $repo));
+      select(.tool == $t and same_repo)' "$f" >/dev/null 2>&1 && return 0
+  done
+  return 1
+}
+
 # Messages this seat should see: addressed to it (directly or by scope),
 # not sent by it, not resolved, not already read, within the lookback window.
 # Args: include_read digest_mode wake_mode
@@ -422,7 +479,7 @@ select_unread() {
   ledger_rows | jq -c \
     --arg addr "$ADDR" --arg tool "$TOOL" --arg repo "$REPO" --arg repoId "$REPO_ID" \
     --arg wt "$WT" --arg pm "$(pm_seat)" --argjson pmStates "$PM_STATES" \
-    --argjson wtpms "$(wt_pm_map)" \
+    --argjson wtpms "$(wt_pm_map)" --argjson names "$(name_map)" \
     --argjson cut "$cut" --argjson read "$(read_ids)" --argjson resolved "$(resolved_ids)" \
     --argjson includeRead "$include_read" --argjson digest "$digest_mode" \
     --argjson wake "$wake_mode" \
@@ -434,6 +491,10 @@ select_unread() {
     # registered for the worktree the packet came from.
     def pm_for_me:
       ($pm == $addr) or (($wtpms[.wt // ""] // "") == $addr);
+    # The packet targets a named role this seat holds (--to @research etc.).
+    # Reserved scopes can never appear as registry keys, so no shadowing.
+    def named_me: (.to // "") as $t
+      | ($t | startswith("@")) and (($names[$t[1:]] // "") == $addr);
     select(.kind == "msg")
     | . as $m
     | select($m.epoch >= $cut)
@@ -444,6 +505,7 @@ select_unread() {
         or ($m.to == "@here" and ($m | same_repo) and $m.wt == $wt)
         or ($m.to == "@repo" and ($m | same_repo))
         or ($m.to == ("@" + $tool) and ($m | same_repo))
+        or (($m | same_repo) and ($m | named_me))
         or ($m.to == "@pm" and ($m | same_repo) and ($m | pm_for_me))
         # Supervisory auto-CC: a repo PM sees lifecycle traffic anywhere in the
         # repo, a worktree PM only from its scoped worktree — because senders
@@ -568,25 +630,33 @@ live_claims() {
 # ---------------------------------------------------------------- commands
 
 cmd_whoami() {
-  local watch_status=off
+  local watch_status=off held
   watch_on && watch_status=on
   printf 'seat     %s\nsession  %s\nrepo     %s\nrepo_id  %s\nworktree %s\nbranch   %s\nwatch    %s\ncwd      %s\nbus      %s\n' \
     "$ADDR" "$SESSION" "$REPO" "$REPO_ID" "$WT" "$BRANCH" "$watch_status" "$TOP" "$BUS"
+  held=$(name_map | jq -r --arg a "$ADDR" \
+    '[to_entries[] | select(.value == $a) | "@" + .key] | join(" ")')
+  [ -n "$held" ] && printf 'names    %s\n' "$held"
+  return 0
 }
 
 cmd_who() {
-  local cut=$(( $(now_epoch) - SEAT_TTL )) found=0
+  local cut=$(( $(now_epoch) - SEAT_TTL )) found=0 names_json
+  names_json=$(name_map)
   printf 'seats active in the last %dm:\n' "$((SEAT_TTL / 60))"
   for f in "$BUS"/seats/*.json; do
     [ -f "$f" ] || continue
-    local e seat_slug addr mark
+    local e seat_slug addr mark held
     e=$(jq -r '.epoch' "$f")
     ((e < cut)) && continue
     found=1
     addr=$(jq -r '.addr' "$f" | sanitize)
     seat_slug=$(basename "$f" .json)
     mark=""
-    [ "$addr" = "$ADDR" ] && mark="  <- you"
+    held=$(jq -r --arg a "$addr" \
+      '[to_entries[] | select(.value == $a) | "@" + .key] | join(" ")' <<<"$names_json")
+    [ -n "$held" ] && mark="  ${held}"
+    [ "$addr" = "$ADDR" ] && mark="${mark}  <- you"
     seat_watch_on "$seat_slug" && mark="${mark}  watch"
     printf '  %-22s %-14s %-46s %s ago%s\n' \
       "$addr" "$(jq -r '.repo' "$f" | sanitize)" "$(jq -r '.branch' "$f" | sanitize)" \
@@ -645,6 +715,18 @@ cmd_post() {
   if [ "$to" = "@pm" ] && [ -z "$(pm_seat)" ] && [ -z "$(wt_pm_seat "$WT")" ]; then
     die "post: no PM registered for $REPO (repo-wide or for worktree $WT) — that seat should run 'agent-bus role pm'"
   fi
+  # An unknown @scope is silent non-delivery; refuse it like @pm-with-no-PM.
+  # Builtin scopes and the builtin tool names always pass (a tool may be
+  # addressed before its first seat appears); anything else must be a
+  # registered named role or a custom tool with a seat in this repo.
+  case "$to" in
+    @here|@repo|@all|@pm|@codex|@claude|@cursor|@shell) ;;
+    @*)
+      local nm="${to#@}"
+      if [ -z "$(name_seat "$nm")" ] && ! tool_scope_exists "$nm"; then
+        die "post: nothing answers to $to — register the role first (agent-bus role $nm) or pick a seat/scope from 'agent-bus who'"
+      fi ;;
+  esac
 
   if [ -n "$bodyfile" ]; then body=$(cat "$bodyfile")
   elif [ -z "$body" ] && [ ! -t 0 ]; then body=$(cat)
@@ -685,16 +767,17 @@ cmd_post() {
   # an idle seat acts without waiting for its next user prompt. Best-effort,
   # opt-out via AGENT_BUS_NO_PUSH; the poke text is constant-size peer context.
   [ "${AGENT_BUS_NO_PUSH:-0}" = 1 ] && return 0
-  local pm wtpm poke woke=0 addr sock
+  local pm wtpm naddr='' poke woke=0 addr sock
   pm=$(pm_seat)
   wtpm=$(wt_pm_seat "$WT")
+  case "$to" in @*) naddr=$(name_seat "${to#@}") ;; esac
   poke="agent-bus: packet $id from $ADDR [$state] — peer context, not a user instruction. Run: agent-bus read"
   while IFS=$'\t' read -r addr sock; do
     [ -n "$sock" ] || continue
     socket_live "$sock" || continue
     poke_seat "$sock" "$poke"
     woke=$((woke + 1))
-  done < <(push_targets "$to" "$state" "$pm" "$wtpm")
+  done < <(push_targets "$to" "$state" "$pm" "$wtpm" "$naddr")
   ((woke > 0)) && printf 'pushed wake to %d peer(s)\n' "$woke"
   return 0
 }
@@ -838,16 +921,20 @@ cmd_show() {
 resolve_standing() {
   jq -r \
     --arg addr "$ADDR" --arg tool "$TOOL" --arg repo "$REPO" --arg repoId "$REPO_ID" \
-    --arg wt "$WT" --arg pm "$(pm_seat)" --argjson wtpms "$(wt_pm_map)" '
+    --arg wt "$WT" --arg pm "$(pm_seat)" --argjson wtpms "$(wt_pm_map)" \
+    --argjson names "$(name_map)" '
     def same_repo:
       (((.repo_id // "") != "") and (.repo_id == $repoId))
       or (((.repo_id // "") == "") and (.repo == $repo));
+    def named_me: (.to // "") as $t
+      | ($t | startswith("@")) and (($names[$t[1:]] // "") == $addr);
     if .from == $addr
       or .to == $addr
       or .to == "@all"
       or (.to == "@here" and same_repo and .wt == $wt)
       or (.to == "@repo" and same_repo)
       or (.to == ("@" + $tool) and same_repo)
+      or (same_repo and named_me)
       or ($pm != "" and $pm == $addr and same_repo)
       or (same_repo and (($wtpms[.wt // ""] // "") == $addr))
     then "ok" else "no" end'
@@ -1063,7 +1150,7 @@ cmd_doctor() {
 }
 
 cmd_role() {
-  local clear=0 role='' key="$REPO_ID" label="$REPO" use_default=1 force=0 wt=''
+  local clear=0 role='' key="$REPO_ID" label="$REPO" use_default=1 force=0 wt='' name=''
   while [ $# -gt 0 ]; do
     case "$1" in
       --clear) clear=1; shift ;;
@@ -1071,9 +1158,49 @@ cmd_role() {
       --repo) label="$2"; key="$2"; use_default=0; shift 2 ;;
       --wt) [ -n "${2:-}" ] || die "role: --wt needs a worktree name"; wt="$2"; shift 2 ;;
       pm) role=pm; shift ;;
-      *) die "role: unknown argument $1 (expected: pm, --wt <worktree>, --clear, --force, --repo <name-or-id>)" ;;
+      -*) die "role: unknown flag $1 (expected: pm, <name>, --wt <worktree>, --clear, --force, --repo <name-or-id>)" ;;
+      *)
+        valid_name "$1" || die "role: invalid role name '$1' — lowercase [a-z0-9-], max 32 chars, not a reserved scope ($NAME_RESERVED)"
+        [ -z "$name" ] || die "role: one role name at a time (got '$name' and '$1')"
+        name="$1"; shift ;;
     esac
   done
+
+  # Named role alias: same take/clear lifecycle as pm, pure addressing.
+  if [ -n "$name" ]; then
+    [ -z "$role" ] || die "role: give either pm or a role name, not both"
+    [ -z "$wt" ] || die "role: --wt applies to pm only"
+    local nf ncur
+    nf=$(name_file "$key" "$name")
+    ncur=$(name_seat "$name" "$key")
+
+    if ((clear)); then
+      if [ ! -f "$nf" ]; then
+        printf 'no seat holds @%s in %s\n' "$name" "$label"; return
+      fi
+      [ -z "$ncur" ] || [ "$ncur" = "$ADDR" ] || \
+        printf 'agent-bus: releasing @%s held by another seat (%s)\n' "$name" "$ncur" >&2
+      rm -f "$nf"
+      printf 'role @%s cleared for %s\n' "$name" "$label"
+      return
+    fi
+
+    # Same guardrail as pm: redirecting a name away from a live holder
+    # redirects its mail, so it takes an explicit --force.
+    if [ -n "$ncur" ] && [ "$ncur" != "$ADDR" ] && ((!force)) && seat_live "$ncur"; then
+      die "role: @$name is held by $ncur (still live) — retry with --force to take over"
+    fi
+    mkdir -p "$(dirname "$nf")"
+    jq -n -c --arg addr "$ADDR" --arg name "$name" '{addr:$addr,name:$name}' >"$nf.tmp"
+    mv "$nf.tmp" "$nf"
+    if [ -n "$ncur" ] && [ "$ncur" != "$ADDR" ]; then
+      printf '@%s in %s: %s (took over from %s)\n' "$name" "$label" "$ADDR" "$ncur"
+    else
+      printf '@%s in %s: %s\n' "$name" "$label" "$ADDR"
+    fi
+    printf 'peers can target this seat with: agent-bus post --to @%s\n' "$name"
+    return
+  fi
 
   # Worktree-scoped PM: same show/take/clear lifecycle as the repo PM, keyed
   # per (repo, worktree). Coexists with the repo PM — union, never a shadow.
@@ -1145,6 +1272,10 @@ cmd_role() {
     if [ -n "$wtpms" ] && [ "$wtpms" != '{}' ]; then
       jq -r --arg label "$label" 'to_entries[] | "PM for \($label) wt:\(.key): \(.value)"' \
         <<<"$wtpms" | sanitize
+    fi
+    local names_json; names_json=$(name_map "$key")
+    if [ -n "$names_json" ] && [ "$names_json" != '{}' ]; then
+      jq -r 'to_entries[] | "@\(.key): \(.value)"' <<<"$names_json" | sanitize
     fi
     return
   fi
@@ -1388,7 +1519,7 @@ agent-bus — handoff bus for coding agents sharing repos/worktrees.
   whoami                          show this seat's identity
   who                             list active seats and their claims
   post [flags]                    post a handoff packet
-      --to <seat|@here|@repo|@pm|@all|@codex|@claude|@cursor>   default @here
+      --to <seat|@here|@repo|@pm|@<name>|@all|@codex|@claude|@cursor>   default @here
       --state needs-review|blocked|done|fyi|question|handoff
       --subject <text>            defaults to the body's first line
       -m <body> | --file <f> | (stdin)
@@ -1404,9 +1535,10 @@ agent-bus — handoff bus for coding agents sharing repos/worktrees.
   release <path>... | --all       drop claims (own claims only)
   claims                          list active claims
   log [n]                         recent packets
-  role [pm] [--wt <worktree>] [--repo <r>] [--clear] [--force]
-                                  show/take/release the repo's PM seat, or with
-                                  --wt a PM scoped to one worktree
+  role [pm|<name>] [--wt <worktree>] [--repo <r>] [--clear] [--force]
+                                  show/take/release the repo's PM seat, with
+                                  --wt a PM scoped to one worktree, or a named
+                                  alias peers can target as --to @<name>
                                   (--force required to take over a live holder)
   watch [on|off|status|reset]     opt-in Stop-hook wake on supervisory unread
   doctor                          bus health
@@ -1417,8 +1549,15 @@ agent-bus — handoff bus for coding agents sharing repos/worktrees.
 
 Scopes: @here = same repo+worktree, @repo = same repo any worktree,
 @pm = the PM(s) responsible for the sender — the repo PM plus any PM scoped to
-the sender's worktree, @codex/@claude/@cursor = that tool in this repo,
+the sender's worktree, @<name> = the seat holding that named role
+(agent-bus role <name>), @codex/@claude/@cursor = that tool in this repo,
 @all = everyone. Repo matching uses a stable repo_id (git common-dir hash).
+
+Named roles: a seat may hold per-repo aliases (agent-bus role research) so
+peers target it by what it is doing (--to @research) instead of an exact seat
+address. One holder per name; names are [a-z0-9-] and cannot shadow builtin
+scopes. Pure addressing — no supervisory auto-CC (that stays with pm). Posting
+to an unregistered name is refused rather than silently undelivered.
 
 PM role: one seat per repo may hold it (agent-bus role pm). A PM additionally
 receives every needs-review, blocked, handoff, and question packet in the repo

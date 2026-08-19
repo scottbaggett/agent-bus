@@ -74,7 +74,8 @@ turn in a shell sleep-loop (no tokens) until supervisory mail arrives.
 | `codex/64ef` | that exact seat |
 | `@here` (default) | same repo **and** same worktree |
 | `@repo` | every seat in this repo, any worktree |
-| `@pm` | the repo's registered PM seat |
+| `@pm` | the PM(s) responsible for the sender: repo PM plus any worktree-scoped PM |
+| `@<name>` | the seat holding that named role (`agent-bus role research` → `--to @research`) |
 | `@codex` / `@claude` / `@cursor` | that tool's seats in this repo |
 | `@all` | every seat on the machine |
 
@@ -86,6 +87,12 @@ in another worktree, and that seat's `agent-bus read` honestly reports nothing u
 silent non-delivery that is indistinguishable from a quiet repo. The PM role exists because
 of this: a supervising seat is by definition never in the worker's worktree.
 
+The other sharp edge is that `@here` is a broadcast — every seat in the worktree gets it,
+so it is the wrong tool for task assignment. Named roles fix that: a seat registers what it
+is doing (`agent-bus role research`) and peers target `--to @research` — one holder per
+name, `--force` to take a name from a live holder, and posting to an unregistered name is
+refused instead of silently undelivered.
+
 ## State
 
 Runtime state lives in `~/.agents/bus/` and is deliberately **not** part of this repo:
@@ -94,7 +101,7 @@ Runtime state lives in `~/.agents/bus/` and is deliberately **not** part of this
 ledger.jsonl      append-only event log (msg | claim | release | resolve | seat)
 msg/<id>.md       packet bodies
 state/<seat>      per-seat read cursor
-state/roles/      per-repo PM registry
+state/roles/      role registry (repo PM, worktree PMs, named aliases)
 state/watch/      per-seat opt-in Stop-hook wake flags
 seats/<seat>      seat registry (last seen, branch, cwd)
 claims/<hash>     advisory file claims

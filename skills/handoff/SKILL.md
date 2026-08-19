@@ -62,12 +62,19 @@ agent-bus post --to @here --state needs-review --touched auto --file /tmp/handof
 
 Choose `--to` deliberately:
 
-- `@here` — the other window on this same branch (the usual case)
-- `@codex` / `@claude` / `@cursor` — that tool anywhere in this repo
+- `@<name>` — the seat holding a named role (`@research`, `@impl`); the best
+  choice for task assignment because it targets exactly one seat by function
 - `codex/<worktree>` — one specific seat, from `agent-bus who`
+- `@here` — every seat on this same branch; peer context, not task assignment
+- `@codex` / `@claude` / `@cursor` — that tool anywhere in this repo
 - `@pm` — your supervisors: the repo PM plus any PM scoped to your worktree
   (`agent-bus role` shows both)
 - `@repo` — everyone in this clone (stable `repo_id`); use sparingly
+
+`@here` is a broadcast: every seat in the worktree receives it, so a task
+assigned `@here` lands on lanes it was never meant for. Assign tasks to a
+named role or an exact seat; keep `@here` for context every co-located seat
+should have.
 
 `@here` is worktree-local. A packet sent `@here` never reaches a seat in another
 worktree, and that seat's `agent-bus read` will honestly report nothing unread —
@@ -116,6 +123,20 @@ one never takes anything away from a repo-wide supervisor.
 Release the PM role with `agent-bus role --clear` (or
 `agent-bus role --wt <worktree> --clear`) when the supervising session ends,
 otherwise the next PM has to take it over.
+
+### "you're the research/impl/review agent" — named roles
+
+When the user gives you a lane, register a name for it so the PM (and peers)
+can target you without knowing your seat address:
+
+```sh
+agent-bus role research     # peers now reach you with --to @research
+```
+
+Names are per repo, one holder each, `[a-z0-9-]` only, and cannot be a builtin
+scope. Release with `agent-bus role <name> --clear` when the lane ends. If two
+lanes would share a worktree, they would share a seat (and its read cursor and
+claims) — give each lane its own worktree, then name each seat.
 
 ### "keep checking the bus / don't go idle / watch loop"
 

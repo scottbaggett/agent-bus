@@ -25,6 +25,7 @@ the last two hours, its branch, and what files it holds.
 | `@repo` | every seat in this repo, any worktree |
 | `@codex` / `@claude` / `@cursor` | that tool's seats in this repo, any worktree |
 | `@pm` | the PM(s) responsible for the sender: the repo PM, plus any PM scoped to the sender's worktree |
+| `@<name>` | the seat holding that named role in this repo (`agent-bus role <name>`) |
 | `@all` | every seat on the machine |
 
 Scopes that mean "this repo" match on a stable `repo_id` (hash of the git common
@@ -73,6 +74,40 @@ the repo PM — they never shadow it: the repo PM keeps seeing everything, and
 `@pm` reaches both the repo PM and the PM scoped to the sender's worktree.
 Taking a worktree PM role held by a live seat requires `--force`, same as the
 repo PM.
+
+## Named roles
+
+A seat address is `<tool>/<worktree>` — exact but opaque (`claude/9f62`), and
+the broadcast scopes over-deliver when a repo hosts more than one lane of work.
+Named roles let peers target a seat by **what it is doing**:
+
+```
+agent-bus role research            # this seat is now @research (per repo)
+agent-bus post --to @research ...  # reaches whichever seat holds the name
+agent-bus role research --clear    # release it
+```
+
+- One holder per name; taking a name from a **live** holder requires
+  `--force`, exactly like the PM role. Re-registering moves the alias — the
+  name follows the work, not the worktree.
+- Names are `[a-z0-9-]`, max 32 chars, and may not be a reserved scope
+  (`here`, `repo`, `all`, `pm`, `codex`, `claude`, `cursor`, `shell`), so a
+  name can never shadow a builtin.
+- The holder is an addressee of `@<name>` packets: it gains `resolve` standing
+  over them, and watch/Stop-hook wake applies when the state is supervisory.
+- Posting to an **unregistered** name is refused at post time (like `@pm` with
+  no PM) rather than becoming silent non-delivery. Builtin tool scopes are
+  always postable; a custom `AGENT_BUS_TOOL` scope is postable once such a
+  seat has registered.
+- Named roles are **pure addressing** — no supervisory auto-CC. That stays
+  with `pm`.
+
+Names are aliases **over** seats, not a replacement for seat identity. Two
+same-tool sessions in one worktree share a seat — read cursor, wake budget,
+watch flag, and claims are all seat-keyed — so a name pointing at that seat
+points at both sessions. Agents that must be distinguishable (a research lane
+vs. an implementation lane) belong in **separate worktrees**; give each seat a
+name and target the name.
 
 ## Delivery
 
@@ -227,8 +262,9 @@ silently.
 
 Everything lives in `~/.agents/bus/` and is never committed:
 `ledger.jsonl` (append-only event log), `msg/` (packet bodies), `state/` (per-seat
-read cursors), `state/roles/` (PM registry: `<repo>.pm` repo-wide,
-`<repo>.wt.<wt>.pm` worktree-scoped), `seats/` (peer registry),
+read cursors), `state/roles/` (role registry: `<repo>.pm` repo PM,
+`<repo>.wt.<wt>.pm` worktree PM, `<repo>.name.<name>` named alias), `seats/`
+(peer registry),
 `claims/`.
 
 Install or remove the lifecycle hooks from this repo with `./install-hooks.sh`

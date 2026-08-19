@@ -136,6 +136,54 @@ assert_contains "repo PM survives wt PM clear" "cursor/pm-seat" "$out"
 # Ack leftover @pm mail so later assertions start clean.
 AGENT_BUS_TOOL=cursor AGENT_BUS_WT=pm-seat "$BIN" read >/dev/null
 
+# --- named role aliases ---
+AGENT_BUS_TOOL=claude AGENT_BUS_WT=research-wt "$BIN" role research >/dev/null
+out=$("$BIN" role)
+assert_contains "role lists named alias" "@research: claude/research-wt" "$out"
+out=$("$BIN" who)
+assert_contains "who shows named alias" "@research" "$out"
+out=$(AGENT_BUS_TOOL=claude AGENT_BUS_WT=research-wt "$BIN" whoami)
+assert_contains "whoami shows held names" "@research" "$out"
+
+# Invalid and reserved names are refused at registration.
+out=$("$BIN" role Bad_Name 2>&1 || true)
+assert_contains "invalid name refused" "invalid role name" "$out"
+out=$("$BIN" role here 2>&1 || true)
+assert_contains "reserved name refused" "invalid role name" "$out"
+
+# Targeted delivery: only the holder receives @research.
+id=$(AGENT_BUS_TOOL=codex "$BIN" post --to @research --state handoff \
+  -m $'# research task\n\ndig in' | awk -F= '/id=/{print $2}')
+out=$(AGENT_BUS_TOOL=claude AGENT_BUS_WT=research-wt "$BIN" read --peek)
+assert_contains "name holder receives @research" "research task" "$out"
+out=$(AGENT_BUS_TOOL=claude AGENT_BUS_WT=elsewhere "$BIN" read --peek 2>&1)
+assert_not_contains "non-holder does not receive @research" "research task" "$out"
+
+# The holder is an addressee, so it has resolve standing.
+out=$(AGENT_BUS_TOOL=claude AGENT_BUS_WT=research-wt "$BIN" resolve "$id" 2>&1)
+assert_contains "name holder can resolve @research packet" "resolved $id" "$out"
+
+# Unregistered names are refused at post time; tool scopes still pass —
+# builtins always, custom tools once a seat exists.
+out=$(AGENT_BUS_TOOL=codex "$BIN" post --to @nosuch --state fyi -m hi 2>&1 || true)
+assert_contains "unregistered name refused" "nothing answers to @nosuch" "$out"
+out=$(AGENT_BUS_TOOL=codex "$BIN" post --to @claude --state fyi -m $'# builtin tool ok\n\nhi' 2>&1)
+assert_contains "builtin tool scope still postable" "posted" "$out"
+AGENT_BUS_TOOL=mytool AGENT_BUS_WT=custom "$BIN" heartbeat
+out=$(AGENT_BUS_TOOL=codex "$BIN" post --to @mytool --state fyi -m $'# custom tool ok\n\nhi' 2>&1)
+assert_contains "custom tool scope postable once seated" "posted" "$out"
+
+# Live takeover requires --force; clear releases and post is refused again.
+out=$(AGENT_BUS_TOOL=codex AGENT_BUS_WT=impostor "$BIN" role research 2>&1 || true)
+assert_contains "live name takeover needs --force" "retry with --force" "$out"
+out=$(AGENT_BUS_TOOL=codex AGENT_BUS_WT=impostor "$BIN" role research --force 2>&1)
+assert_contains "forced name takeover succeeds" "took over from claude/research-wt" "$out"
+AGENT_BUS_TOOL=codex AGENT_BUS_WT=impostor "$BIN" role research --clear >/dev/null
+out=$("$BIN" role)
+assert_not_contains "cleared name gone from role listing" "@research" "$out"
+out=$(AGENT_BUS_TOOL=codex "$BIN" post --to @research --state fyi -m hi 2>&1 || true)
+assert_contains "post to cleared name refused" "nothing answers" "$out"
+
 # --- claims: contest + release ownership ---
 "$BIN" claim README.md >/dev/null
 out=$(AGENT_BUS_TOOL=codex "$BIN" claim README.md 2>&1 || true)

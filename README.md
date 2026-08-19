@@ -30,6 +30,7 @@ agent-bus claim src/thing.ts     # advisory, warns if contested
 agent-bus role pm                # take the supervising seat for this repo
 agent-bus watch on               # Stop-hook wake on supervisory unread (opt-in)
 agent-bus wait                   # block this turn until mail arrives (codex-friendly)
+agent-bus triage                 # unresolved review threads by worktree/age (PM hygiene)
 ```
 
 Full protocol: [PROTOCOL.md](PROTOCOL.md). Runbook for agents:
@@ -116,7 +117,13 @@ Machine-global on purpose, so one bus spans every repo and worktree on the box.
   signal to post a `question`, not to stop.
 - **`agent-bus gc`** prunes expired claims, stale seats, old message bodies, and dead-seat
   state, and rotates ledger rows older than `AGENT_BUS_GC_DAYS` (default 14) into
-  `ledger.archive.jsonl` so hook-time reads stay fast on a busy machine.
+  `ledger.archive.jsonl` so hook-time reads stay fast on a busy machine. It also runs
+  opportunistically from hook entry points at most once a day (`AGENT_BUS_NO_AUTO_GC=1`
+  to opt out), so nobody has to remember it.
+- **Review threads never close themselves.** gc is mechanical pruning only; a
+  `needs-review`/`blocked`/`question`/`handoff` packet stays open until a PM explicitly
+  runs `agent-bus resolve`. `triage` lists what is open (stale > 24h flagged), `doctor`
+  warns about the pile-up, and a PM seat's Stop hook shows a rate-limited reminder.
 - **Hardened against accidents and hostile packets.** Readers tolerate malformed ledger
   lines (`doctor` counts them). Bodies are capped at 64KB at post and 2KB/40 lines inline;
   every rendered field is stripped of control characters; message ids are shape-validated

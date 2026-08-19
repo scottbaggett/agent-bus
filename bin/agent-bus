@@ -55,6 +55,13 @@ ensure_bus() {
 # Also the only states that opt-in watch may wake a seat for on Stop.
 PM_STATES='["needs-review","blocked","handoff","question"]'
 
+# PM hygiene thresholds. A supervisory packet unresolved past STALE_HOURS is
+# "stale" — surfaced by triage/doctor and nagged about (rate-limited by
+# STALE_NAG seconds) in a PM seat's Stop hook. Staleness is a nudge only: the
+# bus never resolves a review thread on its own.
+STALE_HOURS="${AGENT_BUS_STALE_HOURS:-24}"
+STALE_NAG="${AGENT_BUS_STALE_NAG:-21600}"
+
 now_epoch() { date -u +%s; }
 now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 slugify() { printf '%s' "$1" | tr '/:@ ' '____'; }
@@ -368,6 +375,24 @@ set_wake_pending() {
 
 resolved_ids() { ledger_rows | jq -sc '[.[] | select(.kind=="resolve") | .msg]'; }
 
+# Unresolved supervisory packets in this repo, oldest first, one JSON row per
+# line. Read status is deliberately ignored: a review thread someone read but
+# never resolved is exactly the thing triage exists to surface.
+unresolved_supervisory() {
+  ledger_rows | jq -c \
+    --arg repo "$REPO" --arg repoId "$REPO_ID" \
+    --argjson pmStates "$PM_STATES" --argjson resolved "$(resolved_ids)" '
+    def same_repo:
+      (((.repo_id // "") != "") and (.repo_id == $repoId))
+      or (((.repo_id // "") == "") and (.repo == $repo));
+    select(.kind == "msg")
+    | . as $m
+    | select($m | same_repo)
+    | select($pmStates | index($m.state))
+    | select($resolved | index($m.id) | not)
+  ' | jq -sc 'sort_by(.epoch // 0) | .[]'
+}
+
 # ------------------------------------------------------------------- roles
 
 # Stable key for PM/claims. Prefer repo_id; legacy callers may pass a display name.
@@ -451,6 +476,44 @@ name_seat() {
   local f
   f=$(name_file "${2:-}" "$1")
   [ -f "$f" ] && jq -r '.addr // empty' "$f" 2>/dev/null || printf ''
+}
+
+# This seat's supervisory scope: "all" for the repo PM, else the
+# space-joined worktrees it PMs, else "" (not a PM).
+seat_pm_scope() {
+  if [ "$(pm_seat)" = "$ADDR" ]; then printf 'all'; return; fi
+  wt_pm_map | jq -r --arg a "$ADDR" \
+    '[to_entries[] | select(.value == $a) | .key] | join(" ")'
+}
+
+# Count of supervisory packets unresolved past STALE_HOURS within a PM scope
+# ("all" or a space-joined worktree list from seat_pm_scope).
+stale_count() {
+  local scope="$1" cut=$(( $(now_epoch) - STALE_HOURS * 3600 ))
+  unresolved_supervisory | jq -sc --argjson cut "$cut" --arg scope "$scope" '
+    [.[] | select((.epoch // 0) < $cut)
+         | (.wt // "") as $w
+         | select($scope == "all" or (($scope / " ") | index($w)))]
+    | length'
+}
+
+# Rate limit for the PM stale-thread reminder: at most once per STALE_NAG
+# seconds per seat, tracked in the seat state file.
+nag_due() {
+  local f last=0
+  f=$(STATE_FILE)
+  [ -f "$f" ] && last=$(jq -r '.last_stale_nag // 0' "$f" 2>/dev/null || echo 0)
+  [[ "$last" =~ ^[0-9]+$ ]] || last=0
+  (( $(now_epoch) - last >= STALE_NAG ))
+}
+
+mark_nag() {
+  local f; f=$(STATE_FILE)
+  if [ ! -f "$f" ]; then
+    write_state '[]' '{}' "$(wake_count)" last_stale_nag "$(now_epoch)"
+    return 0
+  fi
+  jq -c --argjson e "$(now_epoch)" '. + {last_stale_nag:$e}' "$f" >"$f.tmp" && mv "$f.tmp" "$f"
 }
 
 # Whether any registered seat in this repo runs the given tool. Keeps
@@ -1056,6 +1119,15 @@ cmd_doctor() {
     "$(find "$BUS/msg" -name '*.md' 2>/dev/null | wc -l | tr -d ' ')" \
     "$(find "$BUS/seats" -name '*.json' 2>/dev/null | wc -l | tr -d ' ')" \
     "$(find "$BUS/claims" -name '*.json' 2>/dev/null | wc -l | tr -d ' ')"
+  # Semantically open review threads. gc must not touch these — only a PM
+  # resolve closes them — so the pile-up is surfaced instead of pruned.
+  local stale_n
+  stale_n=$(stale_count all)
+  if [ "$stale_n" != 0 ]; then
+    printf '\nstale supervisory packets (unresolved > %sh): %s — run agent-bus triage\n' \
+      "$STALE_HOURS" "$stale_n"
+  fi
+
   printf '\nwatch on:\n'
   local any_watch=0
   for f in "$BUS"/state/watch/*.json; do
@@ -1147,6 +1219,35 @@ cmd_doctor() {
       printf '  %-22s %s packet(s)\n' "$seat" "$n"
     fi
   done
+}
+
+# PM hygiene surface: every unresolved supervisory packet in the repo,
+# grouped by worktree, oldest first, stale ones flagged. Listing only — the
+# bus never resolves a review thread on its own; that is the PM's call.
+cmd_triage() {
+  local cut=$(( $(now_epoch) - STALE_HOURS * 3600 ))
+  local rows; rows=$(unresolved_supervisory)
+  if [ -z "$rows" ]; then
+    printf 'agent-bus: no unresolved supervisory packets for %s\n' "$REPO"
+    return 0
+  fi
+  local total stale
+  total=$(grep -c . <<<"$rows" || true)
+  stale=$(jq -sc --argjson cut "$cut" '[.[] | select((.epoch // 0) < $cut)] | length' <<<"$rows")
+  printf 'unresolved supervisory packets for %s: %s (%s stale, unresolved > %sh)\n' \
+    "$REPO" "$total" "$stale" "$STALE_HOURS"
+  jq -rs --argjson cut "$cut" --argjson now "$(now_epoch)" '
+    def age: ($now - (.epoch // $now)) as $s
+      | if $s < 3600 then "\(($s / 60) | floor)m"
+        elif $s < 86400 then "\(($s / 3600) | floor)h"
+        else "\(($s / 86400) | floor)d" end;
+    group_by(.wt // "-")[]
+    | "\nworktree \(.[0].wt // "-"):",
+      (.[] | "  [\(.state)] \(. | age) ago  \(.from) -> \(.to)  \(.subject // "")  (\(.id))\(
+        if (.epoch // 0) < $cut then "  STALE" else "" end)")
+  ' <<<"$rows" | sanitize
+  printf '\nclose finished threads: agent-bus resolve <id> [<id>...]\n'
+  printf '(never auto-resolved — closing a review thread is a PM decision)\n'
 }
 
 cmd_role() {
@@ -1380,6 +1481,27 @@ cmd_gc() {
     "$n_claim" "$n_seat" "$n_msg" "$n_state" "$n_rot" "$GC_DAYS"
 }
 
+# Opportunistic gc: hook entry points (digest, heartbeat, stop-hook) call this
+# so expired claims, dead seats, and rotated history stay pruned without anyone
+# remembering to run gc. Marker-file rate-limited to once per GC_INTERVAL; the
+# existing .gc.lock still serializes concurrent runs. Mechanical pruning only —
+# it never resolves packets (semantic closure is a PM decision; see triage).
+GC_INTERVAL="${AGENT_BUS_GC_INTERVAL:-86400}"
+maybe_gc() {
+  [ "${AGENT_BUS_NO_AUTO_GC:-0}" = 1 ] && return 0
+  local marker="$BUS/.last-gc" now last=0
+  now=$(now_epoch)
+  if [ -f "$marker" ]; then
+    last=$(cat "$marker" 2>/dev/null || echo 0)
+    [[ "$last" =~ ^[0-9]+$ ]] || last=0
+    (( now - last < GC_INTERVAL )) && return 0
+  fi
+  # Claim the window before running so racing hooks do at most one extra gc.
+  printf '%s' "$now" >"$marker"
+  cmd_gc >/dev/null 2>&1 || true
+  return 0
+}
+
 cmd_watch() {
   case "${1:-}" in
     on)
@@ -1468,16 +1590,36 @@ cmd_stop_hook() {
   # Drain host payload; stop_hook_active is informational.
   cat >/dev/null || true
   touch_seat
+  maybe_gc
+
+  # PM hygiene reminder: a seat holding a PM role with stale supervisory
+  # threads in its scope gets a compact, rate-limited systemMessage nudging it
+  # toward triage. Informational only — it never blocks the stop by itself.
+  local nag='' scope
+  scope=$(seat_pm_scope)
+  if [ -n "$scope" ] && nag_due; then
+    local sc; sc=$(stale_count "$scope")
+    if [ "$sc" != 0 ]; then
+      nag="agent-bus: $sc stale supervisory thread(s) unresolved > ${STALE_HOURS}h — run: agent-bus triage"
+      mark_nag
+    fi
+  fi
+  # Emit the reminder alone when nothing else would be said.
+  quiet_exit() {
+    if [ -n "$nag" ]; then jq -n -c --arg m "$nag" '{systemMessage:$m}'
+    else printf '{}\n'
+    fi
+  }
 
   if ! watch_on; then
-    printf '{}\n'
+    quiet_exit
     return 0
   fi
 
   # Per-seat budget across distinct packets — stops watch ping-pong.
   if (( $(wake_count) >= WAKE_BUDGET )); then
     set_wake_pending "$(pending_wake_count)"
-    printf '{}\n'
+    quiet_exit
     return 0
   fi
 
@@ -1485,7 +1627,7 @@ cmd_stop_hook() {
   msgs=$(select_unread 0 1 1)
   if [ -z "$msgs" ]; then
     set_wake_pending 0
-    printf '{}\n'
+    quiet_exit
     return 0
   fi
 
@@ -1495,6 +1637,7 @@ cmd_stop_hook() {
   set_wake_pending 0
 
   local msg="agent-bus: $WAKE_COUNT supervisory packet(s) — continuing (wake $(wake_count)/$WAKE_BUDGET)"
+  [ -n "$nag" ] && msg="$msg; $nag"
   # Claude and Codex read different Stop-hook continuation shapes. Claude blocks
   # on `reason`; Codex ignores a block whose object carries no `prompt` (it logs
   # "Stop hook requested continuation without a prompt; ignoring the block"), so
@@ -1534,6 +1677,9 @@ agent-bus — handoff bus for coding agents sharing repos/worktrees.
   claim <path>...                 take an advisory claim (warns if contested)
   release <path>... | --all       drop claims (own claims only)
   claims                          list active claims
+  triage                          unresolved supervisory packets by worktree,
+                                  oldest first; stale (>24h) flagged. Listing
+                                  only — close threads with agent-bus resolve
   log [n]                         recent packets
   role [pm|<name>] [--wt <worktree>] [--repo <r>] [--clear] [--force]
                                   show/take/release the repo's PM seat, with
@@ -1544,7 +1690,11 @@ agent-bus — handoff bus for coding agents sharing repos/worktrees.
   doctor                          bus health
   gc                              prune expired claims/seats/bodies/state;
                                   rotate ledger rows older than GC_DAYS to
-                                  ledger.archive.jsonl
+                                  ledger.archive.jsonl. Also runs
+                                  opportunistically from hook entry points at
+                                  most once per AGENT_BUS_GC_INTERVAL (24h;
+                                  opt out: AGENT_BUS_NO_AUTO_GC=1). gc never
+                                  resolves packets — see triage
   stop-hook                       lifecycle Stop entry (JSON; used by install-hooks)
 
 Scopes: @here = same repo+worktree, @repo = same repo any worktree,
@@ -1574,6 +1724,11 @@ distinct-packet wake storms and resets only on agent-bus resolve (or
 watch reset) — never on read or watch on/off. Exhaustion with pending mail
 is visible in watch status and doctor. Off by default.
 A seat idle at an empty prompt (no recent turn) still needs one poke.
+
+PM hygiene: supervisory packets unresolved past AGENT_BUS_STALE_HOURS (24)
+are "stale" — doctor warns, triage lists them, and a PM seat's Stop hook shows
+a compact reminder at most once per AGENT_BUS_STALE_NAG (6h). The bus never
+resolves a review thread on its own.
 EOF
 }
 
@@ -1588,13 +1743,14 @@ case "$cmd" in
   post) touch_seat; cmd_post "$@" ;;
   read) touch_seat; cmd_read "$@" ;;
   wait) touch_seat; cmd_wait "$@" ;;
-  digest) touch_seat; cmd_read --digest ;;
-  heartbeat) touch_seat ;;
+  digest) touch_seat; maybe_gc; cmd_read --digest ;;
+  heartbeat) touch_seat; maybe_gc ;;
   show) cmd_show "$@" ;;
   resolve) cmd_resolve "$@" ;;
   claim) touch_seat; cmd_claim "$@" ;;
   release) cmd_release "$@" ;;
   claims) cmd_claims ;;
+  triage) touch_seat; cmd_triage ;;
   log) cmd_log "$@" ;;
   role) touch_seat; cmd_role "$@" ;;
   watch) touch_seat; cmd_watch "$@" ;;

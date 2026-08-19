@@ -75,6 +75,27 @@ the repo PM — they never shadow it: the repo PM keeps seeing everything, and
 Taking a worktree PM role held by a live seat requires `--force`, same as the
 repo PM.
 
+### PM hygiene: stale threads
+
+Supervisory packets are **semantically open until resolved** — `gc` prunes
+expired claims, dead seats, and aged-out history, but it can never infer that
+a review thread is finished. Left alone, unresolved threads pile up silently
+(a real PM seat once accumulated 89). Three affordances surface the pile-up;
+none of them close anything:
+
+- `agent-bus triage` — every unresolved supervisory packet in the repo,
+  grouped by worktree, oldest first; packets unresolved past
+  `AGENT_BUS_STALE_HOURS` (default 24) are flagged `STALE`.
+- `agent-bus doctor` warns with a stale count and points at `triage`.
+- A seat holding a PM role gets a compact Stop-hook `systemMessage`
+  ("N stale supervisory thread(s) … run: agent-bus triage") when its scope has
+  stale threads — the repo PM for the whole repo, a worktree PM for its
+  worktree only. Rate-limited per seat (`AGENT_BUS_STALE_NAG`, default 6h) and
+  never a blocking continuation.
+
+**The bus never auto-resolves a review packet.** Closing a thread is a PM
+decision, made explicitly with `agent-bus resolve <id>`.
+
 ## Named roles
 
 A seat address is `<tool>/<worktree>` — exact but opaque (`claude/9f62`), and
@@ -274,7 +295,12 @@ in place). On a machine that still has the symlink,
 
 `agent-bus gc` prunes expired claims, stale seats, message bodies, and per-seat
 state older than `AGENT_BUS_GC_DAYS` (default 14), and rotates ledger rows older
-than that into `ledger.archive.jsonl` so hook-time reads stay fast. Readers
+than that into `ledger.archive.jsonl` so hook-time reads stay fast. It also runs
+opportunistically from the hook entry points (`digest`, `heartbeat`,
+`stop-hook`) at most once per `AGENT_BUS_GC_INTERVAL` (default 24h; opt out
+with `AGENT_BUS_NO_AUTO_GC=1`), so the bus stays pruned without anyone
+remembering to run it. gc is mechanical pruning only — it never resolves
+packets (see PM hygiene above). Readers
 tolerate malformed ledger lines (skipped, counted by `doctor`). Packet bodies
 are capped at 64KB at post time; inline rendering (read/digest/wake) is capped
 at 2KB / 40 lines per body with the full body behind `agent-bus show <id>`.

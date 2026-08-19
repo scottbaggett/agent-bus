@@ -120,6 +120,14 @@ You then receive the same supervisory states, but only from that worktree, and
 can `resolve` its packets. Worktree PMs coexist with the repo PM — registering
 one never takes anything away from a repo-wide supervisor.
 
+Supervising also means **closing threads**. `agent-bus read` acks a packet but
+leaves it semantically open; only `agent-bus resolve <id>` closes it, and the
+bus never resolves review threads on its own. Run `agent-bus triage`
+periodically (and whenever the Stop hook reminds you about stale threads) to
+see every unresolved supervisory packet grouped by worktree and age — then
+resolve the finished ones explicitly. A PM that only reads accumulates an
+inbox of zombie reviews.
+
 Release the PM role with `agent-bus role --clear` (or
 `agent-bus role --wt <worktree> --clear`) when the supervising session ends,
 otherwise the next PM has to take it over.

@@ -46,6 +46,9 @@ export AGENT_BUS_HOME="$BUS_HOME"
 # session's inbox socket and every test post pokes the real Claude session that
 # ran the suite. Belt and suspenders: no pokes, and no socket to record.
 export AGENT_BUS_NO_PUSH=1
+# Opportunistic gc off by default so fixtures stay deterministic; the PM
+# hygiene section re-enables it explicitly.
+export AGENT_BUS_NO_AUTO_GC=1
 unset CLAUDE_CODE_MESSAGING_SOCKET
 
 # --- identity ---
@@ -526,6 +529,88 @@ assert_contains "forced takeover succeeds" "took over from claude/pmhold" "$out"
 
 export AGENT_BUS_HOME="$SAVED_HOME"
 rm -rf "$HARD_HOME"
+
+# --- PM hygiene: triage, doctor staleness, stop-hook nag, opportunistic gc ---
+HYG_HOME=$(mktemp -d)
+export AGENT_BUS_HOME="$HYG_HOME"
+
+out=$("$BIN" triage)
+assert_contains "triage empty when nothing unresolved" "no unresolved supervisory packets" "$out"
+
+HRID=$(awk '/^repo_id/{print $2}' <<<"$("$BIN" whoami)")
+HREPO=$(awk '/^repo /{print $2}' <<<"$("$BIN" whoami)")
+stale_row() { # args: id wt — a supervisory packet 2 days old
+  jq -n -c --arg id "$1" --arg wt "$2" --arg repo "$HREPO" --arg rid "$HRID" \
+    --argjson epoch "$(( $(date -u +%s) - 2 * 86400 ))" \
+    '{kind:"msg",id:$id,ts:"x",epoch:$epoch,from:("codex/" + $wt),session:"s",
+      to:"@repo",state:"needs-review",repo:$repo,repo_id:$rid,wt:$wt,branch:"b",
+      cwd:"/",subject:"old review","touched":[],re:null}' >>"$HYG_HOME/ledger.jsonl"
+}
+stale_row 20260101T000000Z-0000aaaa lane-a
+AGENT_BUS_TOOL=claude AGENT_BUS_WT=lane-b "$BIN" post --to @repo --state question \
+  -m $'# fresh q\n\nwhy?' >/dev/null
+
+out=$("$BIN" triage)
+assert_contains "triage counts stale" "(1 stale, unresolved > 24h)" "$out"
+assert_contains "triage groups by worktree" "worktree lane-a:" "$out"
+assert_contains "triage flags the stale packet" "STALE" "$out"
+assert_contains "triage lists fresh packets too" "fresh q" "$out"
+assert_contains "triage states the no-auto-resolve rule" "PM decision" "$out"
+assert_eq "only the old packet is flagged STALE" "1" "$(grep -c 'STALE' <<<"$out" || true)"
+
+out=$("$BIN" doctor)
+assert_contains "doctor warns on stale supervisory" "stale supervisory packets (unresolved > 24h): 1" "$out"
+assert_contains "doctor points at triage" "agent-bus triage" "$out"
+
+# PM stop-hook reminder: compact systemMessage, never a block, rate-limited.
+AGENT_BUS_TOOL=cursor AGENT_BUS_WT=hygiene-pm "$BIN" role pm >/dev/null
+out=$(printf '{}' | AGENT_BUS_TOOL=cursor AGENT_BUS_WT=hygiene-pm "$BIN" stop-hook)
+assert_contains "PM stop-hook nags on stale threads" "run: agent-bus triage" \
+  "$(jq -r '.systemMessage // empty' <<<"$out")"
+assert_eq "nag never blocks the stop" "" "$(jq -r '.decision // empty' <<<"$out")"
+out=$(printf '{}' | AGENT_BUS_TOOL=cursor AGENT_BUS_WT=hygiene-pm "$BIN" stop-hook)
+assert_eq "nag is rate-limited per seat" "{}" "$(jq -c . <<<"$out")"
+out=$(printf '{}' | AGENT_BUS_TOOL=codex AGENT_BUS_WT=bystander "$BIN" stop-hook)
+assert_eq "non-PM seat is never nagged" "{}" "$(jq -c . <<<"$out")"
+
+# A worktree PM is nagged only about its own scope.
+stale_row 20260101T000000Z-0000bbbb lane-a
+AGENT_BUS_TOOL=claude AGENT_BUS_WT=wt-sup "$BIN" role pm --wt lane-b >/dev/null
+out=$(printf '{}' | AGENT_BUS_TOOL=claude AGENT_BUS_WT=wt-sup "$BIN" stop-hook)
+assert_eq "wt PM not nagged for other worktrees" "{}" "$(jq -c . <<<"$out")"
+stale_row 20260101T000000Z-0000cccc lane-b
+out=$(printf '{}' | AGENT_BUS_TOOL=claude AGENT_BUS_WT=wt-sup "$BIN" stop-hook)
+assert_contains "wt PM nagged for its scoped worktree" "agent-bus triage" \
+  "$(jq -r '.systemMessage // empty' <<<"$out")"
+
+# resolve — and only resolve — clears a thread out of triage.
+AGENT_BUS_TOOL=cursor AGENT_BUS_WT=hygiene-pm "$BIN" resolve \
+  20260101T000000Z-0000aaaa 20260101T000000Z-0000bbbb 20260101T000000Z-0000cccc >/dev/null
+out=$("$BIN" triage)
+assert_not_contains "resolved threads leave triage" "old review" "$out"
+assert_contains "unresolved fresh packet remains" "fresh q" "$out"
+
+# Opportunistic gc: a hook entry point prunes an expired claim once per
+# interval; a second run inside the interval is a no-op.
+expired_claim() { # args: filename
+  jq -n -c --arg repo "$HREPO" --arg rid "$HRID" \
+    --argjson epoch "$(( $(date -u +%s) - 100000 ))" \
+    '{addr:"x/y",repo:$repo,repo_id:$rid,path:"GONE.md",branch:"b",epoch:$epoch}' \
+    >"$HYG_HOME/claims/$1"
+}
+expired_claim expired1.json
+AGENT_BUS_NO_AUTO_GC=0 AGENT_BUS_TOOL=codex "$BIN" heartbeat
+[ ! -f "$HYG_HOME/claims/expired1.json" ]
+assert_eq "auto-gc pruned expired claim via heartbeat" "0" "$?"
+[ -f "$HYG_HOME/.last-gc" ]
+assert_eq "auto-gc marker written" "0" "$?"
+expired_claim expired2.json
+AGENT_BUS_NO_AUTO_GC=0 AGENT_BUS_TOOL=codex "$BIN" heartbeat
+[ -f "$HYG_HOME/claims/expired2.json" ]
+assert_eq "auto-gc rate-limited within the interval" "0" "$?"
+
+export AGENT_BUS_HOME="$SAVED_HOME"
+rm -rf "$HYG_HOME"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 ((fail == 0))

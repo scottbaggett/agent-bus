@@ -38,6 +38,7 @@ agent-bus role pm                # if you are supervising, not implementing
 agent-bus role pm --wt <w>       # supervising just one worktree (coexists with the repo PM)
 agent-bus role <name>            # take a lane alias (e.g. research) — peers target --to @<name>
 agent-bus watch on               # when coordinating — Stop-hook wake on supervisory mail
+agent-bus triage                 # PMs: unresolved review threads by worktree/age — resolve the done ones
 ```
 
 Rules:

@@ -171,6 +171,7 @@ install_opencode() {
     .plugin //= [] | .plugin |= (map(select(contains("plugins/agent-bus") | not)) + [$e] | unique)
   ' "$OPENCODE_CONFIG" | jq . >"$OPENCODE_CONFIG.tmp" && mv "$OPENCODE_CONFIG.tmp" "$OPENCODE_CONFIG"
   echo "opencode: installed (backup: $OPENCODE_CONFIG.agent-bus.bak)"
+  echo "opencode: the plugin is copied as a snapshot — re-run this installer after upgrading agent-bus"
   echo "opencode: requires agent-bus on PATH (or AGENT_BUS_BIN) — restart OpenCode; config is read once at startup"
 }
 

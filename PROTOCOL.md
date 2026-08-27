@@ -39,7 +39,7 @@ every seat active in the last two hours, its branch, and what files it holds.
 | `codex/64ef` | every codex instance in worktree `64ef` of this repo |
 | `@here` (default) | same repo **and** same worktree — the other window on your branch |
 | `@repo` | every seat in this repo, any worktree |
-| `@codex` / `@claude` / `@cursor` | that tool's seats in this repo, any worktree |
+| `@codex` / `@claude` / `@cursor` / `@opencode` | that tool's seats in this repo, any worktree |
 | `@pm` | the PM(s) responsible for the sender: the repo PM, plus any PM scoped to the sender's worktree |
 | `@<name>` | the seat holding that named role in this repo (`agent-bus role <name>`) |
 | `@all` | every seat on the machine |
@@ -129,7 +129,7 @@ agent-bus role research --clear    # release it
   `--force`, exactly like the PM role. Re-registering moves the alias — the
   name follows the work, not the worktree.
 - Names are `[a-z0-9-]`, max 32 chars, and may not be a reserved scope
-  (`here`, `repo`, `all`, `pm`, `codex`, `claude`, `cursor`, `shell`), so a
+  (`here`, `repo`, `all`, `pm`, `codex`, `claude`, `cursor`, `opencode`, `shell`), so a
   name can never shadow a builtin.
 - The holder is an addressee of `@<name>` packets: it gains `resolve` standing
   over them, and watch/Stop-hook wake applies when the state is supervisory.

@@ -508,7 +508,7 @@ wt_pm_seat() {
 # Named role aliases. Files are <repo_slug>.name.<name> holding JSON
 # {addr, name}. Names are charset-validated at registration, so the raw name
 # is filesystem-safe and can never collide with a builtin @scope.
-NAME_RESERVED='here repo all pm codex claude cursor shell'
+NAME_RESERVED='here repo all pm codex claude cursor opencode shell'
 
 valid_name() {
   local n="$1" r
@@ -885,7 +885,7 @@ cmd_post() {
   # addressed before its first seat appears); anything else must be a
   # registered named role or a custom tool with a seat in this repo.
   case "$to" in
-    @here|@repo|@all|@pm|@codex|@claude|@cursor|@shell) ;;
+    @here|@repo|@all|@pm|@codex|@claude|@cursor|@opencode|@shell) ;;
     @*)
       local nm="${to#@}"
       if [ -z "$(name_seat "$nm")" ] && ! tool_scope_exists "$nm"; then
@@ -1770,7 +1770,7 @@ agent-bus — handoff bus for coding agents sharing repos/worktrees.
   whoami                          show this seat's identity
   who                             list active seats and their claims
   post [flags]                    post a handoff packet
-      --to <seat|@here|@repo|@pm|@<name>|@all|@codex|@claude|@cursor>   default @here
+      --to <seat|@here|@repo|@pm|@<name>|@all|@codex|@claude|@cursor|@opencode>   default @here
       --state needs-review|blocked|done|fyi|question|handoff
       --subject <text>            defaults to the body's first line
       -m <body> | --file <f> | (stdin)
@@ -1816,7 +1816,7 @@ an identity, a read cursor, or a watch flag. Sessions without a session id
 Scopes: @here = same repo+worktree, @repo = same repo any worktree,
 @pm = the PM(s) responsible for the sender — the repo PM plus any PM scoped to
 the sender's worktree, @<name> = the seat holding that named role
-(agent-bus role <name>), @codex/@claude/@cursor = that tool in this repo,
+(agent-bus role <name>), @codex/@claude/@cursor/@opencode = that tool in this repo,
 @all = everyone. Repo matching uses a stable repo_id (git common-dir hash).
 
 Named roles: a seat may hold per-repo aliases (agent-bus role research) so

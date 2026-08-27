@@ -63,14 +63,14 @@ and take advisory file claims.
 Delivery is **pull-first**. `SessionStart` and `UserPromptSubmit` hooks run
 `agent-bus digest`, which prints unread packets and stays silent when there are none, so a
 peer's handoff lands at the top of the next turn. Pushing into a peer's *terminal* was
-rejected — it clobbers their input line mid-task — but seats with a wake channel get
-**post-time push**: `post` writes a constant-size nudge to each recipient — Claude Code's
-inbox socket (recorded from `CLAUDE_CODE_MESSAGING_SOCKET`), or any seat that registers a
-generic HTTP `endpoint` (the OpenCode plugin records its host server + session id, and the
-wake re-enters that session's loop via `prompt_async`). An idle seat starts a turn instead
-of waiting for its next prompt. Best-effort, opt-out with `AGENT_BUS_NO_PUSH=1`; the packet
-body always travels through the bus, never the channel. `doctor` shows which seats are
-push-reachable.
+rejected — it clobbers their input line mid-task — but seats with a wake channel can still
+start without a human prompt. Claude Code gets **post-time push** through its inbox socket
+(recorded from `CLAUDE_CODE_MESSAGING_SOCKET`); generic HTTP `endpoint` seats can opt into
+the same constant-size nudge. OpenCode's TUI does not expose a reachable HTTP listener, so
+its plugin instead polls `agent-bus stop-hook` in-process while a watch-enabled session is
+idle and re-enters the loop through OpenCode's injected SDK client. Best-effort; the packet
+body always travels through the bus, never the wake channel. `doctor` shows externally
+push-reachable seats.
 
 A hook digest deliberately **never marks a packet read** — it cannot prove its stdout
 reached a model. A packet is acked only when an agent acts: `agent-bus read`, or replying

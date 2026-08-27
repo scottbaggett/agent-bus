@@ -7,18 +7,19 @@ same behavior the Claude/Codex/Cursor hook installers provide:
 - **Digest injection** — unread packets surfaced at session start and before
   each prompt turn, by shelling out to `agent-bus digest` (silent when empty)
   and injecting its stdout verbatim. Never marks read.
-- **Watch wake** — on `session.idle`, delegates the entire stop/continue
-  decision to `agent-bus stop-hook`; on `decision:block`, re-enters the loop
-  via `prompt_async` with the hook's `reason` as the next turn. Wake budgets,
-  MAX_SHOWS, watch on/off, and the PM stale-thread nag are all inherited from
-  the CLI — the plugin contains none of that logic.
+- **Watch wake** — tracks primary sessions after `session.idle` and polls from
+  inside the OpenCode process (default 2s). Each poll delegates the entire
+  stop/continue decision to `agent-bus stop-hook`; on `decision:block`, it
+  re-enters the loop through the injected SDK client's `promptAsync` with the
+  hook's `reason`. Wake budgets, MAX_SHOWS, watch on/off, and the PM
+  stale-thread nag are inherited from the CLI — the plugin contains none of
+  that logic and needs no externally reachable HTTP server.
 - **Identity** — exports `OPENCODE_SESSION_ID` into every Bash-tool child so
   `agent-bus` derives a session-unique instance seat (and `AGENT_BUS_TOOL`
   pinned, in case detection markers change).
-- **Push delivery** — records this session's server URL + session id as
-  `AGENT_BUS_ENDPOINT` while running bus commands, so peers' `post` can wake
-  this seat through the host HTTP server (`poke_endpoint`) just like Claude's
-  inbox socket.
+- **Already-idle delivery** — the in-process poll closes the gap after the
+  one-shot `session.idle` event, so a watch-enabled chat wakes without a manual
+  prompt. Override the 2s interval with `AGENT_BUS_OPENCODE_POLL_MS`.
 
 Failure contract: identical to the `|| true` hook wrappers — any bus error is
 swallowed and never breaks or delays the host turn.

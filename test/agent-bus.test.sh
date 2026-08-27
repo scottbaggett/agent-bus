@@ -733,6 +733,11 @@ rm -rf "$INST_HOME"
 OC_HOME=$(mktemp -d)
 export AGENT_BUS_HOME="$OC_HOME"
 
+out=$(<"$ROOT/plugins/agent-bus/index.ts")
+assert_contains "plugin CLI calls use host session identity" "OPENCODE_SESSION_ID: sessionID" "$out"
+assert_contains "plugin polls already-idle sessions" "setInterval" "$out"
+assert_contains "plugin wakes through injected SDK client" "client.session.promptAsync" "$out"
+
 # @opencode is a builtin scope: postable before any opencode seat exists.
 out=$(AGENT_BUS_TOOL=claude "$BIN" post --to @opencode --state fyi \
   -m $'# builtin opencode scope\n\nhi' 2>&1)

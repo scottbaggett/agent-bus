@@ -1,5 +1,5 @@
 // agent-bus plugin for OpenCode — bus delivery via digest injection, idle
-// wake (Stop-hook analog), session-unique identity, and HTTP push delivery.
+// wake (Stop-hook analog), and session-unique identity.
 //
 // Design rule: this plugin implements no bus logic. Every decision (what is
 // unread, what wakes a seat, budget caps, staleness) is made by the agent-bus
@@ -11,10 +11,7 @@ import type { TextPartInput } from "@opencode-ai/sdk"
 
 const BIN = process.env.AGENT_BUS_BIN || "agent-bus"
 
-export default (async ({ serverUrl, directory }) => {
-  // The host exposes its own HTTP server address to the plugin — no probing.
-  const base = (process.env.OPENCODE_SERVER_URL || serverUrl.toString()).replace(/\/$/, "")
-
+export default (async ({ client, directory }) => {
   // Bus commands must resolve identity from THIS session's worktree, not the
   // server process's launch dir (project picker / $HOME launches otherwise
   // land every session of this host on one seat).
@@ -22,6 +19,7 @@ export default (async ({ serverUrl, directory }) => {
     try {
       const proc = Bun.spawn([BIN, ...args], {
         cwd: directory,
+        stdin: "ignore",
         stdout: "pipe",
         stderr: "ignore",
         env: { ...process.env, ...extraEnv },
@@ -35,21 +33,62 @@ export default (async ({ serverUrl, directory }) => {
     }
   }
 
-  let sessionId = ""
+  const sessions = new Map<string, { idle: boolean; polling: boolean }>()
 
-  const env = () => ({
+  const env = (sessionID: string) => ({
     AGENT_BUS_VIA: "hook",
     AGENT_BUS_TOOL: "opencode",
-    ...(sessionId ? { AGENT_BUS_ENDPOINT: `${base} ${sessionId}` } : {}),
+    OPENCODE_SESSION_ID: sessionID,
   })
 
+  async function wake(sessionID: string) {
+    const state = sessions.get(sessionID)
+    if (!state?.idle || state.polling) return
+    state.polling = true
+    try {
+      // Stop-hook is the single source of truth for watch on/off, unread
+      // selection, MAX_SHOWS, WAKE_BUDGET, and the PM stale-thread nag.
+      const verdict = await run(["stop-hook"], env(sessionID))
+      if (!verdict) return
+      let parsed: { decision?: string; reason?: string }
+      try {
+        parsed = JSON.parse(verdict)
+      } catch {
+        return
+      }
+      if (parsed.decision !== "block" || !parsed.reason) return
+      state.idle = false
+      const parts: TextPartInput[] = [{ type: "text", synthetic: true, text: parsed.reason }]
+      await client.session.promptAsync({
+        path: { id: sessionID },
+        query: { directory },
+        body: { parts },
+      })
+    } catch {
+      // Already-idle wake is best-effort and must never break the host.
+    } finally {
+      state.polling = false
+    }
+  }
+
+  // session.idle only fires at a turn boundary. Polling while a primary
+  // session remains idle closes the gap where a packet arrives afterward.
+  // The timer lives inside OpenCode — no daemon or external server required.
+  const configuredInterval = Number(process.env.AGENT_BUS_OPENCODE_POLL_MS || 2000)
+  const pollInterval = Number.isFinite(configuredInterval) && configuredInterval >= 250 ? configuredInterval : 2000
+  const timer = setInterval(() => {
+    for (const sessionID of sessions.keys()) void wake(sessionID)
+  }, pollInterval)
+  timer.unref?.()
+
   return {
-    // Stamp every Bash-tool child with identity + push endpoint so `agent-bus`
-    // run inside the session resolves to this seat and can be poked back.
-    "shell.env": async (_input, output) => {
+    // Stamp every primary-session Bash child with its exact session identity,
+    // so shell commands and plugin-run digest/stop-hook share one seat.
+    "shell.env": async (input, output) => {
       output.env.AGENT_BUS_TOOL = "opencode"
-      if (sessionId) output.env.OPENCODE_SESSION_ID = sessionId
-      if (sessionId) output.env.AGENT_BUS_ENDPOINT = `${base} ${sessionId}`
+      if (input.sessionID && sessions.has(input.sessionID)) {
+        output.env.OPENCODE_SESSION_ID = input.sessionID
+      }
     },
 
     event: async ({ event }) => {
@@ -59,41 +98,33 @@ export default (async ({ serverUrl, directory }) => {
           // Subagent/child sessions must not rebind the plugin's identity:
           // digest injection and idle wake belong to the primary session.
           if (info.parentID) return
-          sessionId = info.id
+          sessions.set(info.id, { idle: false, polling: false })
           // SessionStart analog: surface unread packets as silent context.
-          // noReply posts go through createUserMessage, which assigns part ids.
-          const digest = await run(["digest"], env())
+          const digest = await run(["digest"], env(info.id))
           if (digest) {
-            void fetch(`${base}/session/${sessionId}/message`, {
-              method: "POST",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify({ noReply: true, parts: [{ type: "text", synthetic: true, text: digest }] }),
-            }).catch(() => {})
+            const parts: TextPartInput[] = [{ type: "text", synthetic: true, text: digest }]
+            void client.session
+              .prompt({
+                path: { id: info.id },
+                query: { directory },
+                body: { noReply: true, parts },
+              })
+              .catch(() => {})
           }
           return
         }
 
         if (event.type === "session.idle") {
           const sid = event.properties.sessionID
-          // Only wake the session this plugin instance belongs to.
-          if (!sessionId || sid !== sessionId) return
-          // Stop-hook analog: delegate the entire continue/block decision to
-          // the CLI (inherits watch on/off, WAKE_BUDGET, MAX_SHOWS, PM nag).
-          const verdict = await run(["stop-hook"], env())
-          if (!verdict) return
-          let parsed: { decision?: string; reason?: string }
-          try {
-            parsed = JSON.parse(verdict)
-          } catch {
-            return
-          }
-          if (parsed.decision !== "block" || !parsed.reason) return
-          const parts: TextPartInput[] = [{ type: "text", synthetic: true, text: parsed.reason }]
-          await fetch(`${base}/session/${sid}/prompt_async`, {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ parts }),
-          }).catch(() => {})
+          const state = sessions.get(sid)
+          if (!state) return
+          state.idle = true
+          await wake(sid)
+          return
+        }
+
+        if (event.type === "session.deleted") {
+          sessions.delete(event.properties.info.id)
         }
       } catch {
         // Never break the host event loop.
@@ -102,9 +133,13 @@ export default (async ({ serverUrl, directory }) => {
 
     // UserPromptSubmit analog: prepend unread mail to each prompt turn,
     // verbatim from `agent-bus digest` (sanitized, capped, silent when empty).
-    "chat.message": async (_input, output) => {
+    "chat.message": async (input, output) => {
       try {
-        const digest = await run(["digest"], env())
+        const state = sessions.get(input.sessionID)
+        // Ignore child/subagent sessions skipped by session.created above.
+        if (!state) return
+        state.idle = false
+        const digest = await run(["digest"], env(input.sessionID))
         if (digest && output.parts) {
           // Parts here are already persisted-shaped (assign() ran before the
           // hook), so a pushed part must carry a valid prt_-prefixed id —

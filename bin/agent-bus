@@ -232,13 +232,13 @@ poke_seat() {
 # hosts. Best-effort like poke_seat: short timeout, failures swallowed.
 poke_endpoint() {
   local ep="$1" text="$2" base sid
-  command -v curl >/dev/null 2>&1 || return 0
+  command -v curl >/dev/null 2>&1 || return 1
   base="${ep%% *}"; sid="${ep#* }"
-  [ -n "$base" ] && [ -n "$sid" ] && [ "$sid" != "$ep" ] || return 0
+  [ -n "$base" ] && [ -n "$sid" ] && [ "$sid" != "$ep" ] || return 1
   curl -fsS --max-time 3 -X POST "$base/session/$sid/prompt_async" \
     -H 'content-type: application/json' \
     -d "$(jq -nc --arg t "$text" '{parts:[{type:"text",text:$t}]}')" \
-    >/dev/null 2>&1 || true
+    >/dev/null 2>&1
 }
 
 # Seats that should be woken for a packet just posted: same recipient logic as
@@ -968,7 +968,7 @@ cmd_post() {
       socket_live "$target" || continue
       poke_seat "$target" "$poke"
     else
-      poke_endpoint "$target" "$poke"
+      poke_endpoint "$target" "$poke" || continue
     fi
     woke=$((woke + 1))
   done < <(push_targets "$to" "$state" "$pm" "$wtpm" "$naddr")

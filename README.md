@@ -5,9 +5,9 @@
 </p>
 
 Slack for your coding agents — and it's **multi-harness**. Multi-agent tools coordinate
-agents inside one runtime; agent-bus coordinates the runtimes: Claude Code, Codex, and
-Cursor sessions on the same repo hand work to each other, claim files, take roles
-(`@pm`, `@research`), and wake each other.
+agents inside one runtime; agent-bus coordinates the runtimes: Claude Code, Codex,
+Cursor, and OpenCode sessions on the same repo hand work to each other, claim files,
+take roles (`@pm`, `@research`), and wake each other.
 
 No daemon, no server, no network. One bash script, `jq`, and an append-only log — the
 filesystem is the only interface every harness has in common, so the lowest common
@@ -17,7 +17,7 @@ denominator is the feature.
 
 ```sh
 ln -sf "$PWD/bin/agent-bus" ~/.local/bin/agent-bus   # or anywhere on PATH
-./install-hooks.sh                                   # lifecycle hooks for Claude, Codex, Cursor
+./install-hooks.sh                                   # hooks for Claude, Codex, Cursor + plugin for OpenCode
 ```
 
 `install-hooks.sh` is idempotent and reversible (`--uninstall`); it resolves the
@@ -26,6 +26,14 @@ binary from the repo (or `AGENT_BUS_BIN` / PATH) and backs up
 place. Cursor hooks provide seat telemetry and best-effort digest injection;
 Cursor's `sessionStart` `additional_context` path is unreliable in the IDE, so
 Cursor delivery still rests primarily on the skill / `AGENTS.md` layer.
+
+OpenCode has no shell-command lifecycle hooks, so it integrates through a
+TypeScript plugin instead (`plugins/agent-bus/`, copied to
+`~/.config/opencode/plugins/` and registered in the global `opencode.json`).
+The plugin shells out to the same CLI — `agent-bus digest` for context
+injection and `agent-bus stop-hook` for watch wake — so budgets, caps, and
+staleness all behave identically across harnesses. Restart OpenCode after
+installing; config is read once at startup.
 
 ## Use
 
@@ -55,11 +63,13 @@ and take advisory file claims.
 Delivery is **pull-first**. `SessionStart` and `UserPromptSubmit` hooks run
 `agent-bus digest`, which prints unread packets and stays silent when there are none, so a
 peer's handoff lands at the top of the next turn. Pushing into a peer's *terminal* was
-rejected — it clobbers their input line mid-task — but Claude Code seats additionally get a
-**post-time push**: `post` writes a constant-size nudge to each recipient's inbox socket
-(recorded from `CLAUDE_CODE_MESSAGING_SOCKET`), so an idle Claude seat starts a turn instead
+rejected — it clobbers their input line mid-task — but seats with a wake channel get
+**post-time push**: `post` writes a constant-size nudge to each recipient — Claude Code's
+inbox socket (recorded from `CLAUDE_CODE_MESSAGING_SOCKET`), or any seat that registers a
+generic HTTP `endpoint` (the OpenCode plugin records its host server + session id, and the
+wake re-enters that session's loop via `prompt_async`). An idle seat starts a turn instead
 of waiting for its next prompt. Best-effort, opt-out with `AGENT_BUS_NO_PUSH=1`; the packet
-body always travels through the bus, never the socket. `doctor` shows which seats are
+body always travels through the bus, never the channel. `doctor` shows which seats are
 push-reachable.
 
 A hook digest deliberately **never marks a packet read** — it cannot prove its stdout
@@ -89,7 +99,7 @@ turn in a shell sleep-loop (no tokens) until supervisory mail arrives.
 | `@repo` | every seat in this repo, any worktree |
 | `@pm` | the PM(s) responsible for the sender: repo PM plus any worktree-scoped PM |
 | `@<name>` | the seat holding that named role (`agent-bus role research` → `--to @research`) |
-| `@codex` / `@claude` / `@cursor` | that tool's seats in this repo |
+| `@codex` / `@claude` / `@cursor` / `@opencode` | that tool's seats in this repo |
 | `@all` | every seat on the machine |
 
 Repo matching uses a stable `repo_id` (hash of the git common dir), so two clones

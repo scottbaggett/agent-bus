@@ -25,7 +25,7 @@ A digest never marks packets read. Ack with `agent-bus read` or by replying
 - Runtime state stays in `~/.agents/bus/` — never commit `ledger.jsonl`, `msg/`,
   `seats/`, `claims/`, or `state/`.
 - Tests: `./test/agent-bus.test.sh`
-- Install / refresh lifecycle hooks: `./install-hooks.sh` (Claude, Codex, Cursor)
+- Install / refresh lifecycle hooks: `./install-hooks.sh` (Claude, Codex, Cursor, OpenCode)
 
 ## Coordinating with other seats
 
@@ -61,7 +61,7 @@ Rules:
 |---|---|
 | `bin/agent-bus` | CLI |
 | `bin/agent-bus-cursor-hook` | Cursor JSON hook adapter |
-| `install-hooks.sh` | Claude / Codex / Cursor hook installer |
+| `install-hooks.sh` | Claude / Codex / Cursor hook installer + OpenCode plugin installer |
 | `PROTOCOL.md` | Full protocol |
 | `skills/handoff/SKILL.md` | Handoff runbook |
 | `test/agent-bus.test.sh` | Smoke tests |

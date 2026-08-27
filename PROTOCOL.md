@@ -307,9 +307,9 @@ read cursors), `state/roles/` (role registry: `<repo>.pm` repo PM,
 `claims/`.
 
 Install or remove the lifecycle hooks from this repo with `./install-hooks.sh`
-(`--uninstall` to revert; Claude, Codex, and Cursor config files are backed up
-in place). On a machine that still has the symlink,
-`~/.agents/bus/install-hooks.sh` is the same script.
+(`--uninstall` to revert; host config files are backed up — Claude/Codex/Cursor hooks,
+plus the OpenCode plugin registered in global `opencode.json`).
+On a machine that still has the symlink, `~/.agents/bus/install-hooks.sh` is the same script.
 
 `agent-bus gc` prunes expired claims, stale seats, message bodies, and per-seat
 state older than `AGENT_BUS_GC_DAYS` (default 14), and rotates ledger rows older

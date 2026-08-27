@@ -69,7 +69,7 @@ Choose `--to` deliberately:
   choice for task assignment because it targets exactly one seat by function
 - `codex/<worktree>` — one specific seat, from `agent-bus who`
 - `@here` — every seat on this same branch; peer context, not task assignment
-- `@codex` / `@claude` / `@cursor` — that tool anywhere in this repo
+- `@codex` / `@claude` / `@cursor` / `@opencode` — that tool anywhere in this repo
 - `@pm` — your supervisors: the repo PM plus any PM scoped to your worktree
   (`agent-bus role` shows both)
 - `@repo` — everyone in this clone (stable `repo_id`); use sparingly

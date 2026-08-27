@@ -729,5 +729,69 @@ assert_contains "wait --timeout without value dies cleanly" "--timeout needs a v
 export AGENT_BUS_HOME="$SAVED_HOME"
 rm -rf "$INST_HOME"
 
+# --- opencode: builtin scope, endpoint seat registry, HTTP push wake ---
+OC_HOME=$(mktemp -d)
+export AGENT_BUS_HOME="$OC_HOME"
+
+# @opencode is a builtin scope: postable before any opencode seat exists.
+out=$(AGENT_BUS_TOOL=claude "$BIN" post --to @opencode --state fyi \
+  -m $'# builtin opencode scope\n\nhi' 2>&1)
+assert_contains "@opencode postable with no seat" "posted" "$out"
+
+# 'opencode' is a reserved role name — can never shadow the tool scope.
+out=$("$BIN" role opencode 2>&1 || true)
+assert_contains "opencode reserved as role name" "invalid role name" "$out"
+
+# A seat with a recorded endpoint (as the plugin writes it via
+# AGENT_BUS_ENDPOINT) is push-wakeable: poke_endpoint curls prompt_async.
+# Fake server: records the request body; response ignored (best-effort).
+FAKE_PORT=18472
+cat >"$OC_HOME/fake-server.py" <<PY
+import http.server
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length", 0))
+        open("$OC_HOME/poke-body.txt", "ab").write(self.rfile.read(n))
+        self.send_response(204)
+        self.end_headers()
+    def log_message(self, *a):
+        pass
+http.server.HTTPServer(("127.0.0.1", $FAKE_PORT), H).serve_forever()
+PY
+python3 "$OC_HOME/fake-server.py" &
+FAKE_PID=$!
+# Preserve the suite's original BUS_HOME cleanup while adding ours.
+trap 'kill "$FAKE_PID" 2>/dev/null || true; rm -rf "$OC_HOME" "$BUS_HOME"' EXIT
+
+# Register an opencode seat with an endpoint, exactly as the plugin's
+# shell.env-stamped children do.
+AGENT_BUS_TOOL=opencode AGENT_BUS_WT=oc AGENT_BUS_SESSION=oc-sess \
+  AGENT_BUS_ENDPOINT="http://127.0.0.1:$FAKE_PORT oc-sess" "$BIN" heartbeat >/dev/null
+out=$(AGENT_BUS_TOOL=opencode AGENT_BUS_WT=oc AGENT_BUS_SESSION=oc-sess "$BIN" whoami)
+assert_contains "endpoint seat session-unique" "opencode/oc." "$out"
+
+# touch_seat persisted the endpoint field.
+grep -Fq '"endpoint":"http://127.0.0.1:' "$OC_HOME/seats/"opencode_oc*.json
+assert_eq "seat registry records endpoint" "0" "$?"
+
+# A post wakes the endpoint seat: the fake server captures the prompt_async body.
+sleep 0.3
+AGENT_BUS_NO_PUSH=0 AGENT_BUS_TOOL=claude "$BIN" post --to opencode/oc --state needs-review \
+  -m $'# poke me\n\nnow' >/dev/null 2>&1
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  [ -s "$OC_HOME/poke-body.txt" ] && break
+  sleep 0.2
+done
+out=$(cat "$OC_HOME/poke-body.txt" 2>/dev/null || true)
+assert_contains "endpoint poke hits prompt_async" "peer context, not a user instruction" "$out"
+
+# doctor reports endpoint reachability.
+out=$("$BIN" doctor)
+assert_contains "doctor shows endpoint reachability" "PUSH-reachable (endpoint)" "$out"
+
+kill "$FAKE_PID" 2>/dev/null || true
+export AGENT_BUS_HOME="$SAVED_HOME"
+rm -rf "$OC_HOME"
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 ((fail == 0))

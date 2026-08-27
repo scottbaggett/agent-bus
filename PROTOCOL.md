@@ -8,19 +8,35 @@ retyping context between them.
 
 ## Seats
 
-Every agent session occupies a **seat** addressed `<tool>/<worktree>`:
-`codex/64ef`, `claude/main`, `codex/salt-5269`. The worktree segment is derived
-from the git worktree, so two agents on the same branch share a seat and two
-agents on different branches never collide.
+Every agent session occupies a **seat** addressed `<tool>/<worktree>.<inst>`:
+`codex/64ef.3fa2`, `claude/main.b41c`. The worktree segment is derived from the
+git worktree; `<inst>` is a short hash of the host's session id, so the seat is
+unique to one session. Two sessions of the same tool in the same worktree get
+distinct seats — each with its own read cursor, wake budget, and watch flag —
+and the same tool/worktree name in two different repos never shares an
+identity either. Sessions with no session id (plain shells, hosts without
+markers) keep the bare `<tool>/<worktree>` form.
 
-`agent-bus whoami` prints your seat. `agent-bus who` lists every seat active in
-the last two hours, its branch, and what files it holds.
+The bare `<tool>/<worktree>` is the seat's **scope**: posting to it reaches
+every instance of that tool in that worktree of your repo; posting to the full
+instance address reaches exactly one session. Tool detection reads host
+markers (`CLAUDECODE`, `CODEX_SHELL`/`CODEX_SESSION_ID`/`CODEX_THREAD_ID`,
+`CURSOR_TRACE_ID`, `OPENCODE`/`OPENCODE_SESSION_ID`) and can be pinned with
+`AGENT_BUS_TOOL`; the session id can be pinned with `AGENT_BUS_SESSION`.
+
+Sender exclusion is session-exact: a packet is "own mail" only when it came
+from the same seat or the same session, so one session's packets can never be
+silently hidden from a different session that happens to share its name.
+
+`agent-bus whoami` prints your seat, scope, and session. `agent-bus who` lists
+every seat active in the last two hours, its branch, and what files it holds.
 
 ## Addressing
 
 | `--to` | Reaches |
 |---|---|
-| `codex/64ef` | that exact seat |
+| `codex/64ef.3fa2` | that exact seat (one session) |
+| `codex/64ef` | every codex instance in worktree `64ef` of this repo |
 | `@here` (default) | same repo **and** same worktree — the other window on your branch |
 | `@repo` | every seat in this repo, any worktree |
 | `@codex` / `@claude` / `@cursor` | that tool's seats in this repo, any worktree |
@@ -98,8 +114,9 @@ decision, made explicitly with `agent-bus resolve <id>`.
 
 ## Named roles
 
-A seat address is `<tool>/<worktree>` — exact but opaque (`claude/9f62`), and
-the broadcast scopes over-deliver when a repo hosts more than one lane of work.
+A seat address is `<tool>/<worktree>.<inst>` — exact but opaque
+(`claude/9f62.b41c`), and the broadcast scopes over-deliver when a repo hosts
+more than one lane of work.
 Named roles let peers target a seat by **what it is doing**:
 
 ```
@@ -123,12 +140,13 @@ agent-bus role research --clear    # release it
 - Named roles are **pure addressing** — no supervisory auto-CC. That stays
   with `pm`.
 
-Names are aliases **over** seats, not a replacement for seat identity. Two
-same-tool sessions in one worktree share a seat — read cursor, wake budget,
-watch flag, and claims are all seat-keyed — so a name pointing at that seat
-points at both sessions. Agents that must be distinguishable (a research lane
-vs. an implementation lane) belong in **separate worktrees**; give each seat a
-name and target the name.
+Names are aliases **over** seats, not a replacement for seat identity. Every
+session already has a unique instance seat, so a name pins one session even
+when several share a worktree. A name registered pre-instance-seats may hold a
+bare scope address — it then matches any instance in that scope until its
+holder re-registers. Lanes of work that should survive session restarts (a
+research lane vs. an implementation lane) still belong in **separate
+worktrees**; give each seat a name and target the name.
 
 ## Delivery
 

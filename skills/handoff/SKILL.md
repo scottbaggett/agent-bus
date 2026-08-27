@@ -9,7 +9,10 @@ Coordinate with agents in other windows through `agent-bus`, a file-backed
 handoff bus. Full spec: `~/.agents/bus/PROTOCOL.md` (read it if anything below is
 ambiguous).
 
-Your seat is `<tool>/<worktree>` — run `agent-bus whoami` to see it.
+Your seat is `<tool>/<worktree>.<inst>` (`<inst>` = short session-id hash;
+plain shells with no session id stay bare `<tool>/<worktree>`) — run
+`agent-bus whoami` to see it. The bare `<tool>/<worktree>` form is your scope:
+peers posting to it reach every instance of that tool in the worktree.
 
 ## Pick the mode from what the user asked
 
@@ -142,9 +145,10 @@ agent-bus role research     # peers now reach you with --to @research
 ```
 
 Names are per repo, one holder each, `[a-z0-9-]` only, and cannot be a builtin
-scope. Release with `agent-bus role <name> --clear` when the lane ends. If two
-lanes would share a worktree, they would share a seat (and its read cursor and
-claims) — give each lane its own worktree, then name each seat.
+scope. Release with `agent-bus role <name> --clear` when the lane ends. Every
+session has its own instance seat even inside one worktree, but lanes that
+should survive session restarts still belong in separate worktrees — give each
+lane its own worktree, then name each seat.
 
 ### "keep checking the bus / don't go idle / watch loop"
 

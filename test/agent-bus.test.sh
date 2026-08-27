@@ -50,6 +50,14 @@ export AGENT_BUS_NO_PUSH=1
 # hygiene section re-enables it explicitly.
 export AGENT_BUS_NO_AUTO_GC=1
 unset CLAUDE_CODE_MESSAGING_SOCKET
+# Identity isolation: the suite may run inside Claude Code / Codex / OpenCode,
+# whose markers and session ids would otherwise leak into every fixture seat —
+# one shared session id would make sender exclusion hide every fixture post.
+# Fixtures pin identity explicitly via AGENT_BUS_TOOL / AGENT_BUS_SESSION.
+unset CLAUDECODE CLAUDE_CODE_SESSION_ID \
+  CODEX_SHELL CODEX_SANDBOX CODEX_APP_TITLE CODEX_SESSION_ID CODEX_THREAD_ID \
+  CURSOR_TRACE_ID OPENCODE OPENCODE_SESSION_ID OPENCODE_SESSION_TITLE \
+  AGENT_BUS_SESSION AGENT_BUS_TOOL
 
 # --- identity ---
 out=$("$BIN" whoami)
@@ -611,6 +619,115 @@ assert_eq "auto-gc rate-limited within the interval" "0" "$?"
 
 export AGENT_BUS_HOME="$SAVED_HOME"
 rm -rf "$HYG_HOME"
+
+# --- instance seats: tool detection, per-session identity, legacy compat ---
+INST_HOME=$(mktemp -d)
+export AGENT_BUS_HOME="$INST_HOME"
+
+# Tool detection from host session markers (the codex-as-shell collision bug).
+out=$(CODEX_SESSION_ID=cs-1 "$BIN" whoami)
+assert_contains "CODEX_SESSION_ID detects codex" "seat     codex/" "$out"
+out=$(CODEX_THREAD_ID=ct-1 "$BIN" whoami)
+assert_contains "CODEX_THREAD_ID detects codex" "seat     codex/" "$out"
+out=$(OPENCODE_SESSION_ID=oc-1 "$BIN" whoami)
+assert_contains "OPENCODE_SESSION_ID detects opencode" "seat     opencode/" "$out"
+out=$(OPENCODE=1 "$BIN" whoami)
+assert_contains "OPENCODE marker detects opencode" "seat     opencode/" "$out"
+
+# A session id gives the seat a unique instance suffix; two sessions of the
+# same tool in the same worktree must never share an identity.
+a=$(AGENT_BUS_TOOL=codex AGENT_BUS_WT=shared AGENT_BUS_SESSION=sess-a "$BIN" whoami | awk '/^seat/{print $2}')
+b=$(AGENT_BUS_TOOL=codex AGENT_BUS_WT=shared AGENT_BUS_SESSION=sess-b "$BIN" whoami | awk '/^seat/{print $2}')
+assert_contains "instance addr carries scope" "codex/shared." "$a"
+[ "$a" != "$b" ]
+assert_eq "two sessions same tool/wt get distinct seats" "0" "$?"
+out=$(AGENT_BUS_TOOL=codex AGENT_BUS_WT=shared AGENT_BUS_SESSION=sess-a "$BIN" whoami)
+assert_contains "whoami shows the bare scope" "scope    codex/shared" "$out"
+
+# The a198 regression: a supervisory @here packet from one instance must be
+# unread for the other instance in the same tool/worktree...
+AGENT_BUS_TOOL=codex AGENT_BUS_WT=shared AGENT_BUS_SESSION=sess-a \
+  "$BIN" post --to @here --state needs-review -m $'# pm feedback\n\nfix X' >/dev/null
+out=$(AGENT_BUS_TOOL=codex AGENT_BUS_WT=shared AGENT_BUS_SESSION=sess-b "$BIN" read --peek)
+assert_contains "peer instance sees @here supervisory" "pm feedback" "$out"
+# ...while true self-posts stay suppressed, both same-seat and same-session.
+out=$(AGENT_BUS_TOOL=codex AGENT_BUS_WT=shared AGENT_BUS_SESSION=sess-a "$BIN" read --peek)
+assert_not_contains "own instance post still hidden" "pm feedback" "$out"
+out=$(AGENT_BUS_TOOL=shell AGENT_BUS_WT=shared AGENT_BUS_SESSION=sess-a "$BIN" read --peek)
+assert_not_contains "same session under another hat is still self" "pm feedback" "$out"
+
+# Bare tool/wt addresses the scope: every instance in it receives.
+AGENT_BUS_TOOL=claude AGENT_BUS_WT=elsewhere AGENT_BUS_SESSION=sender-s \
+  "$BIN" post --to codex/shared --state fyi -m $'# scoped mail\n\nhello both' >/dev/null
+out=$(AGENT_BUS_TOOL=codex AGENT_BUS_WT=shared AGENT_BUS_SESSION=sess-a "$BIN" read --peek)
+assert_contains "scope post reaches instance a" "scoped mail" "$out"
+out=$(AGENT_BUS_TOOL=codex AGENT_BUS_WT=shared AGENT_BUS_SESSION=sess-b "$BIN" read --peek)
+assert_contains "scope post reaches instance b" "scoped mail" "$out"
+
+# An exact instance addr reaches only that session.
+AGENT_BUS_TOOL=claude AGENT_BUS_WT=elsewhere AGENT_BUS_SESSION=sender-s \
+  "$BIN" post --to "$a" --state fyi -m $'# direct mail\n\nonly a' >/dev/null
+out=$(AGENT_BUS_TOOL=codex AGENT_BUS_WT=shared AGENT_BUS_SESSION=sess-a "$BIN" read --peek)
+assert_contains "instance post reaches its session" "direct mail" "$out"
+out=$(AGENT_BUS_TOOL=codex AGENT_BUS_WT=shared AGENT_BUS_SESSION=sess-b "$BIN" read --peek)
+assert_not_contains "instance post skips sibling session" "direct mail" "$out"
+
+# Legacy PM registration (bare scope addr) still matches an instance holder:
+# supervisory auto-CC keeps flowing across the upgrade without re-registering.
+INST_RID=$(awk '/^repo_id/{print $2}' <<<"$("$BIN" whoami)")
+mkdir -p "$INST_HOME/state/roles"
+printf 'claude/pm-wt' >"$INST_HOME/state/roles/${INST_RID}.pm"
+AGENT_BUS_TOOL=codex AGENT_BUS_WT=worker AGENT_BUS_SESSION=w-s \
+  "$BIN" post --to @here --state blocked -m $'# legacy pm cc\n\nstuck' >/dev/null
+out=$(AGENT_BUS_TOOL=claude AGENT_BUS_WT=pm-wt AGENT_BUS_SESSION=pm-s "$BIN" read --peek)
+assert_contains "legacy scope PM registration auto-CCs instance" "legacy pm cc" "$out"
+# Re-registering over one's own legacy registration needs no --force.
+out=$(AGENT_BUS_TOOL=claude AGENT_BUS_WT=pm-wt AGENT_BUS_SESSION=pm-s "$BIN" role pm 2>&1)
+assert_contains "own legacy PM re-registration allowed" "PM for" "$out"
+assert_not_contains "own legacy PM re-registration needs no force" "retry with --force" "$out"
+
+# Legacy read cursor: packets read pre-upgrade (state keyed by bare scope)
+# stay read for the instance seat.
+AGENT_BUS_TOOL=codex AGENT_BUS_WT=worker AGENT_BUS_SESSION=w-s \
+  "$BIN" post --to claude/migr --state fyi -m $'# old news\n\nseen already' >/dev/null
+AGENT_BUS_TOOL=claude AGENT_BUS_WT=migr "$BIN" read >/dev/null   # pre-upgrade seat acks
+out=$(AGENT_BUS_TOOL=claude AGENT_BUS_WT=migr AGENT_BUS_SESSION=m-s "$BIN" read --peek)
+assert_contains "legacy cursor honored by instance seat" "nothing unread" "$out"
+
+# Legacy watch flag: a scope-keyed watch keeps waking the instance seat, and
+# instance `watch off` clears the legacy flag too.
+AGENT_BUS_TOOL=claude AGENT_BUS_WT=wexpat "$BIN" watch on >/dev/null   # pre-upgrade flag
+AGENT_BUS_TOOL=codex AGENT_BUS_WT=worker AGENT_BUS_SESSION=w-s \
+  "$BIN" post --to claude/wexpat --state needs-review -m $'# legacy wake\n\nlook' >/dev/null
+out=$(printf '{}' | AGENT_BUS_TOOL=claude AGENT_BUS_WT=wexpat AGENT_BUS_SESSION=wx-s "$BIN" stop-hook)
+assert_eq "legacy watch flag wakes instance seat" "block" "$(echo "$out" | jq -r '.decision // empty')"
+AGENT_BUS_TOOL=claude AGENT_BUS_WT=wexpat AGENT_BUS_SESSION=wx-s "$BIN" watch off >/dev/null
+out=$(AGENT_BUS_TOOL=claude AGENT_BUS_WT=wexpat AGENT_BUS_SESSION=wx-s "$BIN" watch)
+assert_contains "instance watch off clears legacy flag" "watch off" "$out"
+
+# Legacy claim held under the bare scope: not a rival to its own instance,
+# releasable by it, still contested for everyone else.
+AGENT_BUS_TOOL=claude AGENT_BUS_WT=cl-wt "$BIN" claim NOTES.md >/dev/null   # pre-upgrade claim
+out=$(AGENT_BUS_TOOL=claude AGENT_BUS_WT=cl-wt AGENT_BUS_SESSION=cl-s "$BIN" claim NOTES.md 2>&1)
+assert_contains "own legacy claim is not contested" "claimed NOTES.md" "$out"
+out=$(AGENT_BUS_TOOL=codex AGENT_BUS_WT=cl-wt AGENT_BUS_SESSION=rival-s "$BIN" claim NOTES.md 2>&1 || true)
+assert_contains "instance claim contests rivals" "CONTESTED" "$out"
+out=$(AGENT_BUS_TOOL=claude AGENT_BUS_WT=cl-wt AGENT_BUS_SESSION=cl-s "$BIN" release NOTES.md 2>&1)
+assert_contains "instance releases its scope claim" "released NOTES.md" "$out"
+
+# --- review hardening: tolerant who, flag-value guards ---
+printf 'NOT JSON' >"$INST_HOME/seats/corrupt.json"
+out=$("$BIN" who 2>&1)
+assert_contains "who survives corrupt seat file" "seats active" "$out"
+out=$("$BIN" post --to 2>&1 || true)
+assert_contains "post --to without value dies cleanly" "--to needs a value" "$out"
+out=$("$BIN" post --touched 2>&1 || true)
+assert_contains "post --touched without value dies cleanly" "--touched needs a value" "$out"
+out=$("$BIN" wait --timeout 2>&1 || true)
+assert_contains "wait --timeout without value dies cleanly" "--timeout needs a value" "$out"
+
+export AGENT_BUS_HOME="$SAVED_HOME"
+rm -rf "$INST_HOME"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 ((fail == 0))

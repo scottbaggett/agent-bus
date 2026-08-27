@@ -1,0 +1,11 @@
+{
+  "name": "agent-bus",
+  "version": "0.1.0",
+  "type": "module",
+  "devDependencies": {
+    "@opencode-ai/plugin": "latest",
+    "@opencode-ai/sdk": "latest",
+    "@types/bun": "latest",
+    "typescript": "latest"
+  }
+}

@@ -39,7 +39,10 @@ done
 
 # Hook payloads are wrapped so a bus failure can never break the host agent.
 # AGENT_BUS_VIA=hook is what lets `agent-bus doctor` prove hooks are firing.
-digest_cmd() { printf 'AGENT_BUS_VIA=hook %s digest 2>/dev/null || true %s' "$BIN" "$MARKER"; }
+# Every hook pins AGENT_BUS_TOOL: env-sniffing can misread a hook subshell,
+# and a digest that resolves to a different seat than the heartbeat splits one
+# session into two identities (observed as codex-vs-shell on the same seat).
+digest_cmd() { printf 'AGENT_BUS_VIA=hook AGENT_BUS_TOOL=%s %s digest 2>/dev/null || true %s' "$1" "$BIN" "$MARKER"; }
 heartbeat_cmd() { printf 'AGENT_BUS_VIA=hook AGENT_BUS_TOOL=%s %s heartbeat 2>/dev/null || true %s' "$1" "$BIN" "$MARKER"; }
 release_cmd() { printf '%s release --all >/dev/null 2>&1 || true %s' "$BIN" "$MARKER"; }
 # Stop hook: always emit JSON ({} or decision:block). Heartbeat is inside stop-hook.
@@ -79,14 +82,16 @@ add_cursor_hook() { # <event> <command>
 
 install_claude() {
   [ -f "$CLAUDE_SETTINGS" ] || echo '{}' >"$CLAUDE_SETTINGS"
-  cp "$CLAUDE_SETTINGS" "$CLAUDE_SETTINGS.agent-bus.bak"
+  # Keep the first backup: re-running the installer must not overwrite the
+  # pristine pre-agent-bus config with an already-managed one.
+  [ -f "$CLAUDE_SETTINGS.agent-bus.bak" ] || cp "$CLAUDE_SETTINGS" "$CLAUDE_SETTINGS.agent-bus.bak"
   local out
   out=$(strip_marked <"$CLAUDE_SETTINGS")
   if ((!uninstall)); then
     # SessionStart / UserPromptSubmit stdout is injected into Claude's context,
     # so a silent-when-empty digest surfaces handoffs with zero noise.
-    out=$(printf '%s' "$out" | add_group SessionStart "$(heartbeat_cmd claude)" "$(digest_cmd)")
-    out=$(printf '%s' "$out" | add_group UserPromptSubmit "$(digest_cmd)")
+    out=$(printf '%s' "$out" | add_group SessionStart "$(heartbeat_cmd claude)" "$(digest_cmd claude)")
+    out=$(printf '%s' "$out" | add_group UserPromptSubmit "$(digest_cmd claude)")
     # Stop continues the agent when watch is on and supervisory mail is unread.
     out=$(printf '%s' "$out" | add_group Stop "$(stop_cmd claude)")
     out=$(printf '%s' "$out" | add_group SessionEnd "$(release_cmd)")
@@ -97,12 +102,12 @@ install_claude() {
 
 install_codex() {
   [ -f "$CODEX_HOOKS" ] || echo '{}' >"$CODEX_HOOKS"
-  cp "$CODEX_HOOKS" "$CODEX_HOOKS.agent-bus.bak"
+  [ -f "$CODEX_HOOKS.agent-bus.bak" ] || cp "$CODEX_HOOKS" "$CODEX_HOOKS.agent-bus.bak"
   local out
   out=$(strip_marked <"$CODEX_HOOKS")
   if ((!uninstall)); then
-    out=$(printf '%s' "$out" | add_group SessionStart "$(heartbeat_cmd codex)" "$(digest_cmd)")
-    out=$(printf '%s' "$out" | add_group UserPromptSubmit "$(digest_cmd)")
+    out=$(printf '%s' "$out" | add_group SessionStart "$(heartbeat_cmd codex)" "$(digest_cmd codex)")
+    out=$(printf '%s' "$out" | add_group UserPromptSubmit "$(digest_cmd codex)")
     # Codex Stop requires JSON on stdout; stop-hook emits {} or decision:block.
     out=$(printf '%s' "$out" | add_group Stop "$(stop_cmd codex)")
   fi
@@ -114,7 +119,7 @@ install_codex() {
 install_cursor() {
   mkdir -p "$(dirname "$CURSOR_HOOKS")"
   [ -f "$CURSOR_HOOKS" ] || printf '%s\n' '{"version":1,"hooks":{}}' >"$CURSOR_HOOKS"
-  cp "$CURSOR_HOOKS" "$CURSOR_HOOKS.agent-bus.bak"
+  [ -f "$CURSOR_HOOKS.agent-bus.bak" ] || cp "$CURSOR_HOOKS" "$CURSOR_HOOKS.agent-bus.bak"
   chmod +x "$CURSOR_HOOK" 2>/dev/null || true
   local out
   out=$(strip_marked_cursor <"$CURSOR_HOOKS")

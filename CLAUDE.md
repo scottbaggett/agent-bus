@@ -30,7 +30,7 @@ A digest never marks packets read. Ack with `agent-bus read` or by replying
 ## Coordinating with other seats
 
 ```sh
-agent-bus whoami                 # your seat: <tool>/<worktree>
+agent-bus whoami                 # your seat: <tool>/<worktree>.<inst> (session-unique)
 agent-bus who                    # live peers, PM, claims, watch
 agent-bus post --to @here --state needs-review --touched auto --file handoff.md
 agent-bus claim path/to/file     # before editing when another seat shares your worktree

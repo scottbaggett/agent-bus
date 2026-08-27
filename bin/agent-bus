@@ -1,10 +1,17 @@
 #!/usr/bin/env bash
 # agent-bus — a file-backed handoff bus for coding agents working on the same repos.
 #
-# Model: every agent session occupies a "seat" addressed as <tool>/<worktree>
-# (e.g. codex/64ef, claude/main). Seats post handoff packets to each other and
-# take advisory claims on files. Nothing here is authoritative — claims are
-# cooperative, and the bus never blocks or edits anyone's work.
+# Model: every agent session occupies a "seat" addressed as
+# <tool>/<worktree>.<inst> (e.g. codex/64ef.3fa2, claude/main.b41c), where
+# <inst> is a short hash of the host session id — so two sessions of the same
+# tool in the same worktree, or the same tool/worktree pair in two repos, can
+# never collide on one identity. Sessions with no session id (plain shells)
+# keep the bare <tool>/<worktree> form. The suffix-less <tool>/<worktree> is
+# the seat's SCOPE: posting --to codex/64ef reaches every codex instance in
+# that worktree, --to codex/64ef.3fa2 reaches exactly one session. Seats post
+# handoff packets to each other and take advisory claims on files. Nothing
+# here is authoritative — claims are cooperative, and the bus never blocks or
+# edits anyone's work.
 #
 # Storage (machine-global, never committed):
 #   $AGENT_BUS_HOME/ledger.jsonl   append-only event log (msg | claim | release | resolve | seat)
@@ -99,8 +106,13 @@ resolve_identity() {
   TOOL="${AGENT_BUS_TOOL:-}"
   if [ -z "$TOOL" ]; then
     if [ -n "${CLAUDECODE:-}" ]; then TOOL=claude
-    elif [ -n "${CODEX_SHELL:-}${CODEX_SANDBOX:-}${CODEX_APP_TITLE:-}" ]; then TOOL=codex
+    # Codex exports different markers per surface (shell/sandbox/app/session);
+    # any of them is proof. Session/thread ids matter: a Codex CLI run inside a
+    # plain terminal carries only those, and misdetecting it as shell collides
+    # it with any other markerless host in the worktree.
+    elif [ -n "${CODEX_SHELL:-}${CODEX_SANDBOX:-}${CODEX_APP_TITLE:-}${CODEX_SESSION_ID:-}${CODEX_THREAD_ID:-}" ]; then TOOL=codex
     elif [ -n "${CURSOR_TRACE_ID:-}" ]; then TOOL=cursor
+    elif [ -n "${OPENCODE:-}${OPENCODE_SESSION_ID:-}${OPENCODE_SESSION_TITLE:-}" ]; then TOOL=opencode
     else TOOL=shell
     fi
   fi
@@ -133,9 +145,24 @@ resolve_identity() {
   [ -n "${AGENT_BUS_WT:-}" ] && WT="$AGENT_BUS_WT"
   [ -n "${AGENT_BUS_REPO_ID:-}" ] && REPO_ID="$AGENT_BUS_REPO_ID"
 
-  ADDR="$TOOL/$WT"
+  SESSION="${AGENT_BUS_SESSION:-${CLAUDE_CODE_SESSION_ID:-${CODEX_SESSION_ID:-${CODEX_THREAD_ID:-${OPENCODE_SESSION_ID:-local}}}}}"
+
+  # SCOPE is the routing address (tool + worktree); ADDR is the identity.
+  # A session id makes the identity unique — two sessions of one tool in one
+  # worktree (or one tool/wt name across two repos) get distinct seats, own
+  # read cursors, and exact sender exclusion. Markerless shells (no session
+  # id) keep ADDR == SCOPE, which is the pre-instance behavior.
+  SCOPE="$TOOL/$WT"
+  if [ "$SESSION" != local ]; then
+    ADDR="$SCOPE.$(printf '%s' "$SESSION" | shasum -a 256 | cut -c1-4)"
+  else
+    ADDR="$SCOPE"
+  fi
   SEAT=$(slugify "$ADDR")
-  SESSION="${AGENT_BUS_SESSION:-${CLAUDE_CODE_SESSION_ID:-${CODEX_SESSION_ID:-local}}}"
+  # Legacy per-scope state key: pre-instance cursors/watch flags live here, and
+  # instance seats fall back to them on first read so an upgrade does not
+  # re-deliver every already-read packet or silently drop a live watch.
+  SCOPE_SEAT=$(slugify "$SCOPE")
 }
 
 # Seat registry doubles as the peer directory for `who`.
@@ -202,25 +229,32 @@ push_targets() {
   for f in "$BUS"/seats/*.json; do
     [ -f "$f" ] || continue
     jq -r \
-      --arg addr "$ADDR" --arg tool "$TOOL" --arg repo "$REPO" --arg repoId "$REPO_ID" \
+      --arg addr "$ADDR" --arg session "$SESSION" \
+      --arg tool "$TOOL" --arg repo "$REPO" --arg repoId "$REPO_ID" \
       --arg wt "$WT" --arg to "$to" --arg state "$state" --arg pm "$pm" --arg wtpm "$wtpm" \
       --arg nameAddr "$nameAddr" \
       --argjson pmStates "$PM_STATES" '
       def same_repo:
         (((.repo_id // "") != "") and (.repo_id == $repoId))
         or (((.repo_id // "") == "") and (.repo == $repo));
-      def is_pm: ((.addr // "") != "") and ((.addr == $pm) or (.addr == $wtpm));
+      # The seat is a match for a registry addr under its instance identity or
+      # its bare scope (legacy pre-instance registrations).
+      def scope: ((.tool // "") + "/" + (.wt // ""));
+      def held($a): ($a != "") and ($a == .addr or $a == scope);
+      def is_pm: held($pm) or held($wtpm);
       select((.socket // "") != "")          # only Claude seats with an inbox
       | select(.addr != $addr)               # never the sender
+      | select($session == "local" or ((.session // "") != $session))
       | select(
           $to == .addr
+          or ($to == scope and (. | same_repo))
           or $to == "@all"
           or ($to == "@here" and (. | same_repo) and .wt == $wt)
           or ($to == "@repo" and (. | same_repo))
           or ($to == ("@" + .tool) and (. | same_repo))
-          or ($nameAddr != "" and .addr == $nameAddr and (. | same_repo))
-          or ($to == "@pm" and (. | same_repo) and (. | is_pm))
-          or ((. | same_repo) and ($pmStates | index($state)) and (. | is_pm))
+          or ($nameAddr != "" and held($nameAddr) and (. | same_repo))
+          or ($to == "@pm" and (. | same_repo) and is_pm)
+          or ((. | same_repo) and ($pmStates | index($state)) and is_pm)
         )
       | "\(.addr)\t\(.socket)"
     ' "$f" 2>/dev/null || true
@@ -264,13 +298,25 @@ render_body() {
 
 STATE_FILE() { printf '%s/state/%s.json' "$BUS" "$SEAT"; }
 
+# Read-side state source: the instance file once it exists, else the legacy
+# per-scope file a pre-instance seat left behind. Writers always write the
+# instance file, so the first write completes the migration; without this
+# fallback an upgraded seat would see days of already-read packets as unread.
+state_src() {
+  local f="$BUS/state/$SEAT.json" legacy="$BUS/state/$SCOPE_SEAT.json"
+  if [ -f "$f" ]; then printf '%s' "$f"
+  elif [ "$SEAT" != "$SCOPE_SEAT" ] && [ -f "$legacy" ]; then printf '%s' "$legacy"
+  else printf '%s' "$f"
+  fi
+}
+
 read_ids() {
-  local f; f=$(STATE_FILE)
+  local f; f=$(state_src)
   [ -f "$f" ] && jq -c '.read // []' "$f" || echo '[]'
 }
 
 shown_counts() {
-  local f; f=$(STATE_FILE)
+  local f; f=$(state_src)
   [ -f "$f" ] && jq -c '.shown // {}' "$f" || echo '{}'
 }
 
@@ -284,10 +330,22 @@ MAX_SHOWS="${AGENT_BUS_MAX_SHOWS:-3}"
 # closed) — never on `read`, which is exactly what a woken agent must do.
 WAKE_BUDGET="${AGENT_BUS_WAKE_BUDGET:-3}"
 
+# Serialize read-modify-write of the seat state file. Concurrent hook fires
+# (SessionStart heartbeat + digest) could otherwise interleave and drop a
+# cursor update. Bounded wait, then steal — a wedged lock (killed process)
+# must not block every subsequent hook forever.
+state_lock() {
+  local i=0
+  while ! mkdir "$(STATE_FILE).lock" 2>/dev/null && ((i < 20)); do sleep 0.05; i=$((i + 1)); done
+  return 0
+}
+state_unlock() { rmdir "$(STATE_FILE).lock" 2>/dev/null || true; }
+
 # Rewrite seat state preserving unrelated fields (e.g. wake_pending).
 write_state() {
   local f read_json shown_json wake_n epoch_field epoch_val prev
   f=$(STATE_FILE)
+  state_lock
   read_json="$1"
   shown_json="$2"
   wake_n="$3"
@@ -308,6 +366,7 @@ write_state() {
     --arg ef "$epoch_field" --argjson ev "$epoch_val" \
     '$prev * {read:$read, shown:$shown, wake_count:$wake} + {($ef): $ev}' >"$f.tmp"
   mv "$f.tmp" "$f"
+  state_unlock
 }
 
 mark_read() {
@@ -347,7 +406,7 @@ reset_wake() {
 
 wake_count() {
   local f n=0
-  f=$(STATE_FILE)
+  f=$(state_src)
   if [ -f "$f" ]; then
     n=$(jq -r '.wake_count // 0' "$f" 2>/dev/null || echo 0)
   fi
@@ -369,8 +428,10 @@ set_wake_pending() {
   if [ ! -f "$f" ]; then
     write_state '[]' '{}' "$(wake_count)" last_wake_pending "$(now_epoch)"
   fi
+  state_lock
   jq -c --argjson p "$pending" --argjson e "$(now_epoch)" \
     '. + {wake_pending:$p, last_wake_pending:$e}' "$f" >"$f.tmp" && mv "$f.tmp" "$f"
+  state_unlock
 }
 
 resolved_ids() { ledger_rows | jq -sc '[.[] | select(.kind=="resolve") | .msg]'; }
@@ -478,12 +539,16 @@ name_seat() {
   [ -f "$f" ] && jq -r '.addr // empty' "$f" 2>/dev/null || printf ''
 }
 
+# Whether a registry-stored addr denotes this seat: its instance addr, or its
+# bare scope left by a pre-instance registration.
+addr_mine() { [ -n "$1" ] && { [ "$1" = "$ADDR" ] || [ "$1" = "$SCOPE" ]; }; }
+
 # This seat's supervisory scope: "all" for the repo PM, else the
 # space-joined worktrees it PMs, else "" (not a PM).
 seat_pm_scope() {
-  if [ "$(pm_seat)" = "$ADDR" ]; then printf 'all'; return; fi
-  wt_pm_map | jq -r --arg a "$ADDR" \
-    '[to_entries[] | select(.value == $a) | .key] | join(" ")'
+  if addr_mine "$(pm_seat)"; then printf 'all'; return; fi
+  wt_pm_map | jq -r --arg a "$ADDR" --arg s "$SCOPE" \
+    '[to_entries[] | select(.value == $a or .value == $s) | .key] | join(" ")'
 }
 
 # Count of supervisory packets unresolved past STALE_HOURS within a PM scope
@@ -501,7 +566,7 @@ stale_count() {
 # seconds per seat, tracked in the seat state file.
 nag_due() {
   local f last=0
-  f=$(STATE_FILE)
+  f=$(state_src)
   [ -f "$f" ] && last=$(jq -r '.last_stale_nag // 0' "$f" 2>/dev/null || echo 0)
   [[ "$last" =~ ^[0-9]+$ ]] || last=0
   (( $(now_epoch) - last >= STALE_NAG ))
@@ -513,7 +578,9 @@ mark_nag() {
     write_state '[]' '{}' "$(wake_count)" last_stale_nag "$(now_epoch)"
     return 0
   fi
+  state_lock
   jq -c --argjson e "$(now_epoch)" '. + {last_stale_nag:$e}' "$f" >"$f.tmp" && mv "$f.tmp" "$f"
+  state_unlock
 }
 
 # Whether any registered seat in this repo runs the given tool. Keeps
@@ -540,7 +607,8 @@ select_unread() {
   local include_read="${1:-0}" digest_mode="${2:-0}" wake_mode="${3:-0}" cut
   cut=$(( $(now_epoch) - LOOKBACK_DAYS * 86400 ))
   ledger_rows | jq -c \
-    --arg addr "$ADDR" --arg tool "$TOOL" --arg repo "$REPO" --arg repoId "$REPO_ID" \
+    --arg addr "$ADDR" --arg scope "$SCOPE" --arg session "$SESSION" \
+    --arg tool "$TOOL" --arg repo "$REPO" --arg repoId "$REPO_ID" \
     --arg wt "$WT" --arg pm "$(pm_seat)" --argjson pmStates "$PM_STATES" \
     --argjson wtpms "$(wt_pm_map)" --argjson names "$(name_map)" \
     --argjson cut "$cut" --argjson read "$(read_ids)" --argjson resolved "$(resolved_ids)" \
@@ -550,20 +618,31 @@ select_unread() {
     def same_repo:
       (((.repo_id // "") != "") and (.repo_id == $repoId))
       or (((.repo_id // "") == "") and (.repo == $repo));
+    # A role registry may hold this seat under its instance addr or (legacy,
+    # pre-instance registration) its bare scope. Scope matches keep live PMs
+    # working across the upgrade; re-registering tightens them to one instance.
+    def mine: . as $a | ($a != "") and ($a == $addr or $a == $scope);
     # This seat supervises the packet: repo PM (any worktree) or the PM
     # registered for the worktree the packet came from.
     def pm_for_me:
-      ($pm == $addr) or (($wtpms[.wt // ""] // "") == $addr);
+      ($pm | mine) or (($wtpms[.wt // ""] // "") | mine);
     # The packet targets a named role this seat holds (--to @research etc.).
     # Reserved scopes can never appear as registry keys, so no shadowing.
     def named_me: (.to // "") as $t
-      | ($t | startswith("@")) and (($names[$t[1:]] // "") == $addr);
+      | ($t | startswith("@")) and (($names[$t[1:]] // "") | mine);
     select(.kind == "msg")
     | . as $m
     | select($m.epoch >= $cut)
+    # Sender exclusion: never this identity, and never this session — a packet
+    # posted by the same session under another hat (a different tool override
+    # or worktree) is still self-authored. Local sessions have no id to
+    # compare, so they fall back to addr-only exclusion.
     | select($m.from != $addr)
+    | select($session == "local" or (($m.session // "") != $session))
     | select(
         $m.to == $addr
+        # The bare tool/wt form addresses every instance in that scope.
+        or ($m.to == $scope and ($m | same_repo))
         or $m.to == "@all"
         or ($m.to == "@here" and ($m | same_repo) and $m.wt == $wt)
         or ($m.to == "@repo" and ($m | same_repo))
@@ -585,8 +664,18 @@ select_unread() {
 # ------------------------------------------------------------------- watch
 
 watch_file() { printf '%s/state/watch/%s.json' "$BUS" "$SEAT"; }
+watch_file_legacy() { printf '%s/state/watch/%s.json' "$BUS" "$SCOPE_SEAT"; }
 
-watch_on() { [ -f "$(watch_file)" ] && jq -e '.on == true' "$(watch_file)" >/dev/null 2>&1; }
+# A pre-instance watch flag under the bare scope keeps counting until this
+# seat writes (or clears) its own — an upgrade must not silently stop wakes.
+watch_on() {
+  local f legacy
+  f=$(watch_file); legacy=$(watch_file_legacy)
+  if [ -f "$f" ]; then jq -e '.on == true' "$f" >/dev/null 2>&1
+  elif [ "$f" != "$legacy" ] && [ -f "$legacy" ]; then jq -e '.on == true' "$legacy" >/dev/null 2>&1
+  else return 1
+  fi
+}
 
 watch_set() {
   local on="$1" f
@@ -597,7 +686,9 @@ watch_set() {
       '{on:true,addr:$addr,epoch:$epoch}' >"$f.tmp"
     mv "$f.tmp" "$f"
   else
-    rm -f "$f"
+    # Clear the legacy scope flag too, or watch_on would fall back to it and
+    # `watch off` would never stick for an upgraded seat.
+    rm -f "$f" "$(watch_file_legacy)"
   fi
 }
 
@@ -661,6 +752,8 @@ claim_foreign_holder() {
     [[ "$hepoch" =~ ^[0-9]+$ ]] || hepoch=0
     ((hepoch < cut)) && continue
     [ "$holder" = "$ADDR" ] && continue
+    # A bare-scope holder is this seat's own pre-instance claim, not a rival.
+    [ "$holder" = "$SCOPE" ] && continue
     [ -z "$holder" ] && continue
     printf '%s %s' "$holder" "$hepoch"
     return 0
@@ -695,10 +788,12 @@ live_claims() {
 cmd_whoami() {
   local watch_status=off held
   watch_on && watch_status=on
-  printf 'seat     %s\nsession  %s\nrepo     %s\nrepo_id  %s\nworktree %s\nbranch   %s\nwatch    %s\ncwd      %s\nbus      %s\n' \
-    "$ADDR" "$SESSION" "$REPO" "$REPO_ID" "$WT" "$BRANCH" "$watch_status" "$TOP" "$BUS"
-  held=$(name_map | jq -r --arg a "$ADDR" \
-    '[to_entries[] | select(.value == $a) | "@" + .key] | join(" ")')
+  printf 'seat     %s\n' "$ADDR"
+  [ "$ADDR" != "$SCOPE" ] && printf 'scope    %s\n' "$SCOPE"
+  printf 'session  %s\nrepo     %s\nrepo_id  %s\nworktree %s\nbranch   %s\nwatch    %s\ncwd      %s\nbus      %s\n' \
+    "$SESSION" "$REPO" "$REPO_ID" "$WT" "$BRANCH" "$watch_status" "$TOP" "$BUS"
+  held=$(name_map | jq -r --arg a "$ADDR" --arg s "$SCOPE" \
+    '[to_entries[] | select(.value == $a or .value == $s) | "@" + .key] | join(" ")')
   [ -n "$held" ] && printf 'names    %s\n' "$held"
   return 0
 }
@@ -709,33 +804,38 @@ cmd_who() {
   printf 'seats active in the last %dm:\n' "$((SEAT_TTL / 60))"
   for f in "$BUS"/seats/*.json; do
     [ -f "$f" ] || continue
-    local e seat_slug addr mark held
-    e=$(jq -r '.epoch' "$f")
+    local e seat_slug addr row_scope mark held
+    # Tolerant read: one corrupt seat file must not kill `who` under set -e.
+    e=$(jq -r '.epoch // 0' "$f" 2>/dev/null || echo 0)
+    [[ "$e" =~ ^[0-9]+$ ]] || continue
     ((e < cut)) && continue
     found=1
-    addr=$(jq -r '.addr' "$f" | sanitize)
+    addr=$(jq -r '.addr // empty' "$f" 2>/dev/null | sanitize)
+    [ -n "$addr" ] || continue
+    row_scope=$(jq -r '((.tool // "") + "/" + (.wt // ""))' "$f" 2>/dev/null || echo '')
     seat_slug=$(basename "$f" .json)
     mark=""
-    held=$(jq -r --arg a "$addr" \
-      '[to_entries[] | select(.value == $a) | "@" + .key] | join(" ")' <<<"$names_json")
+    held=$(jq -r --arg a "$addr" --arg s "$row_scope" \
+      '[to_entries[] | select(.value == $a or (.value == $s and $s != "/")) | "@" + .key] | join(" ")' <<<"$names_json")
     [ -n "$held" ] && mark="  ${held}"
     [ "$addr" = "$ADDR" ] && mark="${mark}  <- you"
     seat_watch_on "$seat_slug" && mark="${mark}  watch"
-    printf '  %-22s %-14s %-46s %s ago%s\n' \
-      "$addr" "$(jq -r '.repo' "$f" | sanitize)" "$(jq -r '.branch' "$f" | sanitize)" \
+    printf '  %-26s %-14s %-46s %s ago%s\n' \
+      "$addr" "$(jq -r '.repo // "-"' "$f" 2>/dev/null | sanitize)" \
+      "$(jq -r '.branch // "-"' "$f" 2>/dev/null | sanitize)" \
       "$(age "$e")" "$mark"
   done
   ((found)) || printf '  (none)\n'
   local pm; pm=$(pm_seat)
   if [ -n "$pm" ]; then
-    printf '\nPM for %s: %s%s\n' "$REPO" "$pm" "$([ "$pm" = "$ADDR" ] && echo '  <- you')"
+    printf '\nPM for %s: %s%s\n' "$REPO" "$pm" "$(addr_mine "$pm" && echo '  <- you')"
     printf '  auto-CC: needs-review, blocked, handoff, question (any worktree)\n'
   fi
   local wtpms; wtpms=$(wt_pm_map)
   if [ -n "$wtpms" ] && [ "$wtpms" != '{}' ]; then
     printf '\nworktree PMs for %s (auto-CC scoped to that worktree):\n' "$REPO"
-    jq -r --arg me "$ADDR" \
-      'to_entries[] | "  \(.value) -> wt:\(.key)\(if .value == $me then "  <- you" else "" end)"' \
+    jq -r --arg me "$ADDR" --arg my_scope "$SCOPE" \
+      'to_entries[] | "  \(.value) -> wt:\(.key)\(if .value == $me or .value == $my_scope then "  <- you" else "" end)"' \
       <<<"$wtpms" | sanitize
   fi
   local claims; claims=$(live_claims)
@@ -749,17 +849,19 @@ cmd_post() {
   local to='@here' state='fyi' subject='' body='' bodyfile='' touched='[]' re='null'
   while [ $# -gt 0 ]; do
     case "$1" in
-      --to) to="$2"; shift 2 ;;
-      --state) state="$2"; shift 2 ;;
-      --subject|-s) subject="$2"; shift 2 ;;
-      -m|--message) body="$2"; shift 2 ;;
-      --file|-f) bodyfile="$2"; shift 2 ;;
+      --to) [ $# -ge 2 ] || die "post: --to needs a value"; to="$2"; shift 2 ;;
+      --state) [ $# -ge 2 ] || die "post: --state needs a value"; state="$2"; shift 2 ;;
+      --subject|-s) [ $# -ge 2 ] || die "post: --subject needs a value"; subject="$2"; shift 2 ;;
+      -m|--message) [ $# -ge 2 ] || die "post: -m needs a value"; body="$2"; shift 2 ;;
+      --file|-f) [ $# -ge 2 ] || die "post: --file needs a value"; bodyfile="$2"; shift 2 ;;
       --re)
+        [ $# -ge 2 ] || die "post: --re needs a packet id"
         # Shape-checked so the quoted embed below cannot inject structure (or
         # break the record) — after this, $2 is exactly one canonical id.
         valid_id "$2" || die "post: --re expects a packet id like 20260101T000000Z-0a1b2c3d"
         re="\"$2\""; shift 2 ;;
       --touched)
+        [ $# -ge 2 ] || die "post: --touched needs a value"
         if [ "$2" = auto ]; then
           touched=$( { git diff --name-only HEAD 2>/dev/null; git ls-files --others --exclude-standard 2>/dev/null; } \
             | head -20 | jq -Rsc 'split("\n") | map(select(length>0))')
@@ -927,8 +1029,8 @@ cmd_wait() {
   local timeout=1800 interval=15 wake=1
   while [ $# -gt 0 ]; do
     case "$1" in
-      --timeout) timeout="$2"; shift 2 ;;
-      --interval) interval="$2"; shift 2 ;;
+      --timeout) [ $# -ge 2 ] || die "wait: --timeout needs a value"; timeout="$2"; shift 2 ;;
+      --interval) [ $# -ge 2 ] || die "wait: --interval needs a value"; interval="$2"; shift 2 ;;
       --any) wake=0; shift ;;
       *) die "wait: unknown flag $1 (expected --timeout, --interval, --any)" ;;
     esac
@@ -983,23 +1085,27 @@ cmd_show() {
 # permissions system (identity is self-asserted; see PROTOCOL.md).
 resolve_standing() {
   jq -r \
-    --arg addr "$ADDR" --arg tool "$TOOL" --arg repo "$REPO" --arg repoId "$REPO_ID" \
+    --arg addr "$ADDR" --arg scope "$SCOPE" --arg session "$SESSION" \
+    --arg tool "$TOOL" --arg repo "$REPO" --arg repoId "$REPO_ID" \
     --arg wt "$WT" --arg pm "$(pm_seat)" --argjson wtpms "$(wt_pm_map)" \
     --argjson names "$(name_map)" '
     def same_repo:
       (((.repo_id // "") != "") and (.repo_id == $repoId))
       or (((.repo_id // "") == "") and (.repo == $repo));
+    def mine: . as $a | ($a != "") and ($a == $addr or $a == $scope);
     def named_me: (.to // "") as $t
-      | ($t | startswith("@")) and (($names[$t[1:]] // "") == $addr);
+      | ($t | startswith("@")) and (($names[$t[1:]] // "") | mine);
     if .from == $addr
+      or ($session != "local" and (.session // "") == $session)
       or .to == $addr
+      or (.to == $scope and same_repo)
       or .to == "@all"
       or (.to == "@here" and same_repo and .wt == $wt)
       or (.to == "@repo" and same_repo)
       or (.to == ("@" + $tool) and same_repo)
       or (same_repo and named_me)
-      or ($pm != "" and $pm == $addr and same_repo)
-      or (same_repo and (($wtpms[.wt // ""] // "") == $addr))
+      or (same_repo and ($pm | mine))
+      or (same_repo and (($wtpms[.wt // ""] // "") | mine))
     then "ok" else "no" end'
 }
 
@@ -1064,7 +1170,9 @@ cmd_release() {
   if [ "${1:-}" = --all ]; then
     for f in "$BUS"/claims/*.json; do
       [ -f "$f" ] || continue
-      [ "$(jq -r '.addr' "$f")" = "$ADDR" ] && rm -f "$f"
+      local h; h=$(jq -r '.addr // empty' "$f" 2>/dev/null || true)
+      # Bare-scope holders are this seat's own pre-instance claims.
+      { [ "$h" = "$ADDR" ] || [ "$h" = "$SCOPE" ]; } && rm -f "$f"
     done
     printf 'released all claims held by %s\n' "$ADDR"
     return
@@ -1256,7 +1364,7 @@ cmd_role() {
     case "$1" in
       --clear) clear=1; shift ;;
       --force) force=1; shift ;;
-      --repo) label="$2"; key="$2"; use_default=0; shift 2 ;;
+      --repo) [ $# -ge 2 ] || die "role: --repo needs a value"; label="$2"; key="$2"; use_default=0; shift 2 ;;
       --wt) [ -n "${2:-}" ] || die "role: --wt needs a worktree name"; wt="$2"; shift 2 ;;
       pm) role=pm; shift ;;
       -*) die "role: unknown flag $1 (expected: pm, <name>, --wt <worktree>, --clear, --force, --repo <name-or-id>)" ;;
@@ -1279,7 +1387,7 @@ cmd_role() {
       if [ ! -f "$nf" ]; then
         printf 'no seat holds @%s in %s\n' "$name" "$label"; return
       fi
-      [ -z "$ncur" ] || [ "$ncur" = "$ADDR" ] || \
+      [ -z "$ncur" ] || addr_mine "$ncur" || \
         printf 'agent-bus: releasing @%s held by another seat (%s)\n' "$name" "$ncur" >&2
       rm -f "$nf"
       printf 'role @%s cleared for %s\n' "$name" "$label"
@@ -1288,13 +1396,13 @@ cmd_role() {
 
     # Same guardrail as pm: redirecting a name away from a live holder
     # redirects its mail, so it takes an explicit --force.
-    if [ -n "$ncur" ] && [ "$ncur" != "$ADDR" ] && ((!force)) && seat_live "$ncur"; then
+    if [ -n "$ncur" ] && ! addr_mine "$ncur" && ((!force)) && seat_live "$ncur"; then
       die "role: @$name is held by $ncur (still live) — retry with --force to take over"
     fi
     mkdir -p "$(dirname "$nf")"
     jq -n -c --arg addr "$ADDR" --arg name "$name" '{addr:$addr,name:$name}' >"$nf.tmp"
     mv "$nf.tmp" "$nf"
-    if [ -n "$ncur" ] && [ "$ncur" != "$ADDR" ]; then
+    if [ -n "$ncur" ] && ! addr_mine "$ncur"; then
       printf '@%s in %s: %s (took over from %s)\n' "$name" "$label" "$ADDR" "$ncur"
     else
       printf '@%s in %s: %s\n' "$name" "$label" "$ADDR"
@@ -1314,7 +1422,7 @@ cmd_role() {
       if [ ! -f "$wf" ]; then
         printf 'no PM registered for %s\n' "$wlabel"; return
       fi
-      [ -z "$wcur" ] || [ "$wcur" = "$ADDR" ] || \
+      [ -z "$wcur" ] || addr_mine "$wcur" || \
         printf 'agent-bus: releasing worktree PM held by another seat (%s)\n' "$wcur" >&2
       rm -f "$wf"
       printf 'PM role cleared for %s\n' "$wlabel"
@@ -1329,13 +1437,13 @@ cmd_role() {
 
     # A takeover redirects that worktree's supervisory packets, so hijacking a
     # live holder requires --force — same rule as the repo PM.
-    if [ -n "$wcur" ] && [ "$wcur" != "$ADDR" ] && ((!force)) && seat_live "$wcur"; then
+    if [ -n "$wcur" ] && ! addr_mine "$wcur" && ((!force)) && seat_live "$wcur"; then
       die "role: PM for $wlabel is $wcur (still live) — retry with --force to take over"
     fi
     mkdir -p "$(dirname "$wf")"
     jq -n -c --arg addr "$ADDR" --arg wt "$wt" '{addr:$addr,wt:$wt}' >"$wf.tmp"
     mv "$wf.tmp" "$wf"
-    if [ -n "$wcur" ] && [ "$wcur" != "$ADDR" ]; then
+    if [ -n "$wcur" ] && ! addr_mine "$wcur"; then
       printf 'PM for %s: %s (took over from %s)\n' "$wlabel" "$ADDR" "$wcur"
     else
       printf 'PM for %s: %s\n' "$wlabel" "$ADDR"
@@ -1358,7 +1466,7 @@ cmd_role() {
     if [ -z "$cur" ] && { [ -z "$legacy_f" ] || [ ! -f "$legacy_f" ]; }; then
       printf 'no PM registered for %s\n' "$label"; return
     fi
-    [ -z "$cur" ] || [ "$cur" = "$ADDR" ] || \
+    [ -z "$cur" ] || addr_mine "$cur" || \
       printf 'agent-bus: releasing PM held by another seat (%s)\n' "$cur" >&2
     rm -f "$f"
     [ -n "$legacy_f" ] && rm -f "$legacy_f"
@@ -1384,13 +1492,13 @@ cmd_role() {
   # A takeover redirects every supervisory packet in the repo, so hijacking a
   # holder that is still live requires an explicit --force. Dead holders
   # (past SEAT_TTL) are reclaimed silently.
-  if [ -n "$cur" ] && [ "$cur" != "$ADDR" ] && ((!force)) && seat_live "$cur"; then
+  if [ -n "$cur" ] && ! addr_mine "$cur" && ((!force)) && seat_live "$cur"; then
     die "role: PM for $label is $cur (still live) — retry with --force to take over"
   fi
   mkdir -p "$(dirname "$f")"
   printf '%s' "$ADDR" >"$f"
   [ -n "$legacy_f" ] && rm -f "$legacy_f"
-  if [ -n "$cur" ] && [ "$cur" != "$ADDR" ]; then
+  if [ -n "$cur" ] && ! addr_mine "$cur"; then
     printf 'PM for %s: %s (took over from %s)\n' "$label" "$ADDR" "$cur"
   else
     printf 'PM for %s: %s\n' "$label" "$ADDR"
@@ -1696,6 +1804,14 @@ agent-bus — handoff bus for coding agents sharing repos/worktrees.
                                   opt out: AGENT_BUS_NO_AUTO_GC=1). gc never
                                   resolves packets — see triage
   stop-hook                       lifecycle Stop entry (JSON; used by install-hooks)
+
+Seats: every session is <tool>/<worktree>.<inst> (e.g. claude/main.b41c),
+where <inst> is a short hash of the host session id — so two sessions of one
+tool in one worktree, or the same tool/worktree name in two repos, never share
+an identity, a read cursor, or a watch flag. Sessions without a session id
+(plain shells) stay bare <tool>/<worktree>. The bare form is the seat's scope:
+--to claude/main reaches every claude instance in that worktree of this repo;
+--to claude/main.b41c reaches exactly one session.
 
 Scopes: @here = same repo+worktree, @repo = same repo any worktree,
 @pm = the PM(s) responsible for the sender — the repo PM plus any PM scoped to

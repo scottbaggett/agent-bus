@@ -45,8 +45,12 @@ Full protocol: [PROTOCOL.md](PROTOCOL.md). Runbook for agents:
 
 ## How it works
 
-Every agent session occupies a **seat** addressed `<tool>/<worktree>` — `codex/64ef`,
-`claude/main`. Seats post packets and take advisory file claims.
+Every agent session occupies a **seat** addressed `<tool>/<worktree>.<inst>` —
+`codex/64ef.3fa2`, `claude/main.b41c` — where `<inst>` is a short hash of the
+host session id, so two sessions never share an identity (plain shells without
+a session id stay bare `<tool>/<worktree>`). The bare form is the seat's scope:
+it addresses every instance of that tool in that worktree. Seats post packets
+and take advisory file claims.
 
 Delivery is **pull-first**. `SessionStart` and `UserPromptSubmit` hooks run
 `agent-bus digest`, which prints unread packets and stays silent when there are none, so a
@@ -79,7 +83,8 @@ turn in a shell sleep-loop (no tokens) until supervisory mail arrives.
 
 | `--to` | Reaches |
 |---|---|
-| `codex/64ef` | that exact seat |
+| `codex/64ef.3fa2` | that exact seat (one session) |
+| `codex/64ef` | every codex instance in that worktree of this repo |
 | `@here` (default) | same repo **and** same worktree |
 | `@repo` | every seat in this repo, any worktree |
 | `@pm` | the PM(s) responsible for the sender: repo PM plus any worktree-scoped PM |

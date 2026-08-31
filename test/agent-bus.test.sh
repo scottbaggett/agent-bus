@@ -232,16 +232,39 @@ out=$("$BIN" watch)
 assert_contains "watch defaults off" "watch off" "$out"
 
 # Supervisory unread while watch off → no wake
-AGENT_BUS_TOOL=claude "$BIN" post --to @here --state needs-review \
+AGENT_BUS_TOOL=claude "$BIN" post --to @codex --state needs-review \
   -m $'# wake-target\n\nplease review' >/dev/null
 out=$(printf '{}' | AGENT_BUS_TOOL=codex "$BIN" stop-hook)
 assert_eq "stop-hook idle when watch off" "{}" "$(echo "$out" | jq -c .)"
 
+# Watch on, but the packet is a broadcast (@codex): the seat sees it as digest
+# context, yet is NOT woken — supervisory wake belongs to the packet's owner.
 AGENT_BUS_TOOL=codex "$BIN" watch on >/dev/null
+out=$(printf '{}' | AGENT_BUS_TOOL=codex "$BIN" stop-hook)
+assert_eq "broadcast supervisory does not wake bystander" "{}" "$(echo "$out" | jq -c .)"
+out=$(AGENT_BUS_TOOL=codex "$BIN" read --peek)
+assert_contains "bystander still sees broadcast in digest" "wake-target" "$out"
+assert_contains "bystander copy labeled as not theirs" "act only if it names you" "$out"
+AGENT_BUS_TOOL=codex "$BIN" read >/dev/null
+
+# Directly addressed supervisory mail does wake.
+WAKE_WT=$(awk '/^worktree/{print $2}' <<<"$(AGENT_BUS_TOOL=codex "$BIN" whoami)")
+AGENT_BUS_TOOL=claude "$BIN" post --to "codex/$WAKE_WT" --state needs-review \
+  -m $'# wake-target-direct\n\nplease review' >/dev/null
 out=$(printf '{}' | AGENT_BUS_TOOL=codex "$BIN" stop-hook)
 dec=$(echo "$out" | jq -r '.decision // empty')
 assert_eq "stop-hook blocks when watch on" "block" "$dec"
-assert_contains "stop-hook reason has subject" "wake-target" "$(echo "$out" | jq -r '.reason')"
+assert_contains "stop-hook reason has subject" "wake-target-direct" "$(echo "$out" | jq -r '.reason')"
+
+# A watching repo PM IS woken by @here supervisory traffic (owner via auto-CC).
+AGENT_BUS_TOOL=cursor AGENT_BUS_WT=pm-seat "$BIN" read >/dev/null
+AGENT_BUS_TOOL=cursor AGENT_BUS_WT=pm-seat "$BIN" watch on >/dev/null
+AGENT_BUS_TOOL=claude "$BIN" post --to @here --state needs-review \
+  -m $'# pm-wake\n\nreview me' >/dev/null
+out=$(printf '{}' | AGENT_BUS_TOOL=cursor AGENT_BUS_WT=pm-seat "$BIN" stop-hook)
+assert_eq "@here supervisory wakes the PM" "block" "$(echo "$out" | jq -r '.decision // empty')"
+AGENT_BUS_TOOL=cursor AGENT_BUS_WT=pm-seat "$BIN" read >/dev/null
+AGENT_BUS_TOOL=cursor AGENT_BUS_WT=pm-seat "$BIN" watch off >/dev/null
 
 # Ack so fyi test starts clean
 AGENT_BUS_TOOL=codex "$BIN" read >/dev/null
@@ -254,7 +277,7 @@ assert_eq "stop-hook ignores fyi" "{}" "$(echo "$out" | jq -c .)"
 # MAX_SHOWS cap: after three surfacings, further stop-hook is {}
 # Use @repo so a different worktree seat receives the packet.
 export AGENT_BUS_MAX_SHOWS=3
-AGENT_BUS_TOOL=claude "$BIN" post --to @repo --state question \
+AGENT_BUS_TOOL=claude "$BIN" post --to cursor/wake-cap --state question \
   -m $'# cap-me\n\nwhy?' >/dev/null
 AGENT_BUS_TOOL=cursor AGENT_BUS_WT=wake-cap "$BIN" watch on >/dev/null
 for i in 1 2 3; do
@@ -268,7 +291,7 @@ assert_eq "stop-hook silent after MAX_SHOWS" "{}" "$(echo "$out" | jq -c .)"
 
 # Cursor stop adapter maps block → followup_message
 AGENT_BUS_TOOL=cursor AGENT_BUS_WT=wake-map "$BIN" watch on >/dev/null
-AGENT_BUS_TOOL=claude "$BIN" post --to @cursor --state handoff \
+AGENT_BUS_TOOL=claude "$BIN" post --to cursor/wake-map --state handoff \
   -m $'# cursor-wake\n\ntake it' >/dev/null
 out=$(printf '{}' | AGENT_BUS_HOME="$BUS_HOME" AGENT_BUS_TOOL=cursor AGENT_BUS_WT=wake-map \
   "$HOOK" stop)
@@ -278,22 +301,22 @@ assert_contains "cursor stop followup_message" "cursor-wake" \
 # --- BLOCKER 1: per-seat wake budget across distinct packets ---
 export AGENT_BUS_WAKE_BUDGET=2
 AGENT_BUS_TOOL=cursor AGENT_BUS_WT=wake-budget "$BIN" watch on >/dev/null
-AGENT_BUS_TOOL=claude "$BIN" post --to @repo --state question -m $'# wb1\n\none' >/dev/null
+AGENT_BUS_TOOL=claude "$BIN" post --to cursor/wake-budget --state question -m $'# wb1\n\none' >/dev/null
 out=$(printf '{}' | AGENT_BUS_TOOL=cursor AGENT_BUS_WT=wake-budget AGENT_BUS_WAKE_BUDGET=2 \
   "$BIN" stop-hook)
 assert_eq "wake budget 1/2 blocks" "block" "$(echo "$out" | jq -r '.decision // empty')"
-AGENT_BUS_TOOL=claude "$BIN" post --to @repo --state question -m $'# wb2\n\ntwo' >/dev/null
+AGENT_BUS_TOOL=claude "$BIN" post --to cursor/wake-budget --state question -m $'# wb2\n\ntwo' >/dev/null
 out=$(printf '{}' | AGENT_BUS_TOOL=cursor AGENT_BUS_WT=wake-budget AGENT_BUS_WAKE_BUDGET=2 \
   "$BIN" stop-hook)
 assert_eq "wake budget 2/2 blocks" "block" "$(echo "$out" | jq -r '.decision // empty')"
-AGENT_BUS_TOOL=claude "$BIN" post --to @repo --state question -m $'# wb3\n\nthree' >/dev/null
+AGENT_BUS_TOOL=claude "$BIN" post --to cursor/wake-budget --state question -m $'# wb3\n\nthree' >/dev/null
 out=$(printf '{}' | AGENT_BUS_TOOL=cursor AGENT_BUS_WT=wake-budget AGENT_BUS_WAKE_BUDGET=2 \
   "$BIN" stop-hook)
 assert_eq "wake budget exhausted ignores new packet" "{}" "$(echo "$out" | jq -c .)"
 
 # read must NOT reset — well-behaved ping-pong would otherwise be unbounded
 AGENT_BUS_TOOL=cursor AGENT_BUS_WT=wake-budget "$BIN" read >/dev/null
-AGENT_BUS_TOOL=claude "$BIN" post --to @repo --state question -m $'# wb4\n\nfour' >/dev/null
+AGENT_BUS_TOOL=claude "$BIN" post --to cursor/wake-budget --state question -m $'# wb4\n\nfour' >/dev/null
 out=$(printf '{}' | AGENT_BUS_TOOL=cursor AGENT_BUS_WT=wake-budget AGENT_BUS_WAKE_BUDGET=2 \
   "$BIN" stop-hook)
 assert_eq "wake budget NOT reset by read" "{}" "$(echo "$out" | jq -c .)"
@@ -317,7 +340,7 @@ rid=$(jq -r 'select(.kind=="msg") | .id' "$BUS_HOME/ledger.jsonl" | tail -1)
 AGENT_BUS_TOOL=cursor AGENT_BUS_WT=wake-budget "$BIN" resolve "$rid" >/dev/null
 out=$(AGENT_BUS_TOOL=cursor AGENT_BUS_WT=wake-budget AGENT_BUS_WAKE_BUDGET=2 "$BIN" watch)
 assert_contains "resolve resets wake budget" "wake 0/2" "$out"
-AGENT_BUS_TOOL=claude "$BIN" post --to @repo --state blocked -m $'# wb5\n\nfive' >/dev/null
+AGENT_BUS_TOOL=claude "$BIN" post --to cursor/wake-budget --state blocked -m $'# wb5\n\nfive' >/dev/null
 out=$(printf '{}' | AGENT_BUS_TOOL=cursor AGENT_BUS_WT=wake-budget AGENT_BUS_WAKE_BUDGET=2 \
   "$BIN" stop-hook)
 assert_eq "wake works again after resolve" "block" "$(echo "$out" | jq -r '.decision // empty')"
@@ -328,14 +351,14 @@ AGENT_BUS_TOOL=codex AGENT_BUS_WT=pong-a "$BIN" watch on >/dev/null
 AGENT_BUS_TOOL=claude AGENT_BUS_WT=pong-b "$BIN" watch on >/dev/null
 for round in 1 2; do
   AGENT_BUS_TOOL=claude AGENT_BUS_WT=pong-b \
-    "$BIN" post --to @repo --state question -m $'# pong-'$round$'\n\nping' >/dev/null
+    "$BIN" post --to codex/pong-a --state question -m $'# pong-'$round$'\n\nping' >/dev/null
   out=$(printf '{}' | AGENT_BUS_TOOL=codex AGENT_BUS_WT=pong-a AGENT_BUS_WAKE_BUDGET=2 \
     "$BIN" stop-hook)
   assert_eq "ping-pong round $round wakes" "block" "$(echo "$out" | jq -r '.decision // empty')"
   AGENT_BUS_TOOL=codex AGENT_BUS_WT=pong-a "$BIN" read >/dev/null
 done
 AGENT_BUS_TOOL=claude AGENT_BUS_WT=pong-b \
-  "$BIN" post --to @repo --state question -m $'# pong-3\n\nping' >/dev/null
+  "$BIN" post --to codex/pong-a --state question -m $'# pong-3\n\nping' >/dev/null
 out=$(printf '{}' | AGENT_BUS_TOOL=codex AGENT_BUS_WT=pong-a AGENT_BUS_WAKE_BUDGET=2 \
   "$BIN" stop-hook)
 assert_eq "ping-pong exhausts despite read" "{}" "$(echo "$out" | jq -c .)"
@@ -619,6 +642,27 @@ assert_eq "auto-gc rate-limited within the interval" "0" "$?"
 
 export AGENT_BUS_HOME="$SAVED_HOME"
 rm -rf "$HYG_HOME"
+
+# --- supervisory ownership: post hint + named-role wake ---
+# Posting a supervisory state to a broadcast scope prints an ownership note.
+out=$(AGENT_BUS_TOOL=claude AGENT_BUS_WT=worker "$BIN" post --to @here \
+  --state needs-review -m $'# hinted\n\nreview' 2>&1)
+assert_contains "broadcast supervisory post hints at PM ownership" "note: [needs-review] on @here is broadcast context" "$out"
+out=$(AGENT_BUS_TOOL=claude AGENT_BUS_WT=worker "$BIN" post --to claude/somewhere \
+  --state needs-review -m $'# unhinted\n\nreview' 2>&1)
+assert_not_contains "direct supervisory post gets no hint" "owns it" "$out"
+AGENT_BUS_TOOL=claude "$BIN" read >/dev/null
+
+# A named-role holder owns supervisory mail addressed to its name: it wakes.
+AGENT_BUS_TOOL=claude AGENT_BUS_WT=lane-wt "$BIN" role reviewer >/dev/null
+AGENT_BUS_TOOL=claude AGENT_BUS_WT=lane-wt "$BIN" watch on >/dev/null
+AGENT_BUS_TOOL=codex AGENT_BUS_WT=elsewhere "$BIN" post --to @reviewer \
+  --state needs-review -m $'# for-reviewer\n\nlook' >/dev/null
+out=$(printf '{}' | AGENT_BUS_TOOL=claude AGENT_BUS_WT=lane-wt "$BIN" stop-hook)
+assert_eq "named-role supervisory mail wakes the holder" "block" "$(echo "$out" | jq -r '.decision // empty')"
+AGENT_BUS_TOOL=claude AGENT_BUS_WT=lane-wt "$BIN" read >/dev/null
+AGENT_BUS_TOOL=claude AGENT_BUS_WT=lane-wt "$BIN" watch off >/dev/null
+AGENT_BUS_TOOL=claude AGENT_BUS_WT=lane-wt "$BIN" role reviewer --clear >/dev/null
 
 # --- instance seats: tool detection, per-session identity, legacy compat ---
 INST_HOME=$(mktemp -d)

@@ -182,9 +182,21 @@ agent-bus watch off      # disable
 
 When watch is on, the lifecycle **Stop** hook runs `agent-bus stop-hook`. If
 there are unread **supervisory** packets (`needs-review`, `blocked`, `handoff`,
-`question`), it blocks the stop and feeds the digest back as the next turn
-(Claude/Codex `decision: block`; Cursor `followup_message`). `fyi` and `done`
-never wake.
+`question`) that this seat **owns**, it blocks the stop and feeds the digest
+back as the next turn (Claude/Codex `decision: block`; Cursor
+`followup_message`). `fyi` and `done` never wake.
+
+**Ownership**: a seat owns a packet when it is the direct addressee (instance
+or bare scope), holds the `@<name>` the packet targets, is an `@pm` target, or
+is auto-CC'd as a PM for it. A supervisory packet that reaches a seat only
+through a broadcast scope (`@here`, `@repo`, `@all`, `@<tool>`) is **context,
+not work**: it appears in the seat's digest labeled `(broadcast copy — the PM
+or addressee owns this; act only if it names you)`, but never wakes the seat
+and never triggers a post-time poke to it. Without this, every watching agent
+in a shared worktree woke on one peer's `needs-review` and all of them acted
+on it. Posting a supervisory state to a broadcast scope prints a note naming
+the owning PM (or warning that no seat will be woken when no PM exists) —
+target `--to @pm`, a seat, or a named role when you want a specific owner.
 
 Two caps apply:
 

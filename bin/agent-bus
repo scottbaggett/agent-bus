@@ -265,6 +265,13 @@ push_targets() {
       def scope: ((.tool // "") + "/" + (.wt // ""));
       def held($a): ($a != "") and ($a == .addr or $a == scope);
       def is_pm: held($pm) or held($wtpm);
+      # Owner mirror of select_unread: the seat expected to act on the packet.
+      def owned:
+        $to == .addr
+        or ($to == scope and (. | same_repo))
+        or ($nameAddr != "" and held($nameAddr) and (. | same_repo))
+        or ($to == "@pm" and (. | same_repo) and is_pm)
+        or ((. | same_repo) and ($pmStates | index($state)) != null and is_pm);
       select(((.socket // "") != "") or ((.endpoint // "") != ""))
       | select(.addr != $addr)               # never the sender
       | select($session == "local" or ((.session // "") != $session))
@@ -279,6 +286,10 @@ push_targets() {
           or ($to == "@pm" and (. | same_repo) and is_pm)
           or ((. | same_repo) and ($pmStates | index($state)) and is_pm)
         )
+      # Supervisory pokes go only to owners; a broadcast bystander gets the
+      # packet as digest context on its next turn instead of an interrupt —
+      # poking every idle worktree-mate made all of them grab the same review.
+      | select((($pmStates | index($state)) == null) or owned)
       | if (.socket // "") != "" then "socket\t\(.socket)\t\(.addr)"
         else "endpoint\t\(.endpoint)\t\(.addr)" end
     ' "$f" 2>/dev/null || true
@@ -626,7 +637,13 @@ tool_scope_exists() {
 # Messages this seat should see: addressed to it (directly or by scope),
 # not sent by it, not resolved, not already read, within the lookback window.
 # Args: include_read digest_mode wake_mode
-# wake_mode=1 keeps only supervisory states (PM_STATES) for Stop-hook wake.
+# wake_mode=1 keeps only supervisory states (PM_STATES) for Stop-hook wake —
+# and only packets this seat OWNS (direct/scope/named addressee, or a PM for
+# it). Broadcast recipients (@here/@repo/@all/@<tool>) still see supervisory
+# packets as digest context, but a review request has exactly one owner:
+# waking every bystander in the worktree made all of them act on it at once.
+# Each emitted row carries own:true|false so renderers can label bystander
+# copies as someone else's to act on.
 select_unread() {
   local include_read="${1:-0}" digest_mode="${2:-0}" wake_mode="${3:-0}" cut
   cut=$(( $(now_epoch) - LOOKBACK_DAYS * 86400 ))
@@ -654,6 +671,15 @@ select_unread() {
     # Reserved scopes can never appear as registry keys, so no shadowing.
     def named_me: (.to // "") as $t
       | ($t | startswith("@")) and (($names[$t[1:]] // "") | mine);
+    # This seat OWNS the packet — it is the one expected to act: a direct,
+    # scope, or named addressee, an @pm target, or an auto-CC PM supervisor.
+    # Broadcast scopes are deliberately absent: they deliver context, not work.
+    def owned($m):
+      $m.to == $addr
+      or ($m.to == $scope and ($m | same_repo))
+      or (($m | same_repo) and ($m | named_me))
+      or ($m.to == "@pm" and ($m | same_repo) and ($m | pm_for_me))
+      or (($m | same_repo) and ($pmStates | index($m.state)) != null and ($m | pm_for_me));
     select(.kind == "msg")
     | . as $m
     | select($m.epoch >= $cut)
@@ -681,7 +707,11 @@ select_unread() {
     | select($resolved | index($m.id) | not)
     | select($includeRead == 1 or ($read | index($m.id) | not))
     | select($digest == 0 or (($shown[$m.id] // 0) < $maxShows))
-    | select($wake == 0 or ($pmStates | index($m.state)))
+    # Wake only the owner: a supervisory packet that reached this seat as a
+    # broadcast is someone else to act on — surfacing it in the digest is
+    # enough, continuing every watching bystander made them all grab it.
+    | select($wake == 0 or (($pmStates | index($m.state)) != null and owned($m)))
+    | . + {own: owned($m)}
   '
 }
 
@@ -951,6 +981,24 @@ cmd_post() {
   fi
   printf 'posted %s -> %s  [%s]  id=%s\n' "$ADDR" "$to" "$state" "$id"
 
+  # A supervisory state on a broadcast scope has no single owner: peers see it
+  # as context but only a PM is woken/expected to act. Senders who want a
+  # specific seat to pick the work up should say so.
+  case "$state" in
+    needs-review|blocked|handoff|question)
+      case "$to" in
+        @here|@repo|@all|@codex|@claude|@cursor|@opencode|@shell)
+          local pm_note; pm_note=$(pm_seat)
+          if [ -n "$pm_note" ]; then
+            printf 'note: [%s] on %s is broadcast context — the PM (%s) owns it. Target --to @pm or a seat for a specific owner.\n' \
+              "$state" "$to" "$pm_note" >&2
+          else
+            printf 'note: [%s] on %s has no owner (no PM registered) — no seat will be woken to act on it.\n' \
+              "$state" "$to" >&2
+          fi ;;
+      esac ;;
+  esac
+
   # Push a wake to each reachable recipient: Claude inbox sockets and generic
   # HTTP endpoints (opencode plugin) alike. The body still travels through the
   # bus; this only nudges the peer to run `read`, so an idle seat acts without
@@ -1010,13 +1058,24 @@ cmd_read() {
   while IFS= read -r m; do
     [ -n "$m" ] || continue
     n=$((n + 1))
-    local id from state epoch branch subj touched
+    local id from state epoch branch subj touched own
     id=$(jq -r '.id' <<<"$m"); from=$(jq -r '.from' <<<"$m" | sanitize)
     state=$(jq -r '.state' <<<"$m" | sanitize); epoch=$(jq -r '.epoch' <<<"$m")
     branch=$(jq -r '.branch' <<<"$m" | sanitize); subj=$(jq -r '.subject' <<<"$m" | sanitize)
     touched=$(jq -r '(.touched // []) | join(", ")' <<<"$m" | sanitize)
+    # Not `.own // true`: jq's // treats false as absent, which would erase
+    # exactly the value this exists to carry.
+    own=$(jq -r 'if .own == false then "false" else "true" end' <<<"$m")
     [[ "$epoch" =~ ^[0-9]+$ ]] || epoch=$(now_epoch)
     printf '\n[%d] from %s · %s · %s ago · %s\n' "$n" "$from" "$state" "$(age "$epoch")" "$branch"
+    # A supervisory packet that reached this seat only as a broadcast is
+    # somebody else to act on. Without this line, every agent in a shared
+    # worktree treats a peer review request as its own work item.
+    if [ "$own" != true ]; then
+      case "$state" in needs-review|blocked|handoff|question)
+        printf '    (broadcast copy — the PM or addressee owns this; act only if it names you)\n' ;;
+      esac
+    fi
     [ -n "$subj" ] && printf '    %s\n' "$subj"
     [ -n "$touched" ] && printf '    touched: %s\n' "$touched"
     printf '    id: %s\n' "$id" | sanitize
@@ -1868,7 +1927,12 @@ same escalation, but only for packets from that worktree. One PM per
 (repo, worktree); worktree PMs coexist with (never shadow) the repo PM.
 
 Watch: agent-bus watch on enables Stop-hook continuation when supervisory
-packets (needs-review, blocked, handoff, question) are unread. Per-packet
+packets (needs-review, blocked, handoff, question) that this seat OWNS are
+unread — it is the direct/scope/named addressee, an @pm target, or a PM
+auto-CC. A supervisory packet arriving via a broadcast scope (@here, @repo,
+@all, @<tool>) is context, not work: it shows in the digest labeled as the
+PM's or addressee's to act on, and never wakes or pokes bystanders — one
+review request must not activate every agent in the worktree. Per-packet
 MAX_SHOWS still applies; a separate per-seat WAKE_BUDGET (default 3) caps
 distinct-packet wake storms and resets only on agent-bus resolve (or
 watch reset) — never on read or watch on/off. Exhaustion with pending mail

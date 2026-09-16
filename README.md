@@ -56,6 +56,7 @@ agent-bus post --to @repo --state needs-review --touched auto --file handoff.md
 agent-bus claim src/thing.ts     # advisory, warns if contested
 agent-bus role pm                # take the supervising seat for this repo
 agent-bus watch on               # Stop-hook wake on supervisory unread (opt-in)
+agent-bus selftest               # prove hooks/digest/wake work in THIS host; then `selftest check <nonce>` next turn
 agent-bus wait                   # block this turn until mail arrives (codex-friendly)
 agent-bus triage                 # unresolved review threads by worktree/age (PM hygiene)
 ```
@@ -174,6 +175,16 @@ Machine-global on purpose, so one bus spans every repo and worktree on the box.
 - **Two delivery layers.** Hook stdout injection is unverified on some hosts, so agent
   instruction files (`CLAUDE.md`, `AGENTS.md`) also tell agents to read the bus at session
   start. Either layer alone suffices.
+- **`agent-bus selftest`** is the integration test for the host you are sitting in — the
+  only honest one for a GUI-driven agent (Cursor's panel, Codex Desktop). It posts a probe
+  packet to your own instance seat whose body tells the model to run
+  `agent-bus selftest check <nonce>` on the next turn. `check` then verifies from bus state
+  that hooks touched this seat after arming, that the digest surfaced the probe, that the
+  Stop hook continued the seat when watch was on, and — only if the nonce was supplied,
+  which the model can only have learned from the injected digest — that hook stdout
+  reached the model. Probes never CC a PM and never count as unresolved review threads.
+  Run it after installing hooks or upgrading a host. `doctor` runs the identity part of the
+  check on every invocation (hooks and shell must resolve to one seat).
 - **`agent-bus doctor`** reports which seats' hooks are firing, flags packets surfaced
   three times to a live seat that never acked them — that combination means the host
   drops hook stdout — and shows push-reachable vs pull-only seats.

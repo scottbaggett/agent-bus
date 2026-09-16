@@ -970,6 +970,11 @@ assert_eq "cursor-compat stop-hook emits {}" "{}" "$(jq -c . <<<"$out")"
 out=$(printf '%s' "$COMPAT" | AGENT_BUS_VIA=hook AGENT_BUS_TOOL=cursor AGENT_BUS_WT=compat "$BIN" heartbeat; ls "$HP_HOME/seats/" | grep -c 'cursor_compat' || true)
 assert_eq "same payload under the cursor tool is honored" "1" "$out"
 
+# Same session anchored elsewhere: hooks at the workspace repo, shell in another.
+printf '{"session_id":"anch-1","hook_event_name":"sessionStart"}' \
+  | AGENT_BUS_VIA=hook AGENT_BUS_TOOL=cursor AGENT_BUS_WT=wsroot AGENT_BUS_REPO_ID=repo-A "$BIN" heartbeat
+out=$(AGENT_BUS_TOOL=cursor AGENT_BUS_SESSION=anch-1 AGENT_BUS_WT=elsewhere AGENT_BUS_REPO_ID=repo-B "$BIN" doctor)
+assert_contains "identity explains workspace-vs-cwd anchoring" "this session's hooks land on cursor/wsroot." "$out"
 # Empty payloads (adapter pipes {} into stop-hook) leave no capture file.
 rm -f "$HP_HOME/state/capture/cursor-unknown.json"
 printf '{}' | AGENT_BUS_VIA=hook AGENT_BUS_TOOL=cursor AGENT_BUS_WT=cw AGENT_BUS_SESSION=x "$BIN" stop-hook >/dev/null
@@ -989,6 +994,75 @@ assert_contains "doctor counts only unacked capped packets" "1 packet(s)" "$out"
 assert_not_contains "doctor skips dead seats" "codex_deadseat" "$out"
 export AGENT_BUS_HOME="$SAVED_HOME"
 rm -rf "$HP_HOME"
+
+# --- selftest: end-to-end delivery probe ---
+ST_HOME=$(mktemp -d); SAVED_HOME="$AGENT_BUS_HOME"; export AGENT_BUS_HOME="$ST_HOME"
+st() { AGENT_BUS_TOOL=codex AGENT_BUS_WT=st AGENT_BUS_SESSION=st-sess "$BIN" "$@"; }
+st_hook() { printf '{"session_id":"st-sess"}' | AGENT_BUS_VIA=hook AGENT_BUS_TOOL=codex AGENT_BUS_WT=st "$BIN" "$@"; }
+ST_ADDR=$(st whoami | awk '/^seat/{print $2}')
+st watch on >/dev/null
+out=$(st selftest)
+assert_contains "selftest arms a probe" "selftest armed for $ST_ADDR" "$out"
+assert_eq "selftest arm output never leaks the nonce" "" "$(grep -oE 'selftest check [0-9a-f]{6}' <<<"$out" || true)"
+assert_contains "probe row is flagged" '"probe":true' "$(grep -F '"from":"selftest/probe"' "$ST_HOME/ledger.jsonl")"
+# A PM is never CC'd on a probe, and triage never lists one.
+AGENT_BUS_TOOL=claude AGENT_BUS_WT=stpm AGENT_BUS_SESSION=stpm-sess "$BIN" role pm >/dev/null
+out=$(AGENT_BUS_TOOL=claude AGENT_BUS_WT=stpm AGENT_BUS_SESSION=stpm-sess "$BIN" read --peek)
+assert_contains "PM not auto-CC'd on probe" "nothing unread" "$out"
+assert_contains "triage ignores probes" "no unresolved supervisory" "$(st triage)"
+# Stop hook (watch on, owned supervisory unread) continues the seat = wake check.
+out=$(st_hook stop-hook)
+assert_eq "probe wakes the seat via stop-hook" "block" "$(jq -r '.decision // empty' <<<"$out")"
+# Digest surfaces the probe with the check instruction; the nonce comes only from there.
+out=$(st_hook digest)
+assert_contains "digest surfaces the probe" "agent-bus selftest" "$out"
+ST_NONCE=$(grep -oE 'selftest check [0-9a-f]{6}' <<<"$out" | head -1 | awk '{print $3}')
+assert_eq "digest carries a 6-hex nonce" "6" "${#ST_NONCE}"
+out=$(st selftest check "$ST_NONCE"); rc=$?
+assert_eq "selftest check passes end to end" "0" "$rc"
+assert_contains "check: identity shared" "PASS  identity: hooks and shell share seat $ST_ADDR" "$out"
+assert_contains "check: hooks fired" "PASS  hooks fire" "$out"
+assert_contains "check: digest surfaced" "PASS  digest surfaced" "$out"
+assert_contains "check: injection proven by nonce" "PASS  injection: nonce matches" "$out"
+assert_contains "check: stop-hook wake" "PASS  stop-hook wake" "$out"
+assert_contains "check: probe resolved" "probe acked and resolved" "$out"
+assert_contains "probe gone after check" "nothing unread" "$(st read --peek)"
+assert_eq "check resets the wake budget" "0" "$(jq -r '.wake_count // 0' "$ST_HOME/state/$(tr '/' '_' <<<"$ST_ADDR").json")"
+out=$(st selftest check 2>&1 || true)
+assert_contains "check without a probe refuses" "no probe armed" "$out"
+# Without the nonce, injection is unproven (not failed); wake is skipped when watch was off.
+st watch off >/dev/null
+st selftest >/dev/null; st_hook digest >/dev/null
+out=$(st selftest check); rc=$?
+assert_eq "check without nonce is not a failure" "0" "$rc"
+assert_contains "check: injection unproven without nonce" "UNPROVEN  injection" "$out"
+assert_contains "check: wake skipped when watch off" "SKIP  stop-hook wake" "$out"
+# Wrong nonce fails.
+st selftest >/dev/null; st_hook digest >/dev/null
+out=$(st selftest check deadbe || true)
+assert_contains "check: wrong nonce fails" "FAIL  injection: wrong nonce" "$out"
+# Identity split: a bare-scope seat with hook touches while the shell is an instance.
+AGENT_BUS_VIA=hook AGENT_BUS_TOOL=codex AGENT_BUS_WT=st "$BIN" heartbeat </dev/null
+out=$(st selftest)
+assert_contains "selftest flags identity split" "FAIL  identity split: hooks register as codex/st" "$out"
+assert_contains "doctor flags identity split" "identity split" "$(st doctor)"
+st selftest check >/dev/null 2>&1 || true
+# Once hooks land on the instance seat again, the lingering bare seat is history.
+sleep 1; st_hook heartbeat
+out=$(st doctor)
+assert_contains "fixed split downgrades to info" "INFO  a bare seat codex/st" "$out"
+assert_contains "fixed split passes identity" "PASS  identity: hooks and shell share seat $ST_ADDR" "$out"
+# Cross-tool split: a markerless shell (tool=shell) inside a host whose hooks
+# register under the host's tool name — the Cursor-panel signature.
+printf '{"session_id":"cur-1"}' | AGENT_BUS_VIA=hook AGENT_BUS_TOOL=cursor AGENT_BUS_WT=xt "$BIN" heartbeat
+out=$(AGENT_BUS_TOOL=shell AGENT_BUS_WT=xt "$BIN" selftest)
+assert_contains "selftest flags markerless shell beside hook seat" "FAIL  identity split: this shell carries no host markers, so it is the bare seat shell/xt" "$out"
+assert_contains "markerless split lists hook-touched candidates" "Hook-touched seats in this worktree: cursor/xt." "$out"
+AGENT_BUS_TOOL=shell AGENT_BUS_WT=xt "$BIN" selftest check >/dev/null 2>&1 || true
+out=$(AGENT_BUS_TOOL=shell AGENT_BUS_WT=lonely "$BIN" self-test)
+assert_contains "self-test alias works; lone markerless shell is a warning" "WARN  identity: no host markers in this shell" "$out"
+AGENT_BUS_TOOL=shell AGENT_BUS_WT=lonely "$BIN" selftest check >/dev/null 2>&1 || true
+export AGENT_BUS_HOME="$SAVED_HOME"; rm -rf "$ST_HOME"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 ((fail == 0))

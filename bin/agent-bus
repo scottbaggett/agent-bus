@@ -553,6 +553,8 @@ unresolved_supervisory() {
     | select($m | same_repo)
     | select($pmStates | index($m.state))
     | select($resolved | index($m.id) | not)
+    # Selftest probes are self-addressed delivery checks, not review threads.
+    | select(($m.probe // false) | not)
   ' | jq -sc 'sort_by(.epoch // 0) | .[]'
 }
 
@@ -746,7 +748,8 @@ select_unread() {
       or ($m.to == $scope and ($m | same_repo))
       or (($m | same_repo) and ($m | named_me))
       or ($m.to == "@pm" and ($m | same_repo) and ($m | pm_for_me))
-      or (($m | same_repo) and ($pmStates | index($m.state)) != null and ($m | pm_for_me));
+      or (($m | same_repo) and ($pmStates | index($m.state)) != null and ($m | pm_for_me)
+          and (($m.probe // false) | not));
     select(.kind == "msg")
     | . as $m
     | select($m.epoch >= $cut)
@@ -769,7 +772,9 @@ select_unread() {
         # Supervisory auto-CC: a repo PM sees lifecycle traffic anywhere in the
         # repo, a worktree PM only from its scoped worktree — because senders
         # default to @here and a PM is never in their worktree.
-        or (($m | same_repo) and ($pmStates | index($m.state)) and ($m | pm_for_me))
+        # Selftest probes are addressed to one seat and never CC a PM.
+        or (($m | same_repo) and ($pmStates | index($m.state)) and ($m | pm_for_me)
+            and (($m.probe // false) | not))
       )
     | select($resolved | index($m.id) | not)
     | select($includeRead == 1 or ($read | index($m.id) | not))
@@ -1377,6 +1382,8 @@ cmd_doctor() {
   good=$(ledger_rows | wc -l | tr -d ' ')
   bad=$((total - good))
   ((bad > 0)) && printf '\nledger: %s unparseable line(s) — readers skip them; consider agent-bus gc\n' "$bad"
+  printf '\nidentity:\n'; identity_report | sed 's/^/  /' || true
+
   printf '\nledger  %s lines\nmsgs    %s\nseats   %s\nclaims  %s\n' \
     "$total" \
     "$(find "$BUS/msg" -name '*.md' 2>/dev/null | wc -l | tr -d ' ')" \
@@ -1492,6 +1499,222 @@ cmd_doctor() {
       printf '  %-22s %s packet(s)\n' "$seat" "$n"
     fi
   done
+}
+
+# ---------------------------------------------------------------- selftest
+#
+# Hooks and the agent's shell must resolve to ONE seat. When a host's hook
+# subshell cannot see the session id, hooks land on the bare scope while the
+# shell is the instance seat, and the digest cursor, watch flag, and PM role
+# split across two files (this is how Codex ran for weeks — see PROTOCOL).
+# Detected without knowing any host's contract: a bare-scope seat in this
+# tool/worktree/repo with recent hook touches, while this seat is an instance.
+# Returns 0 pass, 1 split, 2 warning (no hook touch yet / markerless shell).
+identity_report() {
+  local f mine="$BUS/seats/$SEAT.json" cut=$(( $(now_epoch) - SEAT_TTL )) rc=0 my_hook=0 row
+  [ -f "$mine" ] && my_hook=$(jq -r '.last_hook // 0' "$mine" 2>/dev/null || echo 0)
+  [[ "$my_hook" =~ ^[0-9]+$ ]] || my_hook=0
+  # A bare-scope seat only proves a LIVE split if hooks touched it at least as
+  # recently as they touched this seat; an older touch is a split that has
+  # since been fixed (the bare seat lingers until SEAT_TTL expires it).
+  local historical=''
+  for f in "$BUS"/seats/*.json; do
+    [ -f "$f" ] || continue
+    [ "$f" = "$mine" ] && continue
+    row=$(jq -c --arg t "$TOOL" --arg wt "$WT" --arg rid "$REPO_ID" --argjson cut "$cut" \
+      'select(.tool==$t and .wt==$wt and .repo_id==$rid and ((.session // "local")=="local")
+              and ((.last_hook // 0) >= $cut))' "$f" 2>/dev/null || true)
+    [ -n "$row" ] || continue
+    if (( $(jq -r '.last_hook // 0' <<<"$row") >= my_hook )); then
+      printf 'FAIL  identity split: hooks register as %s (hook cannot see the session id) while the shell is %s — digest cursor, watch flag and PM role land on different seats\n' \
+        "$(jq -r '.addr' <<<"$row")" "$ADDR"
+      rc=1
+    else
+      historical="$(jq -r '.addr' <<<"$row") (hook-touched $(age "$(jq -r '.last_hook' <<<"$row")") ago)"
+    fi
+  done
+  ((rc == 1)) && return 1
+  [ -n "$historical" ] && printf 'INFO  a bare seat %s predates this seat'"'"'s latest hook touch — a split that has since been fixed; it expires with SEAT_TTL\n' "$historical"
+  if [ "$TOOL" = shell ]; then
+    # A markerless shell inside a host: whatever host this is, its hooks (if
+    # they fire) register under the host's tool name, so nothing they do can
+    # reach this seat. Other hosts may share the worktree, so the hook-touched
+    # seats found here are listed as candidates, not named as this host's.
+    local others
+    others=$(for f in "$BUS"/seats/*.json; do [ -f "$f" ] && cat "$f"; done 2>/dev/null \
+      | jq -rs --arg wt "$WT" --arg rid "$REPO_ID" --argjson cut "$cut" \
+        '[.[] | select(.tool != "shell" and .wt==$wt and .repo_id==$rid and ((.last_hook // 0) >= $cut)) | .addr] | unique | join(", ")')
+    if [ -n "$others" ]; then
+      printf 'FAIL  identity split: this shell carries no host markers, so it is the bare seat %s and no hook can reach it. Hook-touched seats in this worktree: %s — if one of those is your host, its hooks cannot find you; if your host is not listed (e.g. Cursor), its hooks are not registering here at all. Pin AGENT_BUS_TOOL/AGENT_BUS_SESSION in the agent shell (Cursor: sessionStart env) so shell and hooks resolve to one seat\n' \
+        "$ADDR" "$others"
+      return 1
+    fi
+    printf 'WARN  identity: no host markers in this shell — seat is the bare scope %s. If you are inside Claude/Codex/Cursor, that host exported nothing to your shell and its hooks (if installed) cannot find this seat\n' "$ADDR"
+    return 2
+  fi
+  if [ "$ADDR" = "$SCOPE" ]; then
+    printf 'WARN  identity: shell has no session id — this seat is the bare scope %s, shared by every markerless session in the worktree\n' "$ADDR"
+    return 2
+  fi
+  if ((my_hook > 0)); then
+    printf 'PASS  identity: hooks and shell share seat %s (last hook touch %s ago)\n' "$ADDR" "$(age "$my_hook")"
+    return 0
+  fi
+  # Same session, hook-touched elsewhere: the host anchors its hooks to the
+  # workspace it has open; the shell anchors to its cwd. They agree only while
+  # the agent works inside the workspace repo.
+  if [ "$SESSION" != local ]; then
+    local elsewhere
+    elsewhere=$(for f in "$BUS"/seats/*.json; do [ -f "$f" ] && cat "$f"; done 2>/dev/null \
+      | jq -rs --arg sess "$SESSION" --arg addr "$ADDR" --argjson cut "$cut" \
+        '[.[] | select((.session // "local") == $sess and .addr != $addr and ((.last_hook // 0) >= $cut))
+          | "\(.addr) in repo \(.repo // "-")"] | unique | join(", ")')
+    if [ -n "$elsewhere" ]; then
+      printf 'WARN  identity: this session'"'"'s hooks land on %s — the host anchors hooks to its open workspace, while this shell is in %s (repo %s). Run bus commands from the workspace repo, or open the host on this repo, for hooks and shell to meet\n' \
+        "$elsewhere" "$ADDR" "$REPO"
+      return 2
+    fi
+  fi
+  printf 'WARN  identity: no hook has touched %s yet — hooks not installed for this host, not firing, or first turn\n' "$ADDR"
+  return 2
+}
+
+SELFTEST_DIR="$BUS/state/selftest"
+selftest_file() { printf '%s/%s.json' "$SELFTEST_DIR" "$SEAT"; }
+
+# Ack + close a probe the way a real review thread is closed: read cursor,
+# resolve row, wake budget reset. This seat is the probe's addressee, so it
+# has standing.
+selftest_resolve_probe() {
+  local id="$1"
+  mark_read "$(jq -c --arg r "$id" '. + [$r] | unique' <<<"$(read_ids)")"
+  ledger_append "$(jq -n -c --arg msg "$id" --arg by "$ADDR" --argjson epoch "$(now_epoch)" \
+    '{kind:"resolve",msg:$msg,by:$by,epoch:$epoch}')"
+  reset_wake
+}
+
+# End-to-end delivery probe for the host you are sitting in. Phase 1 (`selftest`)
+# posts a supervisory packet addressed to this exact seat from a synthetic
+# sender; its body tells the model to run `selftest check <nonce>`. Phase 2
+# (`selftest check`) — run on the NEXT turn — verifies from bus state what the
+# host actually did: hooks touched this seat after arming, the digest surfaced
+# the probe, the Stop hook continued the seat (if watch was on), and, if the
+# nonce is supplied, that hook stdout reached the model (the nonce is only ever
+# printed inside the probe body). The probe never CCs a PM and never counts as
+# an unresolved review thread.
+cmd_selftest() {
+  case "${1:-}" in
+    ""|arm|start) selftest_arm ;;
+    check) shift; selftest_check "$@" ;;
+    *) die "selftest: usage — agent-bus selftest | agent-bus selftest check [<nonce>]" ;;
+  esac
+}
+
+selftest_arm() {
+  mkdir -p "$SELFTEST_DIR" "$BUS/msg"
+  local f; f=$(selftest_file)
+  if [ -f "$f" ]; then
+    local old; old=$(jq -r '.id // empty' "$f" 2>/dev/null || true)
+    if [ -n "$old" ] && valid_id "$old"; then
+      selftest_resolve_probe "$old"
+      printf 'selftest: previous probe %s resolved\n' "$old"
+    fi
+    rm -f "$f"
+  fi
+  local nonce id body
+  nonce=$(head -c3 /dev/urandom | xxd -p)
+  id="$(date -u +%Y%m%dT%H%M%SZ)-$(head -c4 /dev/urandom | xxd -p)"
+  body=$(printf '# agent-bus selftest %s\n\nDelivery probe posted by `agent-bus selftest` from this seat'"'"'s own session.\nIf you are reading this, hook stdout reached the model. Finish the check by running exactly:\n\n    agent-bus selftest check %s\n\nNothing else is needed.\n' "$nonce" "$nonce")
+  printf '%s\n' "$body" >"$BUS/msg/$id.md"
+  ledger_append "$(jq -n -c \
+    --arg id "$id" --arg ts "$(now_iso)" --argjson epoch "$(now_epoch)" \
+    --arg from "selftest/probe" --arg session "selftest-$nonce" --arg to "$ADDR" \
+    --arg repo "$REPO" --arg repo_id "$REPO_ID" --arg wt "$WT" --arg branch "$BRANCH" \
+    --arg cwd "$TOP" --arg subject "agent-bus selftest $nonce" \
+    '{kind:"msg",id:$id,ts:$ts,epoch:$epoch,from:$from,session:$session,to:$to,state:"needs-review",
+      repo:$repo,repo_id:$repo_id,wt:$wt,branch:$branch,cwd:$cwd,subject:$subject,
+      touched:[],re:null,probe:true}')"
+  local watch=0 my_hook=0 sf="$BUS/seats/$SEAT.json"
+  watch_on && watch=1
+  [ -f "$sf" ] && my_hook=$(jq -r '.last_hook // 0' "$sf" 2>/dev/null || echo 0)
+  [[ "$my_hook" =~ ^[0-9]+$ ]] || my_hook=0
+  jq -n -c --arg nonce "$nonce" --arg id "$id" --argjson epoch "$(now_epoch)" \
+    --argjson watch "$watch" --argjson wake "$(wake_count)" --argjson hook "$my_hook" --arg addr "$ADDR" \
+    '{nonce:$nonce,id:$id,epoch:$epoch,watch_on:($watch==1),wake_count:$wake,last_hook:$hook,addr:$addr}' >"$f"
+
+  printf 'agent-bus selftest armed for %s — probe %s posted to this seat\n' "$ADDR" "$id"
+  identity_report || true
+  printf '\nnext: end this turn, then send any prompt. The digest should instruct you to run\n'
+  printf '        agent-bus selftest check <nonce>\n'
+  printf '      Run it exactly as shown — the nonce is only printed inside the probe, so\n'
+  printf '      supplying it proves hook stdout reached the model. Do not read the probe\n'
+  printf '      from disk; that proves nothing.\n'
+  if ((watch)); then
+    printf 'watch: on — the Stop hook of this turn should continue this seat by itself; that continuation is the wake check.\n'
+  else
+    printf 'watch: off — Stop-hook wake will be SKIPPED (agent-bus watch on, then re-arm, to test it).\n'
+  fi
+  printf 'if nothing arrives: run `agent-bus selftest check` without a nonce for partial results.\n'
+}
+
+selftest_check() {
+  local nonce_arg="${1:-}" f; f=$(selftest_file)
+  [ -f "$f" ] || die "selftest check: no probe armed for $ADDR — run 'agent-bus selftest' first"
+  local nonce id armed watch
+  nonce=$(jq -r '.nonce // empty' "$f"); id=$(jq -r '.id // empty' "$f")
+  armed=$(jq -r '.epoch // 0' "$f"); watch=$(jq -r 'if .watch_on then 1 else 0 end' "$f")
+  [ -n "$id" ] && valid_id "$id" || die "selftest check: probe file is malformed — rm '$f' and re-arm"
+  local pass=0 fail=0 other=0
+  st_ok()   { printf 'PASS  %s\n' "$1"; pass=$((pass + 1)); }
+  st_bad()  { printf 'FAIL  %s\n' "$1"; fail=$((fail + 1)); }
+  st_note() { printf '%s  %s\n' "$1" "$2"; other=$((other + 1)); }
+
+  printf 'agent-bus selftest for %s (probe %s, armed %s ago)\n' "$ADDR" "$id" "$(age "$armed")"
+  local irc=0; identity_report || irc=$?
+  case "$irc" in 0) pass=$((pass + 1)) ;; 1) fail=$((fail + 1)) ;; *) other=$((other + 1)) ;; esac
+
+  local last_hook=0 sf="$BUS/seats/$SEAT.json"
+  [ -f "$sf" ] && last_hook=$(jq -r '.last_hook // 0' "$sf" 2>/dev/null || echo 0)
+  [[ "$last_hook" =~ ^[0-9]+$ ]] || last_hook=0
+  if ((last_hook >= armed)); then
+    st_ok "hooks fire: a lifecycle hook touched this seat $(age "$last_hook") ago, after arming"
+  else
+    st_bad "hooks fire: no hook touched $ADDR since arming — hooks not installed for this host, not firing, or landing on another seat"
+  fi
+
+  local shown; shown=$(jq -r --arg id "$id" '.shown[$id] // 0' "$(state_src)" 2>/dev/null || echo 0)
+  [[ "$shown" =~ ^[0-9]+$ ]] || shown=0
+  if ((shown >= 1)); then
+    st_ok "digest surfaced the probe ($shown time(s))"
+  else
+    st_bad "digest never surfaced the probe — the digest hook is not installed, or the packet was not selected for $ADDR"
+  fi
+
+  if [ -z "$nonce_arg" ]; then
+    st_note UNPROVEN "injection: no nonce supplied — had the digest reached the model, it would have run 'agent-bus selftest check <nonce>' itself"
+  elif [ "$nonce_arg" = "$nonce" ]; then
+    st_ok "injection: nonce matches — hook stdout reached the model"
+  else
+    st_bad "injection: wrong nonce '$nonce_arg' — the model did not get it from the digest"
+  fi
+
+  if ((watch)); then
+    local lw; lw=$(jq -r '.last_wake // 0' "$(state_src)" 2>/dev/null || echo 0)
+    [[ "$lw" =~ ^[0-9]+$ ]] || lw=0
+    if ((lw >= armed)); then
+      st_ok "stop-hook wake: the Stop hook continued this seat $(age "$lw") ago"
+    else
+      st_bad "stop-hook wake: watch was on but the Stop hook did not continue this seat — stop hook not installed, host ignores decision:block, or wake budget exhausted"
+    fi
+  else
+    st_note SKIP "stop-hook wake: watch was off when armed (agent-bus watch on, then re-arm)"
+  fi
+
+  selftest_resolve_probe "$id"
+  rm -f "$f"
+  printf 'INFO  probe acked and resolved (%s)\n' "$id"
+  printf '\n%d passed, %d failed, %d skipped/unproven\n' "$pass" "$fail" "$other"
+  ((fail == 0))
 }
 
 # PM hygiene surface: every unresolved supervisory packet in the repo,
@@ -1741,7 +1964,7 @@ cmd_gc() {
   # Per-seat state and watch flags for seats whose registry entry is gone
   # (pruned above or never re-touched) decay after GC_DAYS.
   local n_state=0
-  for f in "$BUS"/state/*.json "$BUS"/state/watch/*.json; do
+  for f in "$BUS"/state/*.json "$BUS"/state/watch/*.json "$BUS"/state/selftest/*.json; do
     [ -f "$f" ] || continue
     local seat; seat=$(basename "$f" .json)
     [ -f "$BUS/seats/$seat.json" ] && continue
@@ -2000,7 +2223,13 @@ agent-bus — handoff bus for coding agents sharing repos/worktrees.
                                   alias peers can target as --to @<name>
                                   (--force required to take over a live holder)
   watch [on|off|status|reset]     opt-in Stop-hook wake on supervisory unread
-  doctor                          bus health
+  doctor                          bus health (incl. hook/shell identity check)
+  selftest [check [<nonce>]]      end-to-end delivery probe for the host you
+                                  are in: arm, then on the next turn run
+                                  `selftest check <nonce>` as the digest says.
+                                  Verifies hooks fire on this seat, the digest
+                                  surfaced, stdout reached the model (nonce),
+                                  and Stop-hook wake (when watch is on)
   gc                              prune expired claims/seats/bodies/state;
                                   rotate ledger rows older than GC_DAYS to
                                   ledger.archive.jsonl. Also runs
@@ -2087,6 +2316,7 @@ case "$cmd" in
   role) touch_seat; cmd_role "$@" ;;
   watch) touch_seat; cmd_watch "$@" ;;
   doctor) cmd_doctor ;;
+  selftest|self-test) touch_seat; cmd_selftest "$@" ;;
   gc) cmd_gc ;;
   stop-hook) cmd_stop_hook ;;
   help|-h|--help) usage ;;

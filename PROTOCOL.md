@@ -354,6 +354,22 @@ process: `state/capture/<tool>-<event>.json` (the Cursor adapter writes
 observed contract for that host — consult it before assuming what a host sends
 or exports, and copy it into a test fixture when a host integration changes.
 
+## Self-test
+
+`agent-bus selftest` probes the full delivery path of the host the agent is
+running in. Phase 1 appends a `needs-review` packet addressed to the current
+instance seat from the synthetic sender `selftest/probe`, flagged `probe:true`;
+its body instructs the model to run `agent-bus selftest check <nonce>`. Phase
+2, on the next turn, reads bus state to verify: hooks touched this exact seat
+after arming (`last_hook`), the digest surfaced the probe (`shown`), the Stop
+hook continued the seat when watch was on (`last_wake`), and hook stdout reached
+the model (the nonce is printed only inside the probe body). It then acks and
+resolves the probe. `probe:true` rows are excluded from PM auto-CC, `triage`,
+and staleness. The identity check it shares with `doctor` flags a **split**: a
+bare-scope seat in the same tool/worktree/repo with recent hook touches while
+the shell is an instance seat — the signature of a host whose hooks cannot see
+the session id.
+
 `agent-bus gc` prunes expired claims, stale seats, message bodies, and per-seat
 state older than `AGENT_BUS_GC_DAYS` (default 14), and rotates ledger rows older
 than that into `ledger.archive.jsonl` so hook-time reads stay fast. It also runs

@@ -980,6 +980,29 @@ rm -f "$HP_HOME/state/capture/cursor-unknown.json"
 printf '{}' | AGENT_BUS_VIA=hook AGENT_BUS_TOOL=cursor AGENT_BUS_WT=cw AGENT_BUS_SESSION=x "$BIN" stop-hook >/dev/null
 assert_eq "empty hook payload is not captured" "" "$(ls "$HP_HOME/state/capture/" | grep -x 'cursor-unknown.json' || true)"
 
+# --- doctor: stale/missing host hook installs ---
+HK=$(mktemp -d)
+# Current-shape install: tool pinned everywhere, Stop runs stop-hook.
+jq -n '{hooks:{SessionStart:[{hooks:[{command:"AGENT_BUS_VIA=hook AGENT_BUS_TOOL=codex /b/agent-bus heartbeat"}]}],
+                Stop:[{hooks:[{command:"AGENT_BUS_VIA=hook AGENT_BUS_TOOL=codex /b/agent-bus stop-hook"}]}]}}' >"$HK/codex-ok.json"
+# Stale: Stop runs heartbeat (no wake) and the digest line has no tool pin.
+jq -n '{hooks:{SessionStart:[{hooks:[{command:"AGENT_BUS_VIA=hook /b/agent-bus digest"}]}],
+                Stop:[{hooks:[{command:"AGENT_BUS_VIA=hook AGENT_BUS_TOOL=codex /b/agent-bus heartbeat"}]}]}}' >"$HK/codex-stale.json"
+jq -n '{hooks:{sessionStart:[{command:"/b/agent-bus-cursor-hook sessionStart"}]}}' >"$HK/cursor.json"
+jq -n '{hooks:{SessionStart:[{hooks:[{command:"/other/tool run"}]}]}}' >"$HK/none.json"
+out=$(AGENT_BUS_CODEX_HOOKS="$HK/codex-ok.json" AGENT_BUS_CURSOR_HOOKS="$HK/cursor.json" \
+  AGENT_BUS_CLAUDE_SETTINGS="$HK/none.json" "$BIN" doctor)
+assert_contains "doctor: current codex install is ok" "codex   ok (2 line(s), stop-hook present)" "$out"
+assert_contains "doctor: cursor adapter counted" "cursor  ok (1 line(s), adapter)" "$out"
+assert_contains "doctor: config without agent-bus lines is not installed" "claude  not installed — run ./install-hooks.sh --claude" "$out"
+out=$(AGENT_BUS_CODEX_HOOKS="$HK/codex-stale.json" AGENT_BUS_CURSOR_HOOKS="$HK/cursor.json" \
+  AGENT_BUS_CLAUDE_SETTINGS="$HK/codex-ok.json" "$BIN" doctor)
+assert_contains "doctor: stale install names the missing stop-hook" "no stop-hook line (this host can never be woken)" "$out"
+assert_contains "doctor: stale install counts unpinned lines" "1 of 2 line(s) missing the AGENT_BUS_TOOL pin" "$out"
+out=$(AGENT_BUS_CODEX_HOOKS="$HK/absent.json" "$BIN" doctor)
+assert_contains "doctor: absent config reported" "codex   not installed — no $HK/absent.json" "$out"
+rm -rf "$HK"
+
 # --- doctor: unacked-after-MAX_SHOWS lists live seats and unacked packets only ---
 DT_SEAT=$(AGENT_BUS_TOOL=codex AGENT_BUS_WT=dt AGENT_BUS_SESSION=dt-sess "$BIN" whoami | awk '/^seat/{print $2}' | tr '/' '_')
 AGENT_BUS_TOOL=codex AGENT_BUS_WT=dt AGENT_BUS_SESSION=dt-sess "$BIN" heartbeat </dev/null

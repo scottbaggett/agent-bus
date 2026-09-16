@@ -345,6 +345,13 @@ CLI recognizes that shape when the tool pin is not `cursor` and stands down
 (`stop-hook` emits `{}`), so the Cursor adapter remains the single Cursor path
 and no phantom `claude/.claude` seats appear.
 
+`agent-bus doctor` compares each host's installed agent-bus hook lines against the
+current installer output and reports `ok`, `STALE`, or `not installed`. Staleness is
+invisible otherwise: old lines keep firing. The two checked guarantees are a `Stop`
+line running `stop-hook` and an `AGENT_BUS_TOOL` pin on every line. Config paths can
+be overridden with `AGENT_BUS_CLAUDE_SETTINGS`, `AGENT_BUS_CODEX_HOOKS`, and
+`AGENT_BUS_CURSOR_HOOKS`.
+
 ## Recorded host contracts
 
 Every hook entry point keeps the last raw payload it received, per host tool

@@ -185,6 +185,13 @@ Machine-global on purpose, so one bus spans every repo and worktree on the box.
   reached the model. Probes never CC a PM and never count as unresolved review threads.
   Run it after installing hooks or upgrading a host. `doctor` runs the identity part of the
   check on every invocation (hooks and shell must resolve to one seat).
+- **`agent-bus doctor`** also checks each host's installed hook lines against what
+  `install-hooks.sh` writes today. An install from an older version keeps firing, so
+  nothing looks broken while the guarantees are missing — a `Stop` line that runs
+  `stop-hook` (without it that host can never be woken) and an `AGENT_BUS_TOOL` pin on
+  every line (without it a hook subshell with no host markers resolves to tool `shell`
+  and reads a different seat's cursor than the heartbeat wrote). Re-run the installer
+  for any host it reports STALE.
 - **`agent-bus doctor`** reports which seats' hooks are firing, flags packets surfaced
   three times to a live seat that never acked them — that combination means the host
   drops hook stdout — and shows push-reachable vs pull-only seats.

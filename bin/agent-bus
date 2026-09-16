@@ -1374,6 +1374,66 @@ cmd_log() {
     "\(.ts)  \(.from) -> \(.to)  [\(.state)]  \(.subject)  (\(.id))"' | tail -n "$n" | sanitize
 }
 
+# Host hook configs, overridable for tests.
+CLAUDE_SETTINGS_FILE="${AGENT_BUS_CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
+CODEX_HOOKS_FILE="${AGENT_BUS_CODEX_HOOKS:-$HOME/.codex/hooks.json}"
+CURSOR_HOOKS_FILE="${AGENT_BUS_CURSOR_HOOKS:-$HOME/.cursor/hooks.json}"
+
+# Whether the hook lines a host actually has still match what install-hooks.sh
+# would write. An install made by an older version keeps firing, so nothing
+# looks broken, while silently lacking the current guarantees: a Stop line that
+# runs `stop-hook` (without it a host can never be woken — observed on Codex,
+# whose Stop ran `heartbeat` for weeks) and an AGENT_BUS_TOOL pin on every line
+# (without it a hook subshell with no host markers resolves to tool `shell` and
+# reads a different seat's cursor than the heartbeat wrote).
+# Prints one line per host; returns 1 if any host is stale or missing.
+hooks_report() {
+  local rc=0 host file cmds n_total n_pin n_stop label
+  for host in claude codex cursor; do
+    case "$host" in
+      claude) file="$CLAUDE_SETTINGS_FILE" ;;
+      codex)  file="$CODEX_HOOKS_FILE" ;;
+      cursor) file="$CURSOR_HOOKS_FILE" ;;
+    esac
+    if [ ! -f "$file" ]; then
+      printf '%-7s not installed — no %s\n' "$host" "$file"
+      continue
+    fi
+    # Claude/Codex nest commands under .hooks[event][].hooks[]; Cursor lists
+    # them directly under .hooks[event][]. Accept either shape.
+    cmds=$(jq -r '[.hooks // {} | to_entries[] | .value[]?
+      | (.hooks[]?.command // .command // empty)] | .[]' "$file" 2>/dev/null \
+      | grep -F 'agent-bus' || true)
+    n_total=$(printf '%s' "$cmds" | grep -c . || true)
+    if [ "$n_total" = 0 ]; then
+      printf '%-7s not installed — run ./install-hooks.sh --%s\n' "$host" "$host"
+      rc=1
+      continue
+    fi
+    # The Cursor adapter is one binary per event; its stop wake and tool pin
+    # live inside the adapter, so only presence is checkable from here.
+    if [ "$host" = cursor ]; then
+      printf '%-7s ok (%s line(s), adapter)\n' "$host" "$n_total"
+      continue
+    fi
+    n_stop=$(printf '%s\n' "$cmds" | grep -c 'stop-hook' || true)
+    n_pin=$(printf '%s\n' "$cmds" | grep -c 'AGENT_BUS_TOOL=' || true)
+    label=''
+    ((n_stop == 0)) && label="no stop-hook line (this host can never be woken)"
+    if ((n_pin < n_total)); then
+      [ -n "$label" ] && label="$label; "
+      label="$label$((n_total - n_pin)) of $n_total line(s) missing the AGENT_BUS_TOOL pin"
+    fi
+    if [ -n "$label" ]; then
+      printf '%-7s STALE — %s — run ./install-hooks.sh --%s\n' "$host" "$label" "$host"
+      rc=1
+    else
+      printf '%-7s ok (%s line(s), stop-hook present)\n' "$host" "$n_total"
+    fi
+  done
+  return $rc
+}
+
 cmd_doctor() {
   cmd_whoami
   # Readers drop unparseable lines silently (ledger_rows); surface them here.
@@ -1383,6 +1443,7 @@ cmd_doctor() {
   bad=$((total - good))
   ((bad > 0)) && printf '\nledger: %s unparseable line(s) — readers skip them; consider agent-bus gc\n' "$bad"
   printf '\nidentity:\n'; identity_report | sed 's/^/  /' || true
+  printf '\nhook install:\n'; hooks_report | sed 's/^/  /' || true
 
   printf '\nledger  %s lines\nmsgs    %s\nseats   %s\nclaims  %s\n' \
     "$total" \

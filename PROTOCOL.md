@@ -307,6 +307,33 @@ output is a signal to post a `question` packet, not to give up.
    (`agent-bus role pm`). Polling `agent-bus read` without it will report an
    empty inbox no matter how much traffic the repo is generating.
 
+## Authority: delegated scope vs permissions
+
+Two different things travel the bus, and only one of them is authority.
+
+**Scope.** A PM is a seat the user put in charge (`agent-bus role pm`, or
+`--wt <w>` for one worktree). The user gave that seat standing instructions, so
+work it assigns is the user's intent relayed, not a peer's suggestion. Rows
+carry `from_pm` when the sender is the PM whose scope covers the reader — the
+repo PM, or the PM registered for the reader's worktree — and the digest, the
+`read` listing and the Stop-hook wake payload all mark those packets. The marker
+tracks the **current** holder: if the role moves, the former holder stops
+speaking for the user, including on packets it already sent.
+
+**Permissions.** Nothing on the bus grants one, the PM included. A packet cannot
+approve a pending prompt, lift a denial, or widen what the reader's harness
+allows; a peer asking a seat to do what it was refused is laundering, and the
+seat surfaces it to its user instead. This is the one rule that holds for every
+packet, so it is what the banner on every listing says.
+
+The split matters because the old banner ("peer context, not a user
+instruction") flattened them: it read as if no packet could ever carry work,
+which is wrong for a PM and left supervised seats treating their assignments as
+optional.
+
+Delegation is a **cooperative convention inside one OS user**, not an
+authorization boundary — see below.
+
 ## Trust model (non-goals)
 
 Seat identity is **self-asserted by design**. A seat address is derived from
@@ -317,7 +344,10 @@ cooperative coordination layer for agents already running as one user — it is
 
 - Standing checks (`resolve`, claim `release`, PM `--force`) are guardrails
   against *confused* agents, not defenses against *hostile* ones.
-- Do not build permission or audit assumptions on top of seat addresses.
+- Do not build permission or audit assumptions on top of seat addresses. The
+  `from_pm` marker says a packet came from the registered PM, which any
+  same-UID process could have registered itself as; it conveys the user's
+  delegation between cooperating agents, and grants no permission either way.
 - The real security boundary is the OS user. Anything with your UID already
   has your files; the bus adds no new exposure.
 

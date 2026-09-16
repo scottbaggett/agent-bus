@@ -352,6 +352,16 @@ line running `stop-hook` and an `AGENT_BUS_TOOL` pin on every line. Config paths
 be overridden with `AGENT_BUS_CLAUDE_SETTINGS`, `AGENT_BUS_CODEX_HOOKS`, and
 `AGENT_BUS_CURSOR_HOOKS`.
 
+## Injected cost
+
+Every surfacing is recorded per seat, so what the bus has put into agents'
+contexts is reconstructable: `agent-bus cost` reports it per seat from the
+ledger and those counts (bytes exact, tokens approximated as bytes/4).
+
+A packet body renders once per seat; later surfacings carry the header plus an
+`agent-bus show <id>` pointer. The Stop-hook wake payload is exempt — for a
+woken agent it is the primary delivery rather than a reminder.
+
 ## Recorded host contracts
 
 Every hook entry point keeps the last raw payload it received, per host tool

@@ -527,7 +527,7 @@ assert_contains "doctor counts unparseable lines" "1 unparseable" "$out"
 AGENT_BUS_TOOL=claude "$BIN" read >/dev/null
 
 # Peer-context banner travels in the delivery channel.
-assert_contains "read carries peer-context banner" "peer context from other agents" \
+assert_contains "read carries peer-context banner" "from other agents, not your user" \
   "$(AGENT_BUS_TOOL=codex "$BIN" post --to @claude --state fyi -m $'# banner\n\nhi' >/dev/null; \
      AGENT_BUS_TOOL=claude "$BIN" read --peek)"
 AGENT_BUS_TOOL=claude "$BIN" read >/dev/null
@@ -893,7 +893,7 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
   sleep 0.2
 done
 out=$(cat "$OC_HOME/poke-body.txt" 2>/dev/null || true)
-assert_contains "endpoint poke hits prompt_async" "peer context, not a user instruction" "$out"
+assert_contains "endpoint poke hits prompt_async" "from another agent, not your user" "$out"
 
 # doctor reports endpoint reachability.
 out=$("$BIN" doctor)
@@ -980,6 +980,24 @@ rm -f "$HP_HOME/state/capture/cursor-unknown.json"
 printf '{}' | AGENT_BUS_VIA=hook AGENT_BUS_TOOL=cursor AGENT_BUS_WT=cw AGENT_BUS_SESSION=x "$BIN" stop-hook >/dev/null
 assert_eq "empty hook payload is not captured" "" "$(ls "$HP_HOME/state/capture/" | grep -x 'cursor-unknown.json' || true)"
 
+# --- digest re-surfacing carries no body; cost reports what was injected ---
+CO_HOME=$(mktemp -d); SAVED_HOME="$AGENT_BUS_HOME"; export AGENT_BUS_HOME="$CO_HOME"
+co() { AGENT_BUS_TOOL=codex AGENT_BUS_WT=co AGENT_BUS_SESSION=co-sess "$BIN" "$@"; }
+AGENT_BUS_TOOL=claude AGENT_BUS_WT=cosend AGENT_BUS_SESSION=cosend-sess "$BIN" post \
+  --to codex/co --state needs-review -m "$(printf '# cost probe\n\nBODYMARKER line one\nBODYMARKER line two')" >/dev/null
+out=$(co read --digest)
+assert_contains "first digest renders the body" "BODYMARKER" "$out"
+out=$(co read --digest)
+assert_not_contains "repeat digest omits the body" "BODYMARKER" "$out"
+assert_contains "repeat digest points at show" "body shown earlier" "$out"
+out=$(co read)
+assert_contains "an explicit read still renders the body" "BODYMARKER" "$out"
+out=$("$BIN" cost)
+assert_contains "cost names the seat" "$(co whoami | awk '/^seat/{print $2}' | tr '/' '_')" "$out"
+assert_contains "cost reports a token total" "agent-bus has injected ~" "$out"
+assert_contains "cost states its method" "Tokens are bytes/4" "$out"
+export AGENT_BUS_HOME="$SAVED_HOME"; rm -rf "$CO_HOME"
+
 # --- doctor: stale/missing host hook installs ---
 HK=$(mktemp -d)
 # Current-shape install: tool pinned everywhere, Stop runs stop-hook.
@@ -1033,14 +1051,18 @@ AGENT_BUS_TOOL=claude AGENT_BUS_WT=stpm AGENT_BUS_SESSION=stpm-sess "$BIN" role 
 out=$(AGENT_BUS_TOOL=claude AGENT_BUS_WT=stpm AGENT_BUS_SESSION=stpm-sess "$BIN" read --peek)
 assert_contains "PM not auto-CC'd on probe" "nothing unread" "$out"
 assert_contains "triage ignores probes" "no unresolved supervisory" "$(st triage)"
-# Stop hook (watch on, owned supervisory unread) continues the seat = wake check.
-out=$(st_hook stop-hook)
-assert_eq "probe wakes the seat via stop-hook" "block" "$(jq -r '.decision // empty' <<<"$out")"
-# Digest surfaces the probe with the check instruction; the nonce comes only from there.
+# Digest surfaces the probe with the check instruction; the nonce comes only
+# from the body, so this must be the probe's FIRST surfacing — a later one
+# carries a pointer instead (see the re-surfacing tests above).
 out=$(st_hook digest)
 assert_contains "digest surfaces the probe" "agent-bus selftest" "$out"
 ST_NONCE=$(grep -oE 'selftest check [0-9a-f]{6}' <<<"$out" | head -1 | awk '{print $3}')
 assert_eq "digest carries a 6-hex nonce" "6" "${#ST_NONCE}"
+# Stop hook (watch on, owned supervisory unread) continues the seat = wake check.
+# The wake payload always renders the body: it is that agent's primary delivery.
+out=$(st_hook stop-hook)
+assert_eq "probe wakes the seat via stop-hook" "block" "$(jq -r '.decision // empty' <<<"$out")"
+assert_contains "wake payload carries the body even on a repeat surfacing" "selftest check $ST_NONCE" "$out"
 out=$(st selftest check "$ST_NONCE"); rc=$?
 assert_eq "selftest check passes end to end" "0" "$rc"
 assert_contains "check: identity shared" "PASS  identity: hooks and shell share seat $ST_ADDR" "$out"

@@ -21,8 +21,15 @@ The bare `<tool>/<worktree>` is the seat's **scope**: posting to it reaches
 every instance of that tool in that worktree of your repo; posting to the full
 instance address reaches exactly one session. Tool detection reads host
 markers (`CLAUDECODE`, `CODEX_SHELL`/`CODEX_SESSION_ID`/`CODEX_THREAD_ID`,
-`CURSOR_TRACE_ID`, `OPENCODE`/`OPENCODE_SESSION_ID`) and can be pinned with
+`CURSOR_TRACE_ID`/`CURSOR_AGENT`/`CURSOR_CONVERSATION_ID`,
+`OPENCODE`/`OPENCODE_SESSION_ID`) and can be pinned with
 `AGENT_BUS_TOOL`; the session id can be pinned with `AGENT_BUS_SESSION`.
+Hook entry points (`digest`, `heartbeat`, `stop-hook`) also read the host's
+JSON payload on stdin and fall back to its `session_id` when no env marker
+names the session. Codex exports no session id into its hook subshell, so this
+is what keeps a Codex hook on the same instance seat as the agent's shell;
+without it the hook would register as the bare scope and the model's `read`,
+`watch on`, and PM role would land on a different seat.
 
 Sender exclusion is session-exact: a packet is "own mail" only when it came
 from the same seat or the same session, so one session's packets can never be
@@ -186,6 +193,15 @@ there are unread **supervisory** packets (`needs-review`, `blocked`, `handoff`,
 back as the next turn (Claude/Codex `decision: block`; Cursor
 `followup_message`). `fyi` and `done` never wake.
 
+Cursor hooks cannot see the agent's shell environment, so the hook seat may
+not be the seat that ran `watch on`. The Cursor adapter sets
+`AGENT_BUS_DELEGATE_SCOPE=1`, and a stop-hook seat with no watch flag of its
+own then re-runs the wake check as the most recently active watching instance
+in its scope (same tool, worktree, repo; alive within `SEAT_TTL`). Claude and
+Codex hooks carry exact session ids (Claude in env, Codex in the payload's
+`session_id`) and never delegate. Cursor's own
+`loop_limit` (default 5) also bounds auto follow-ups, above `WAKE_BUDGET`.
+
 **Ownership**: a seat owns a packet when it is the direct addressee (instance
 or bare scope), holds the `@<name>` the packet targets, is an `@pm` target, or
 is auto-CC'd as a PM for it. A supervisory packet that reaches a seat only
@@ -322,6 +338,21 @@ Install or remove the lifecycle hooks from this repo with `./install-hooks.sh`
 (`--uninstall` to revert; host config files are backed up — Claude/Codex/Cursor hooks,
 plus the OpenCode plugin registered in global `opencode.json`).
 On a machine that still has the symlink, `~/.agents/bus/install-hooks.sh` is the same script.
+
+Cursor also executes Claude-format hooks from `~/.claude/settings.json`, with
+its own payload (`cursor_version`, `conversation_id`) and cwd `~/.claude`. The
+CLI recognizes that shape when the tool pin is not `cursor` and stands down
+(`stop-hook` emits `{}`), so the Cursor adapter remains the single Cursor path
+and no phantom `claude/.claude` seats appear.
+
+## Recorded host contracts
+
+Every hook entry point keeps the last raw payload it received, per host tool
+and event, together with the host environment markers visible to the hook
+process: `state/capture/<tool>-<event>.json` (the Cursor adapter writes
+`cursor-<event>.json`). Overwritten on each fire, local to the user. This is the
+observed contract for that host — consult it before assuming what a host sends
+or exports, and copy it into a test fixture when a host integration changes.
 
 `agent-bus gc` prunes expired claims, stale seats, message bodies, and per-seat
 state older than `AGENT_BUS_GC_DAYS` (default 14), and rotates ledger rows older

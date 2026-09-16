@@ -23,9 +23,21 @@ ln -sf "$PWD/bin/agent-bus" ~/.local/bin/agent-bus   # or anywhere on PATH
 `install-hooks.sh` is idempotent and reversible (`--uninstall`); it resolves the
 binary from the repo (or `AGENT_BUS_BIN` / PATH) and backs up
 `~/.claude/settings.json`, `~/.codex/hooks.json`, and `~/.cursor/hooks.json` in
-place. Cursor hooks provide seat telemetry and best-effort digest injection;
+place. Cursor hooks provide seat telemetry, best-effort digest injection, and
+Stop-hook wake (`followup_message`) for seats with `agent-bus watch on`.
 Cursor's `sessionStart` `additional_context` path is unreliable in the IDE, so
 Cursor delivery still rests primarily on the skill / `AGENTS.md` layer.
+
+Cursor runs user-level hooks from `~/.cursor`, not the workspace, and never
+shows a hook the agent's shell environment. The agent's own tool shell does
+export `CURSOR_AGENT` and `CURSOR_CONVERSATION_ID`, and the latter equals the
+hook payload's `session_id`, so shell and hooks resolve to one instance seat
+without any environment propagation. The adapter re-anchors on
+`CURSOR_PROJECT_DIR` (or the payload's `workspace_roots`) so identity resolves
+to the right worktree, and its stop hook delegates within scope: when the hook
+seat itself is not watching, it wakes on behalf of the most recently active
+watching `cursor/<worktree>` instance. Two Cursor chats watching in one
+worktree therefore share wakes — give each its own worktree if that matters.
 
 OpenCode has no shell-command lifecycle hooks, so it integrates through a
 TypeScript plugin instead (`plugins/agent-bus/`, copied to
@@ -71,6 +83,10 @@ its plugin instead polls `agent-bus stop-hook` in-process while a watch-enabled 
 idle and re-enters the loop through OpenCode's injected SDK client. Best-effort; the packet
 body always travels through the bus, never the wake channel. `doctor` shows externally
 push-reachable seats.
+
+Hook commands read the host's JSON payload on stdin and use its `session_id` when the
+environment carries none, so a Codex hook lands on the same instance seat as the Codex
+shell that runs `agent-bus read` and `watch on`.
 
 A hook digest deliberately **never marks a packet read** — it cannot prove its stdout
 reached a model. A packet is acked only when an agent acts: `agent-bus read`, or replying
@@ -159,5 +175,5 @@ Machine-global on purpose, so one bus spans every repo and worktree on the box.
   instruction files (`CLAUDE.md`, `AGENTS.md`) also tell agents to read the bus at session
   start. Either layer alone suffices.
 - **`agent-bus doctor`** reports which seats' hooks are firing, flags packets surfaced
-  three times without an ack — that combination means the host drops hook stdout — and
-  shows push-reachable vs pull-only seats.
+  three times to a live seat that never acked them — that combination means the host
+  drops hook stdout — and shows push-reachable vs pull-only seats.

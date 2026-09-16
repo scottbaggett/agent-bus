@@ -56,7 +56,8 @@ unset CLAUDE_CODE_MESSAGING_SOCKET
 # Fixtures pin identity explicitly via AGENT_BUS_TOOL / AGENT_BUS_SESSION.
 unset CLAUDECODE CLAUDE_CODE_SESSION_ID \
   CODEX_SHELL CODEX_SANDBOX CODEX_APP_TITLE CODEX_SESSION_ID CODEX_THREAD_ID \
-  CURSOR_TRACE_ID OPENCODE OPENCODE_SESSION_ID OPENCODE_SESSION_TITLE \
+  CURSOR_TRACE_ID CURSOR_AGENT CURSOR_CONVERSATION_ID \
+  OPENCODE OPENCODE_SESSION_ID OPENCODE_SESSION_TITLE \
   AGENT_BUS_SESSION AGENT_BUS_TOOL
 
 # --- identity ---
@@ -297,6 +298,66 @@ out=$(printf '{}' | AGENT_BUS_HOME="$BUS_HOME" AGENT_BUS_TOOL=cursor AGENT_BUS_W
   "$HOOK" stop)
 assert_contains "cursor stop followup_message" "cursor-wake" \
   "$(echo "$out" | jq -r '.followup_message // empty')"
+
+# --- cursor adapter: identity from the workspace, not the hook's cwd ---
+# User-level Cursor hooks run from ~/.cursor. Without re-anchoring on the
+# workspace the hook resolves to a foreign seat and every wake no-ops.
+CURSOR_CWD=$(mktemp -d)
+pushd "$ROOT" >/dev/null
+CURSOR_WT=$(awk '/^worktree/{print $2}' <<<"$("$BIN" whoami)")
+AGENT_BUS_TOOL=cursor "$BIN" watch on >/dev/null
+AGENT_BUS_TOOL=claude AGENT_BUS_SESSION=cur-peer "$BIN" post --to "cursor/$CURSOR_WT" --state question \
+  -m $'# cursor-cwd-wake\n\nfrom afar' >/dev/null
+out=$(cd "$CURSOR_CWD" && printf '{"conversation_id":"c-1","status":"completed","loop_count":0}' \
+  | CURSOR_PROJECT_DIR="$ROOT" AGENT_BUS_HOME="$BUS_HOME" "$HOOK" stop)
+assert_contains "cursor stop re-anchors on CURSOR_PROJECT_DIR" "cursor-cwd-wake" \
+  "$(echo "$out" | jq -r '.followup_message // empty')"
+out=$(cd "$CURSOR_CWD" && printf '{"conversation_id":"c-1","status":"completed","loop_count":0,"workspace_roots":["%s"]}' "$ROOT" \
+  | env -u CURSOR_PROJECT_DIR -u CLAUDE_PROJECT_DIR AGENT_BUS_HOME="$BUS_HOME" "$HOOK" stop)
+assert_contains "cursor stop re-anchors on workspace_roots" "cursor-cwd-wake" \
+  "$(echo "$out" | jq -r '.followup_message // empty')"
+# An aborted turn (user pressed stop) is never auto-continued.
+out=$(cd "$CURSOR_CWD" && printf '{"conversation_id":"c-1","status":"aborted","loop_count":0}' \
+  | CURSOR_PROJECT_DIR="$ROOT" AGENT_BUS_HOME="$BUS_HOME" "$HOOK" stop)
+assert_eq "cursor stop ignores aborted turns" "{}" "$(echo "$out" | jq -c .)"
+# The hook must not leave a phantom seat named after its own cwd.
+out=$("$BIN" who)
+assert_not_contains "cursor hook registers no cwd-named seat" "cursor/$(basename "$CURSOR_CWD")" "$out"
+AGENT_BUS_TOOL=cursor "$BIN" read >/dev/null
+AGENT_BUS_TOOL=cursor "$BIN" watch off >/dev/null
+
+# sessionStart pins identity for later hooks via env.
+out=$(cd "$CURSOR_CWD" && printf '{"session_id":"conv-abc","composer_mode":"agent"}' \
+  | CURSOR_PROJECT_DIR="$ROOT" AGENT_BUS_HOME="$BUS_HOME" "$HOOK" sessionStart)
+assert_eq "cursor sessionStart pins AGENT_BUS_SESSION" "conv-abc" "$(echo "$out" | jq -r '.env.AGENT_BUS_SESSION // empty')"
+assert_eq "cursor sessionStart pins AGENT_BUS_TOOL" "cursor" "$(echo "$out" | jq -r '.env.AGENT_BUS_TOOL // empty')"
+
+# --- cursor adapter: scope delegation to the watching instance seat ---
+# The agent's shell registered an instance seat (session id) and turned watch
+# on there; the stop hook, which cannot see that session, arrives as the bare
+# scope seat. It must wake on the instance's behalf.
+AGENT_BUS_TOOL=cursor AGENT_BUS_SESSION=cursor-chat-1 "$BIN" watch on >/dev/null
+INST=$(awk '/^seat/{print $2}' <<<"$(AGENT_BUS_TOOL=cursor AGENT_BUS_SESSION=cursor-chat-1 "$BIN" whoami)")
+AGENT_BUS_TOOL=claude AGENT_BUS_SESSION=cur-peer "$BIN" post --to "$INST" --state needs-review \
+  -m $'# delegated-wake\n\nfor the instance' >/dev/null
+out=$(cd "$CURSOR_CWD" && printf '{"conversation_id":"unknown-to-shell","status":"completed","loop_count":0}' \
+  | CURSOR_PROJECT_DIR="$ROOT" AGENT_BUS_HOME="$BUS_HOME" "$HOOK" stop)
+assert_contains "cursor stop delegates to watching instance" "delegated-wake" \
+  "$(echo "$out" | jq -r '.followup_message // empty')"
+assert_contains "delegated wake names the instance seat" "$INST" \
+  "$(echo "$out" | jq -r '.followup_message // empty')"
+# Delegation is opt-in: a plain stop-hook for a non-watching seat stays quiet
+# even with a watching sibling in scope (Claude/Codex hooks are exact).
+out=$(printf '{}' | AGENT_BUS_TOOL=cursor AGENT_BUS_SESSION=cursor-chat-2 "$BIN" stop-hook)
+assert_eq "no delegation without AGENT_BUS_DELEGATE_SCOPE" "{}" "$(echo "$out" | jq -c .)"
+# Once the instance turns watch off, the hook has nobody to act for.
+AGENT_BUS_TOOL=cursor AGENT_BUS_SESSION=cursor-chat-1 "$BIN" watch off >/dev/null
+out=$(cd "$CURSOR_CWD" && printf '{"conversation_id":"unknown-to-shell","status":"completed","loop_count":0}' \
+  | CURSOR_PROJECT_DIR="$ROOT" AGENT_BUS_HOME="$BUS_HOME" "$HOOK" stop)
+assert_eq "cursor stop quiet when no instance watches" "{}" "$(echo "$out" | jq -c .)"
+AGENT_BUS_TOOL=cursor AGENT_BUS_SESSION=cursor-chat-1 "$BIN" read >/dev/null
+popd >/dev/null
+rm -rf "$CURSOR_CWD"
 
 # --- BLOCKER 1: per-seat wake budget across distinct packets ---
 export AGENT_BUS_WAKE_BUDGET=2
@@ -841,6 +902,93 @@ assert_contains "doctor shows endpoint reachability" "PUSH-reachable (endpoint)"
 kill "$FAKE_PID" 2>/dev/null || true
 export AGENT_BUS_HOME="$SAVED_HOME"
 rm -rf "$OC_HOME"
+
+# --- hook payload session_id (Codex hooks export no session env) ---
+# A hook command fed the host's JSON payload must resolve to the same instance
+# seat as a shell that carries the session id in env; otherwise one Codex
+# session splits into a bare hook seat and an instance shell seat.
+HP_HOME=$(mktemp -d); SAVED_HOME="$AGENT_BUS_HOME"; export AGENT_BUS_HOME="$HP_HOME"
+HP_SESS="01a07d12-9eac-72f3-8482-cadcca741899"
+want=$(AGENT_BUS_TOOL=codex AGENT_BUS_WT=hp AGENT_BUS_SESSION="$HP_SESS" "$BIN" whoami | awk '/^seat/{print $2}')
+printf '{"session_id":"%s","cwd":"/x","hook_event_name":"SessionStart"}' "$HP_SESS" \
+  | AGENT_BUS_VIA=hook AGENT_BUS_TOOL=codex AGENT_BUS_WT=hp "$BIN" heartbeat
+got=$(jq -r '.addr' "$HP_HOME/seats/$(tr '/' '_' <<<"$want").json" 2>/dev/null || echo missing)
+assert_eq "hook payload session_id -> instance seat" "$want" "$got"
+assert_eq "hook payload does not also register the bare scope" "" \
+  "$(ls "$HP_HOME/seats/" | grep -x 'codex_hp.json' || true)"
+# Env pin wins over the payload.
+printf '{"session_id":"other-session"}' \
+  | AGENT_BUS_VIA=hook AGENT_BUS_TOOL=codex AGENT_BUS_WT=hp AGENT_BUS_SESSION="$HP_SESS" "$BIN" heartbeat
+assert_eq "env session outranks payload session_id" "1" \
+  "$(ls "$HP_HOME/seats/" | grep -c '^codex_hp\.' || true)"
+# The payload outranks inherited host markers (a Codex CLI launched from inside
+# another agent's shell inherits that agent's session id).
+printf '{"session_id":"%s"}' "$HP_SESS" \
+  | CLAUDE_CODE_SESSION_ID=parent-claude-session AGENT_BUS_VIA=hook AGENT_BUS_TOOL=codex AGENT_BUS_WT=hp "$BIN" heartbeat
+assert_eq "payload session_id outranks inherited host marker" "1" \
+  "$(ls "$HP_HOME/seats/" | grep -c '^codex_hp\.' || true)"
+# A payload without session_id (or unparseable) keeps the bare scope.
+printf 'not json' | AGENT_BUS_VIA=hook AGENT_BUS_TOOL=codex AGENT_BUS_WT=hp2 "$BIN" heartbeat
+assert_eq "unparseable payload -> bare scope" "codex/hp2" \
+  "$(jq -r '.addr' "$HP_HOME/seats/codex_hp2.json" 2>/dev/null || echo missing)"
+# Non-hook commands ignore stdin entirely (post reads a body from it).
+out=$(printf '{"session_id":"%s"}' "$HP_SESS" | AGENT_BUS_TOOL=codex AGENT_BUS_WT=hp3 "$BIN" whoami)
+assert_contains "whoami ignores piped payload" "seat     codex/hp3" "$out"
+# stop-hook still parses the payload and drains stdin.
+out=$(printf '{"session_id":"%s"}' "$HP_SESS" | AGENT_BUS_TOOL=codex AGENT_BUS_WT=hp "$BIN" stop-hook)
+assert_eq "stop-hook with payload emits json" "{}" "$(jq -c . <<<"$out")"
+
+# Hook payloads are captured per tool/event for later inspection.
+printf '{"session_id":"%s","hook_event_name":"UserPromptSubmit","cwd":"/x"}' "$HP_SESS" \
+  | AGENT_BUS_VIA=hook AGENT_BUS_TOOL=codex AGENT_BUS_WT=hp "$BIN" digest >/dev/null
+assert_eq "hook payload captured per tool/event" "UserPromptSubmit" \
+  "$(jq -r '.payload.hook_event_name' "$HP_HOME/state/capture/codex-UserPromptSubmit.json" 2>/dev/null || echo missing)"
+assert_contains "capture records hook env markers" '"AGENT_BUS_TOOL":"codex"' "$(jq -c '.env' "$HP_HOME/state/capture/codex-UserPromptSubmit.json")"
+printf '{"conversation_id":"c-1","workspace_roots":["/nowhere"],"hook_event_name":"stop","status":"completed"}' \
+  | AGENT_BUS_HOME="$HP_HOME" "$ROOT/bin/agent-bus-cursor-hook" stop >/dev/null 2>&1 || true
+assert_eq "cursor adapter captures payload" "c-1" \
+  "$(jq -r '.payload.conversation_id' "$HP_HOME/state/capture/cursor-stop.json" 2>/dev/null || echo missing)"
+
+# Cursor: the agent's tool shell (CURSOR_AGENT + CURSOR_CONVERSATION_ID) and the
+# adapter-run hooks (payload session_id) must resolve to one instance seat.
+CUR_CONV="337a04c0-fc3c-4f74-baa1-4631088b66e8"
+shell_seat=$(CURSOR_AGENT=1 CURSOR_CONVERSATION_ID="$CUR_CONV" AGENT_BUS_WT=cw "$BIN" whoami | awk '/^seat/{print $2}')
+assert_contains "cursor shell markers -> cursor instance seat" "cursor/cw." "$shell_seat"
+printf '{"conversation_id":"%s","session_id":"%s","hook_event_name":"sessionStart","workspace_roots":["%s"]}' \
+  "$CUR_CONV" "$CUR_CONV" "$ROOT" | AGENT_BUS_HOME="$HP_HOME" AGENT_BUS_WT=cw "$ROOT/bin/agent-bus-cursor-hook" sessionStart >/dev/null 2>&1 || true
+assert_eq "cursor sessionStart hook lands on the shell's seat" "1" \
+  "$(ls "$HP_HOME/seats/" | grep -c "^$(tr '/' '_' <<<"$shell_seat")\.json$" || true)"
+assert_eq "cursor sessionStart does not create a bare seat" "" "$(ls "$HP_HOME/seats/" | grep -x 'cursor_cw.json' || true)"
+
+# Cursor executing Claude-format hooks: recognizable payload, must stand down.
+COMPAT='{"conversation_id":"c-9","session_id":"c-9","cursor_version":"3.20.21","hook_event_name":"sessionStart","workspace_roots":["/x"]}'
+out=$(printf '%s' "$COMPAT" | AGENT_BUS_VIA=hook AGENT_BUS_TOOL=claude AGENT_BUS_WT=compat "$BIN" digest)
+assert_eq "cursor-compat digest is silent" "" "$out"
+assert_eq "cursor-compat hook registers no seat" "" "$(ls "$HP_HOME/seats/" | grep 'compat' || true)"
+out=$(printf '%s' "$COMPAT" | AGENT_BUS_VIA=hook AGENT_BUS_TOOL=claude AGENT_BUS_WT=compat "$BIN" stop-hook)
+assert_eq "cursor-compat stop-hook emits {}" "{}" "$(jq -c . <<<"$out")"
+out=$(printf '%s' "$COMPAT" | AGENT_BUS_VIA=hook AGENT_BUS_TOOL=cursor AGENT_BUS_WT=compat "$BIN" heartbeat; ls "$HP_HOME/seats/" | grep -c 'cursor_compat' || true)
+assert_eq "same payload under the cursor tool is honored" "1" "$out"
+
+# Empty payloads (adapter pipes {} into stop-hook) leave no capture file.
+rm -f "$HP_HOME/state/capture/cursor-unknown.json"
+printf '{}' | AGENT_BUS_VIA=hook AGENT_BUS_TOOL=cursor AGENT_BUS_WT=cw AGENT_BUS_SESSION=x "$BIN" stop-hook >/dev/null
+assert_eq "empty hook payload is not captured" "" "$(ls "$HP_HOME/state/capture/" | grep -x 'cursor-unknown.json' || true)"
+
+# --- doctor: unacked-after-MAX_SHOWS lists live seats and unacked packets only ---
+DT_SEAT=$(AGENT_BUS_TOOL=codex AGENT_BUS_WT=dt AGENT_BUS_SESSION=dt-sess "$BIN" whoami | awk '/^seat/{print $2}' | tr '/' '_')
+AGENT_BUS_TOOL=codex AGENT_BUS_WT=dt AGENT_BUS_SESSION=dt-sess "$BIN" heartbeat </dev/null
+mkdir -p "$HP_HOME/state"
+# Two capped packets, one later acked: only the unacked one counts.
+jq -n '{read:["p-acked"], shown:{"p-acked":3,"p-unacked":3,"p-once":1}}' >"$HP_HOME/state/$DT_SEAT.json"
+# Dead seat (no seats/ file) with capped packets: history, not reported.
+jq -n '{shown:{"p-old":5}}' >"$HP_HOME/state/codex_deadseat.json"
+out=$("$BIN" doctor)
+assert_contains "doctor lists live seat with unacked capped packet" "$DT_SEAT" "$out"
+assert_contains "doctor counts only unacked capped packets" "1 packet(s)" "$out"
+assert_not_contains "doctor skips dead seats" "codex_deadseat" "$out"
+export AGENT_BUS_HOME="$SAVED_HOME"
+rm -rf "$HP_HOME"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 ((fail == 0))

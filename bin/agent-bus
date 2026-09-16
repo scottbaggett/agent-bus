@@ -102,6 +102,65 @@ age() {
 
 # ---------------------------------------------------------------- identity
 
+# Hook entry points receive the host's JSON payload on stdin (Claude and Codex:
+# session_id, cwd, hook_event_name). Codex exports no session marker into the
+# hook subshell, so the payload is the only place its hooks can learn which
+# session they serve. Without it the hook seat resolves to the bare scope while
+# the agent's shell is the instance seat: two identities for one session, and
+# the digest cursor, watch flag, and PM ownership all land on the wrong one
+# (observed as `codex/<wt>` via=hook next to `codex/<wt>.<inst>` via=cli).
+# Read once, before identity resolution, and only for hook-invoked commands
+# (AGENT_BUS_VIA=hook, which every installed hook line sets): a bare
+# `agent-bus heartbeat` from a script must never block on a stdin nobody
+# closes. The first byte is awaited briefly; hosts write the payload before
+# spawning, so a silent pipe means there is none. The payload outranks
+# inherited host markers — a Codex CLI started from inside another agent's
+# shell inherits that agent's ids — but never the explicit AGENT_BUS_SESSION pin.
+# Last raw payload per host tool and event, plus the host env markers the hook
+# process saw: state/capture/<tool>-<event>.json, overwritten each fire. This is
+# the recorded contract — what the host actually sends — for debugging a host
+# integration without instrumenting it live. Best-effort, never fatal.
+hook_payload_capture() {
+  local payload="$1" dir="$BUS/state/capture" ev tool envj
+  printf '%s' "$payload" | jq -e 'type == "object" and length > 0' >/dev/null 2>&1 || return 0
+  mkdir -p "$dir" 2>/dev/null || return 0
+  ev=$(jq -r '.hook_event_name // "unknown"' <<<"$payload" 2>/dev/null | tr -d '\n' | tr -c 'A-Za-z0-9_-' '_' | cut -c1-40)
+  [ -n "$ev" ] || ev=unknown
+  tool="${TOOL:-${AGENT_BUS_TOOL:-host}}"
+  # One jq call per variable: values may hold newlines, which break any
+  # line-oriented parse of `env`.
+  envj='{}'; local k
+  for k in $(env | grep -oE '^(CLAUDE|CODEX|CURSOR|OPENCODE|AGENT_BUS)[A-Z_]*=' | tr -d = | sort -u); do
+    envj=$(jq -c --arg k "$k" --arg v "${!k}" '. + {($k): $v}' <<<"$envj" 2>/dev/null || printf '%s' "$envj")
+  done
+  jq -n -c --arg ev "$ev" --arg cwd "$PWD" --argjson epoch "$(now_epoch)" \
+    --argjson env "$envj" --argjson payload "$payload" \
+    '{event:$ev, epoch:$epoch, hook_cwd:$cwd, env:$env, payload:$payload}' \
+    >"$dir/$tool-$ev.json.tmp" 2>/dev/null && mv "$dir/$tool-$ev.json.tmp" "$dir/$tool-$ev.json" || true
+}
+
+HOOK_SESSION='' HOOK_PAYLOAD='' HOOK_COMPAT=''
+hook_payload_read() {
+  [ "${AGENT_BUS_VIA:-}" = hook ] || return 0
+  case "$1" in digest|heartbeat|stop-hook) ;; *) return 0 ;; esac
+  [ -t 0 ] && return 0
+  local first='' payload=''
+  IFS= read -r -t 2 -n 1 first 2>/dev/null || { [ -n "$first" ] || return 0; }
+  payload="$first$(cat 2>/dev/null || true)"
+  HOOK_SESSION=$(jq -r 'try (.session_id // empty) catch empty' <<<"$payload" 2>/dev/null || true)
+  HOOK_PAYLOAD="$payload"
+  # Cursor executes Claude-format hooks (~/.claude/settings.json) too, with its
+  # own payload (cursor_version, conversation_id) from cwd ~/.claude. Those runs
+  # would register phantom claude/.claude seats and double every digest the
+  # Cursor adapter already delivers. Recognize the payload shape and stand down.
+  if [ "${AGENT_BUS_TOOL:-}" != cursor ] \
+    && jq -e 'has("cursor_version") and has("conversation_id")' <<<"$payload" >/dev/null 2>&1; then
+    HOOK_COMPAT=cursor
+  fi
+  # Ids are hashed into the seat name; reject anything that is not a plain token.
+  [[ "$HOOK_SESSION" =~ ^[A-Za-z0-9._:-]{1,128}$ ]] || HOOK_SESSION=''
+}
+
 resolve_identity() {
   TOOL="${AGENT_BUS_TOOL:-}"
   if [ -z "$TOOL" ]; then
@@ -111,7 +170,9 @@ resolve_identity() {
     # plain terminal carries only those, and misdetecting it as shell collides
     # it with any other markerless host in the worktree.
     elif [ -n "${CODEX_SHELL:-}${CODEX_SANDBOX:-}${CODEX_APP_TITLE:-}${CODEX_SESSION_ID:-}${CODEX_THREAD_ID:-}" ]; then TOOL=codex
-    elif [ -n "${CURSOR_TRACE_ID:-}" ]; then TOOL=cursor
+    # Cursor's agent tool shell exports CURSOR_AGENT and CURSOR_CONVERSATION_ID
+    # (observed, Cursor 3.20); CURSOR_TRACE_ID is the older marker.
+    elif [ -n "${CURSOR_TRACE_ID:-}${CURSOR_AGENT:-}${CURSOR_CONVERSATION_ID:-}" ]; then TOOL=cursor
     elif [ -n "${OPENCODE:-}${OPENCODE_SESSION_ID:-}${OPENCODE_SESSION_TITLE:-}" ]; then TOOL=opencode
     else TOOL=shell
     fi
@@ -145,7 +206,11 @@ resolve_identity() {
   [ -n "${AGENT_BUS_WT:-}" ] && WT="$AGENT_BUS_WT"
   [ -n "${AGENT_BUS_REPO_ID:-}" ] && REPO_ID="$AGENT_BUS_REPO_ID"
 
-  SESSION="${AGENT_BUS_SESSION:-${CLAUDE_CODE_SESSION_ID:-${CODEX_SESSION_ID:-${CODEX_THREAD_ID:-${OPENCODE_SESSION_ID:-local}}}}}"
+  # Explicit pin, then the hook payload's session_id (the host naming the
+  # session this hook serves), then inherited host markers, then local.
+  # Cursor: the shell's CURSOR_CONVERSATION_ID equals the hook payload's
+  # session_id, so shell and hooks meet on one instance seat.
+  SESSION="${AGENT_BUS_SESSION:-${HOOK_SESSION:-${CLAUDE_CODE_SESSION_ID:-${CODEX_SESSION_ID:-${CODEX_THREAD_ID:-${CURSOR_CONVERSATION_ID:-${OPENCODE_SESSION_ID:-local}}}}}}}"
 
   # SCOPE is the routing address (tool + worktree); ADDR is the identity.
   # A session id makes the identity unique — two sessions of one tool in one
@@ -163,6 +228,8 @@ resolve_identity() {
   # instance seats fall back to them on first read so an upgrade does not
   # re-deliver every already-read packet or silently drop a live watch.
   SCOPE_SEAT=$(slugify "$SCOPE")
+  [ -n "$HOOK_PAYLOAD" ] && hook_payload_capture "$HOOK_PAYLOAD"
+  return 0
 }
 
 # Seat registry doubles as the peer directory for `who`.
@@ -1407,13 +1474,18 @@ cmd_doctor() {
 
   # Surfaced MAX_SHOWS times and still never acked = that host is not injecting
   # hook stdout into its model's context. The AGENTS.md layer has to carry it.
+  # Only live seats count — a dead seat's state file is history, not a delivery
+  # problem — and only packets the seat never acked: `shown` is never pruned on
+  # read, so a packet acked after its third surfacing must not be reported.
   local stale=0
   for f in "$BUS"/state/*.json; do
     [ -f "$f" ] || continue
     local seat n
     seat=$(basename "$f" .json)
-    n=$(jq --argjson max "$MAX_SHOWS" '[.shown // {} | to_entries[]
-      | select(.value >= $max)] | length' "$f")
+    [ -f "$BUS/seats/$seat.json" ] || continue
+    n=$(jq --argjson max "$MAX_SHOWS" '(.read // []) as $r
+      | [.shown // {} | to_entries[]
+        | select(.value >= $max and (.key as $k | any($r[]; . == $k) | not))] | length' "$f")
     if [ "$n" != 0 ]; then
       ((stale)) || printf '\nunacked after %s surfacings (host likely drops hook stdout):\n' "$MAX_SHOWS"
       stale=1
@@ -1783,12 +1855,52 @@ build_wake_payload() {
   WAKE_COUNT="$count"
 }
 
+# Scope delegation for hosts whose hook subprocess cannot learn the agent's
+# session id. Cursor is the case: its hooks receive a conversation_id, but the
+# agent's shell (where `agent-bus watch on` ran) carries no matching marker,
+# so the hook seat and the watching seat differ and the wake never fires. A
+# hook seat with no watch flag of its own re-runs the wake check as the most
+# recently active watching instance in its scope — same tool, worktree, and
+# repo, alive within SEAT_TTL — and returns the first continuation found.
+# Opt-in via AGENT_BUS_DELEGATE_SCOPE=1 (set by the Cursor adapter): Claude and
+# Codex hooks carry exact session ids (Claude in env, Codex in the payload's
+# session_id via hook_payload_read), and a non-watching session there must
+# never be handed a sibling's mail. Newest-first ordering picks the chat that
+# just finished a turn when two Cursor chats share one worktree.
+delegate_stop_hook() {
+  [ "${AGENT_BUS_DELEGATE_SCOPE:-0}" = 1 ] || return 1
+  local cut f row cands='[]' addr sess out
+  cut=$(( $(now_epoch) - SEAT_TTL ))
+  for f in "$BUS"/seats/*.json; do
+    [ -f "$f" ] || continue
+    row=$(jq -c . "$f" 2>/dev/null) || continue
+    cands=$(jq -c --argjson r "$row" '. + [$r]' <<<"$cands" 2>/dev/null) || continue
+  done
+  while IFS=$'\t' read -r addr sess; do
+    [ -n "$addr" ] || continue
+    seat_watch_on "$(slugify "$addr")" || continue
+    out=$(printf '{}' | AGENT_BUS_SESSION="$sess" AGENT_BUS_DELEGATE_SCOPE=0 \
+      "$0" stop-hook 2>/dev/null || echo '{}')
+    if [ "$(jq -r '.decision // empty' <<<"$out" 2>/dev/null)" = block ]; then
+      printf '%s\n' "$out"
+      return 0
+    fi
+  done < <(jq -r --arg tool "$TOOL" --arg wt "$WT" --arg rid "$REPO_ID" --arg addr "$ADDR" \
+      --argjson cut "$cut" '
+      map(select(.tool == $tool and .wt == $wt and .repo_id == $rid and .addr != $addr
+                 and ((.session // "local") != "local") and ((.epoch // 0) >= $cut)))
+      | sort_by(-(.epoch // 0))
+      | .[] | [.addr, .session] | @tsv' <<<"$cands" 2>/dev/null)
+  return 1
+}
+
 # Lifecycle Stop hook entrypoint. Always emits a single JSON object on stdout.
 # When watch is on and supervisory unread exists (under MAX_SHOWS and the
 # per-seat WAKE_BUDGET), blocks stop with the digest as the continuation
 # reason (Claude/Codex). Cursor maps this to followup_message via the adapter.
 cmd_stop_hook() {
-  # Drain host payload; stop_hook_active is informational.
+  # hook_payload_read already consumed a piped payload for its session_id;
+  # drain whatever is left (stop_hook_active is informational).
   cat >/dev/null || true
   touch_seat
   maybe_gc
@@ -1813,7 +1925,7 @@ cmd_stop_hook() {
   }
 
   if ! watch_on; then
-    quiet_exit
+    delegate_stop_hook || quiet_exit
     return 0
   fi
 
@@ -1949,6 +2061,12 @@ EOF
 # --------------------------------------------------------------------- main
 
 ensure_bus
+hook_payload_read "${1:-}"
+if [ -n "$HOOK_COMPAT" ]; then
+  # Cursor running our Claude-format hooks: the Cursor adapter owns this host.
+  [ "${1:-}" = stop-hook ] && printf '{}\n'
+  exit 0
+fi
 resolve_identity
 cmd="${1:-help}"; shift || true
 case "$cmd" in

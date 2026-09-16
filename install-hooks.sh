@@ -62,7 +62,11 @@ heartbeat_cmd() { printf 'AGENT_BUS_VIA=hook AGENT_BUS_TOOL=%s %s heartbeat 2>/d
 release_cmd() { printf '%s release --all >/dev/null 2>&1 || true %s' "$BIN" "$MARKER"; }
 # Stop hook: always emit JSON ({} or decision:block). Heartbeat is inside stop-hook.
 stop_cmd() { printf 'AGENT_BUS_VIA=hook AGENT_BUS_TOOL=%s %s stop-hook 2>/dev/null || echo "{}" %s' "$1" "$BIN" "$MARKER"; }
-cursor_cmd() { printf 'AGENT_BUS_VIA=hook AGENT_BUS_TOOL=cursor %s %s 2>/dev/null || echo "{}" %s' "$CURSOR_HOOK" "$1" "$MARKER"; }
+# Cursor does not document whether `command` runs through a shell, so this
+# line must work both ways: no env prefix, no redirects, no `||`. The adapter
+# pins AGENT_BUS_VIA/TOOL itself and always emits JSON; the trailing marker is
+# a comment under a shell and an ignored extra argv otherwise.
+cursor_cmd() { printf '%s %s %s' "$CURSOR_HOOK" "$1" "$MARKER"; }
 
 strip_marked() { jq --arg m "$MARKER" '
   def clean_groups:
@@ -146,6 +150,7 @@ install_cursor() {
   printf '%s\n' "$out" | jq . >"$CURSOR_HOOKS.tmp" && mv "$CURSOR_HOOKS.tmp" "$CURSOR_HOOKS"
   echo "cursor: $( ((uninstall)) && echo removed || echo installed ) (backup: $CURSOR_HOOKS.agent-bus.bak)"
   ((uninstall)) || echo "cursor: delivery still rests on the skill/AGENTS.md layer — sessionStart additional_context is unreliable in the IDE; enable agent-bus watch on for Stop-hook wake"
+  ((uninstall)) || echo "cursor: hooks.json is read at launch — restart Cursor (or reload the window) before expecting wakes"
 }
 
 # OpenCode has no shell-command lifecycle hooks; integration is a TypeScript

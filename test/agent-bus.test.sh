@@ -890,6 +890,21 @@ assert_contains "wait --timeout without value dies cleanly" "--timeout needs a v
 export AGENT_BUS_HOME="$SAVED_HOME"
 rm -rf "$INST_HOME"
 
+# --- init: one command to bring a seat up for a host check ---
+# watch on and selftest arm are separately easy to half-do, and a probe armed
+# with watch off reports the wake check SKIPPED, which reads like a pass.
+INIT_HOME=$(mktemp -d)
+out=$(AGENT_BUS_HOME="$INIT_HOME" AGENT_BUS_TOOL=cursor AGENT_BUS_SESSION=init1 "$BIN" init)
+assert_contains "init turns watch on" "watch on for" "$out"
+assert_contains "init arms a probe" "selftest armed for" "$out"
+assert_contains "init reports the wake check as live" "watch: on" "$out"
+assert_not_contains "init never reports wake skipped" "will be SKIPPED" "$out"
+out=$(AGENT_BUS_HOME="$INIT_HOME" AGENT_BUS_TOOL=cursor AGENT_BUS_SESSION=init1 "$BIN" watch)
+assert_contains "watch flag persists after init" "watch on" "$out"
+out=$(AGENT_BUS_HOME="$INIT_HOME" AGENT_BUS_TOOL=cursor AGENT_BUS_SESSION=init1 "$BIN" init foo 2>&1 || true)
+assert_contains "init takes no arguments" "takes no arguments" "$out"
+rm -rf "$INIT_HOME"
+
 # --- opencode: builtin scope, endpoint seat registry, HTTP push wake ---
 OC_HOME=$(mktemp -d)
 export AGENT_BUS_HOME="$OC_HOME"

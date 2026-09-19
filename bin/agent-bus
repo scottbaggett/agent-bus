@@ -1802,6 +1802,18 @@ cmd_selftest() {
   esac
 }
 
+# One command to bring a seat up for testing: turn on Stop-hook wake, then arm
+# the probe. Separately these are two steps that are easy to half-do, and a
+# probe armed with watch off reports the wake check as SKIPPED — which reads
+# like a pass and is the most common way a surface gets marked verified when
+# its wake was never exercised.
+cmd_init() {
+  [ $# -eq 0 ] || die "init: takes no arguments"
+  watch_set 1
+  printf 'watch on for %s\n\n' "$ADDR"
+  selftest_arm
+}
+
 selftest_arm() {
   mkdir -p "$SELFTEST_DIR" "$BUS/msg"
   local f; f=$(selftest_file)
@@ -2421,6 +2433,7 @@ agent-bus — handoff bus for coding agents sharing repos/worktrees.
   cost                            what this bus has injected into agents'
                                   contexts, per seat, from recorded surfacings
   doctor                          bus health (incl. hook/shell identity check)
+  init                            watch on + arm a probe — start a host check here
   selftest [check [<nonce>]]      end-to-end delivery probe for the host you
                                   are in: arm, then on the next turn run
                                   `selftest check <nonce>` as the digest says.
@@ -2513,6 +2526,7 @@ case "$cmd" in
   role) touch_seat; cmd_role "$@" ;;
   watch) touch_seat; cmd_watch "$@" ;;
   doctor) cmd_doctor ;;
+  init) touch_seat; cmd_init "$@" ;;
   selftest|self-test) touch_seat; cmd_selftest "$@" ;;
   cost) cmd_cost ;;
   gc) cmd_gc ;;

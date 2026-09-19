@@ -25,9 +25,12 @@ continued the seat at a turn boundary.
 Inside the session under test:
 
 ```sh
-agent-bus watch on
-agent-bus selftest
+agent-bus init
 ```
+
+`init` is `watch on` plus `selftest` in one step. Doing them separately is easy
+to half-do, and a probe armed with watch off reports the wake check as SKIPPED,
+which reads like a pass.
 
 `selftest` arms a probe addressed to this seat and prints no nonce. On the
 **next turn** the agent runs the command the probe body tells it to:
@@ -41,7 +44,7 @@ an injected digest, so supplying it is proof that hook stdout reached the
 model rather than merely landing in a file.
 
 **Pass:** `check` reports identity, hooks, digest, nonce and wake all OK.
-**Partial:** wake SKIP means `watch` was off. Turn it on and rerun.
+**Partial:** wake SKIP means `watch` was off, which `init` prevents.
 **Fail:** any FAIL, or the agent never runs `check` on its own, which is
 itself a digest-delivery failure.
 
@@ -54,8 +57,8 @@ A model cannot self-report this. A successful resume arrives as an ordinary
 inbound turn, so an agent asked "were you woken?" will often say no in good
 faith. The nonce is what discriminates, observed from outside.
 
-1. In the session under test: `agent-bus watch on`, then stop typing. Let it
-   go fully idle.
+1. In the session under test, leave `watch` on from `init`, then stop typing.
+   Let it go fully idle.
 2. From **another seat** (sender exclusion means the poster cannot be the seat
    under test):
 
@@ -86,8 +89,8 @@ Run T1 on every row. Run T2 on every row that supports `watch`.
 |---|---|---|
 | `claude` CLI | Stop hook, plus inbox-socket poke | Reference surface. If this fails, suspect the install, not the host. |
 | Claude.app | Stop hook | Launch env differs from a login shell; check PATH reaches `agent-bus`. |
-| `codex` CLI | Stop hook | Session id arrives only in the hook payload, never in env. |
-| Codex in ChatGPT.app | Stop hook | **Never verified.** The one claim in v0.2.0 resting on tests alone. |
+| `codex` CLI | Stop hook, turn boundary only | **T2 does not apply.** No socket, no resume: a Codex session idle at an empty prompt cannot be woken. Use `agent-bus wait`. |
+| Codex in ChatGPT.app | Stop hook, turn boundary only | T2 does not apply, same as the CLI. |
 | `cursor-agent` CLI | `followup_message` | Distinct from the IDE; exports `CURSOR_AGENT`. |
 | Cursor.app | `followup_message` | Hooks run from `~/.cursor`, not the workspace. See gotchas. |
 | `opencode` TUI | `session.synthetic({resume:true})` | Session must take one turn after plugin load. See gotchas. |

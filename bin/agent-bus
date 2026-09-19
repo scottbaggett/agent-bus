@@ -2372,7 +2372,20 @@ delegate_stop_hook() {
 # When watch is on and supervisory unread exists (under MAX_SHOWS and the
 # per-seat WAKE_BUDGET), blocks stop with the digest as the continuation
 # reason (Claude/Codex). Cursor maps this to followup_message via the adapter.
+# Record what the Stop hook actually emitted, and how long it took. A host that
+# rejects the output ("invalid stop hook JSON") reports nothing about what it
+# received, and the difference between a malformed payload and one the host
+# killed mid-write is not otherwise observable from here.
+# Off unless AGENT_BUS_HOOK_LOG names a file.
+hook_log() {
+  local file="${AGENT_BUS_HOOK_LOG:-}"
+  [ -n "$file" ] || return 0
+  printf '%s %s elapsed=%ss bytes=%s :: %s\n' \
+    "$(now_epoch)" "${TOOL:-?}" "${2:-?}" "${#1}" "$1" >>"$file" 2>/dev/null || true
+}
+
 cmd_stop_hook() {
+  local _t0; _t0=$(now_epoch)
   # hook_payload_read already consumed a piped payload for its session_id;
   # drain whatever is left (stop_hook_active is informational).
   cat >/dev/null || true
@@ -2392,9 +2405,13 @@ cmd_stop_hook() {
     fi
   fi
   # Emit the reminder alone when nothing else would be said.
+  emit_json() {
+    hook_log "$1" "$(( $(now_epoch) - _t0 ))"
+    printf '%s\n' "$1"
+  }
   quiet_exit() {
-    if [ -n "$nag" ]; then jq -n -c --arg m "$nag" '{systemMessage:$m}'
-    else printf '{}\n'
+    if [ -n "$nag" ]; then emit_json "$(jq -n -c --arg m "$nag" '{systemMessage:$m}')"
+    else emit_json '{}'
     fi
   }
 
@@ -2471,12 +2488,12 @@ cmd_stop_hook() {
       hint+=$(printf 'This seat has watch on, so staying reachable while idle is the expected state.\n')
       case "$TOOL" in
         codex)
-          jq -n -c --arg r "$hint" --arg m "agent-bus: idle — handing off to agent-bus wait" \
-            '{decision:"block",prompt:$r,reason:$r,systemMessage:$m}'
+          emit_json "$(jq -n -c --arg r "$hint" --arg m "agent-bus: idle — handing off to agent-bus wait" \
+            '{decision:"block",prompt:$r,reason:$r,systemMessage:$m}')"
           ;;
         *)
-          jq -n -c --arg r "$hint" --arg m "agent-bus: idle — handing off to agent-bus wait" \
-            '{decision:"block",reason:$r,systemMessage:$m}'
+          emit_json "$(jq -n -c --arg r "$hint" --arg m "agent-bus: idle — handing off to agent-bus wait" \
+            '{decision:"block",reason:$r,systemMessage:$m}')"
           ;;
       esac
       return 0
@@ -2499,12 +2516,12 @@ cmd_stop_hook() {
   # Emit `prompt` alongside `reason` so one object satisfies both hosts.
   case "$TOOL" in
     codex)
-      jq -n -c --arg reason "$WAKE_REASON" --arg msg "$msg" \
-        '{decision:"block",prompt:$reason,reason:$reason,systemMessage:$msg}'
+      emit_json "$(jq -n -c --arg reason "$WAKE_REASON" --arg msg "$msg" \
+        '{decision:"block",prompt:$reason,reason:$reason,systemMessage:$msg}')"
       ;;
     *)
-      jq -n -c --arg reason "$WAKE_REASON" --arg msg "$msg" \
-        '{decision:"block",reason:$reason,systemMessage:$msg}'
+      emit_json "$(jq -n -c --arg reason "$WAKE_REASON" --arg msg "$msg" \
+        '{decision:"block",reason:$reason,systemMessage:$msg}')"
       ;;
   esac
 }

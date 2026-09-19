@@ -178,7 +178,7 @@ claude 2.1.278 · codex 0.154.0 · cursor-agent 2026.09.15 · opencode 2.0.8
 |---|---|---|---|
 | `claude` CLI | pass | — | Observed across a working session, not probed. |
 | Claude.app | pass 5/5 | **pass, 3s** | Socket poke; `wake_count` stays 0 by design. |
-| `codex` CLI | — | n/a | Same hook path and markers as the app below. |
+| `codex` CLI | pass 5/5 | n/a | Turn-boundary wake only. |
 | Codex in ChatGPT.app | pass 5/5 | n/a | Turn-boundary wake only. |
 | `cursor-agent` CLI | — | n/a | Variant of Cursor.app; same adapter. |
 | Cursor.app | pass 5/5 | n/a | Cursor 3.21.13. Turn-boundary wake only. |
@@ -188,9 +188,15 @@ claude 2.1.278 · codex 0.154.0 · cursor-agent 2026.09.15 · opencode 2.0.8
 Both idle-wake paths are proven: the inbox socket on Claude, the synthetic
 resume on OpenCode. Every other surface is turn-boundary only, which T1 covers.
 
-Two surfaces are indistinguishable to the bus and were not tested separately.
-Codex exports only `CODEX_SHELL` from both the CLI and the ChatGPT app, and
-`cursor-agent` shares the adapter with Cursor.app.
+`cursor-agent` shares the adapter with Cursor.app and was not tested
+separately. Codex exports only `CODEX_SHELL` from both its CLI and the ChatGPT
+app, and both were run: same result, as expected.
+
+`agent-bus init` run from a plain terminal rather than inside a harness arms a
+probe on a markerless `shell/<worktree>` seat that no hook will ever touch, so
+the check can never pass. `identity_report` warns but `init` proceeds, and the
+probe is left unresolvable by anyone but that seat. Arm only from inside the
+session under test.
 
 ## When this plan is not enough
 

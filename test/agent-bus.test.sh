@@ -209,6 +209,41 @@ assert_contains "claim still held after foreign release" "README.md" "$out"
 "$BIN" release README.md >/dev/null
 out=$("$BIN" claims)
 assert_contains "owner can release" "no active claims" "$out"
+# --- claims: flag-shaped arguments are not paths ---
+# `agent-bus claim --all` once stored a claim on a file literally named "--all",
+# which showed in `who` as a real hold and needed hand-editing to clear.
+out=$("$BIN" claim --all 2>&1 || true)
+assert_contains "claim rejects a flag as a path" "looks like a flag" "$out"
+out=$("$BIN" claims)
+assert_contains "no claim recorded for the flag" "no active claims" "$out"
+out=$("$BIN" claim -x 2>&1 || true)
+assert_contains "claim rejects any leading dash" "looks like a flag" "$out"
+out=$("$BIN" release --force -x 2>&1 || true)
+assert_contains "release rejects a flag as a path" "looks like a flag" "$out"
+
+# --- claims: --force breaks a live foreign claim ---
+# A seat can die without releasing (crashed host, plugin that stopped loading);
+# its claims otherwise block the path until CLAIM_TTL with no CLI way out.
+AGENT_BUS_TOOL=codex AGENT_BUS_SESSION=holder "$BIN" claim README.md >/dev/null
+out=$("$BIN" release README.md 2>&1 || true)
+assert_contains "foreign release names the force escape" "release --force README.md" "$out"
+out=$("$BIN" claims)
+assert_contains "claim survives an unforced release" "README.md" "$out"
+out=$("$BIN" release --force README.md 2>&1)
+assert_contains "force break announces itself" "BROKE claim on README.md" "$out"
+assert_contains "force break names the holder" "codex/" "$out"
+out=$("$BIN" claims)
+assert_contains "claim gone after force" "no active claims" "$out"
+# The break is auditable, not silent.
+out=$(grep -c '"kind":"claim-break"' "$BUS_HOME/ledger.jsonl" || true)
+assert_eq "force break is recorded in the ledger" "1" "$out"
+# --force never means "everything".
+out=$("$BIN" release --force 2>&1 || true)
+assert_contains "force requires explicit paths" "needs one or more paths" "$out"
+# A path nobody holds is still a plain release.
+out=$("$BIN" release --force PROTOCOL.md 2>&1)
+assert_contains "force on an unheld path is a no-op" "not held" "$out"
+
 
 # --- resolve closes for everyone ---
 rid=$("$BIN" post --to @repo --state question -m $'# q\n\nwhy?' | awk -F= '/id=/{print $2}')

@@ -1326,10 +1326,21 @@ cmd_resolve() {
   return 0
 }
 
+# A flag-shaped argument is never a path. Without this, a mistyped
+# `agent-bus claim --all` (or any stray flag) was stored verbatim as a claim on
+# a file named "--all", which then showed in `who` as a real hold and could only
+# be cleared by editing bus state by hand.
+reject_flag_path() {
+  case "$1" in
+    -*) die "$2: '$1' looks like a flag, not a path — claims take paths only" ;;
+  esac
+}
+
 cmd_claim() {
   [ $# -ge 1 ] || die "claim: needs one or more paths"
   for p in "$@"; do
     local np newf legacyf info holder hepoch
+    reject_flag_path "$p" claim
     np=$(normalize_path "$p")
     migrate_claim_file "$np"
     newf=$(claim_file_new "$np"); legacyf=$(claim_file_legacy "$np")
@@ -1362,9 +1373,21 @@ cmd_release() {
     printf 'released all claims held by %s\n' "$ADDR"
     return
   fi
+  # --force breaks a live claim held by another seat. Needed because a seat can
+  # die without releasing (a crashed host, a plugin that stopped loading) and
+  # its claims then block the path until CLAIM_TTL, with no CLI way out — the
+  # protocol's "post a question" assumes the holder is alive to answer. The
+  # break is announced and recorded in the ledger so it is never silent.
+  local force=0
+  if [ "${1:-}" = --force ]; then
+    force=1
+    shift
+    [ $# -ge 1 ] || die "release --force: needs one or more paths (never --all)"
+  fi
   [ $# -ge 1 ] || die "release: needs paths or --all"
   for p in "$@"; do
     local np newf legacyf info holder hepoch
+    reject_flag_path "$p" release
     np=$(normalize_path "$p")
     newf=$(claim_file_new "$np"); legacyf=$(claim_file_legacy "$np")
     if [ ! -f "$newf" ] && [ ! -f "$legacyf" ]; then
@@ -1374,7 +1397,17 @@ cmd_release() {
     info=$(claim_foreign_holder "$np")
     if [ -n "$info" ]; then
       holder=${info%% *}; hepoch=${info##* }
-      printf 'agent-bus: %s held by %s — not releasing\n' "$np" "$holder" >&2
+      if ((!force)); then
+        printf 'agent-bus: %s held by %s (%s ago) — not releasing; agent-bus release --force %s to break it\n' \
+          "$np" "$holder" "$(age "$hepoch")" "$np" >&2
+        continue
+      fi
+      ledger_append "$(jq -n -c --arg addr "$ADDR" --arg holder "$holder" \
+        --arg repo "$REPO" --arg repo_id "$REPO_ID" --arg path "$np" \
+        --argjson epoch "$(now_epoch)" \
+        '{kind:"claim-break",addr:$addr,holder:$holder,repo:$repo,repo_id:$repo_id,path:$path,epoch:$epoch}')"
+      printf 'BROKE claim on %s — was held by %s (%s ago)\n' "$np" "$holder" "$(age "$hepoch")"
+      rm -f "$newf" "$legacyf"
       continue
     fi
     # Holder (or expired) on either key scheme — clear both.
@@ -2353,6 +2386,7 @@ agent-bus — handoff bus for coding agents sharing repos/worktrees.
                                   PM whose scope covers it)
   claim <path>...                 take an advisory claim (warns if contested)
   release <path>... | --all       drop claims (own claims only)
+  release --force <path>...       break another seat's live claim (announced + logged)
   claims                          list active claims
   triage                          unresolved supervisory packets by worktree,
                                   oldest first; stale (>24h) flagged. Listing

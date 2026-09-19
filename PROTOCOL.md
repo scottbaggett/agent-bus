@@ -291,6 +291,23 @@ A claim never blocks anything. It expires after 4 hours. Only the holding seat
 can `release` a live claim (expired claims may be cleared by anyone). Contested
 output is a signal to post a `question` packet, not to give up.
 
+Posting a `question` assumes the holder is alive to answer it. A seat can die
+without releasing — a crashed host, or a plugin that stopped loading after a
+host upgrade — and its claims then sit until they expire with no way out:
+
+```
+agent-bus release --force path/to/file.ts   # break another seat's live claim
+```
+
+The break prints who held it and for how long, and records a `claim-break` row
+in the ledger, so taking a path from a peer is never silent. It takes explicit
+paths and is never combined with `--all`. Use it when the holder is gone, not
+to win an argument with a live seat.
+
+Claim paths are paths. A flag-shaped argument is refused rather than stored:
+`agent-bus claim --all` once recorded a claim on a file named `--all`, which
+then appeared in `who` as a genuine hold.
+
 ## Agent rules
 
 1. **On wake**, if a digest appeared in your context, act on it before starting

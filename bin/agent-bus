@@ -455,9 +455,13 @@ MAX_SHOWS="${AGENT_BUS_MAX_SHOWS:-3}"
 # watch ping-pong between well-behaved seats. Resets only on `resolve` (thread
 # closed) — never on `read`, which is exactly what a woken agent must do.
 WAKE_BUDGET="${AGENT_BUS_WAKE_BUDGET:-3}"
-# Ceiling on Stop-hook hold. A hook that blocks longer than this is more likely
-# to be a wedged bus than a patient one, and some hosts kill long hooks.
-HOLD_MAX="${AGENT_BUS_HOLD_MAX:-300}"
+# Ceiling on Stop-hook hold, and it is the HOST's hook timeout that sets it,
+# not patience. A hold longer than the host allows is worse than no hold: the
+# host kills the hook and reports invalid JSON, while this process runs on,
+# finds the mail and spends a wake against WAKE_BUDGET that was never
+# delivered. Observed on Codex — a 30s hook completes, a 60s one is killed —
+# so the default sits under the lowest ceiling seen rather than over it.
+HOLD_MAX="${AGENT_BUS_HOLD_MAX:-25}"
 HOLD_POLL="${AGENT_BUS_HOLD_POLL:-3}"
 
 # Serialize read-modify-write of the seat state file. Concurrent hook fires
@@ -2231,8 +2235,15 @@ cmd_watch() {
         esac
       done
       [[ "$hold" =~ ^[0-9]+$ ]] || die "watch on: --hold must be an integer"
+      local asked="$hold"
       ((hold > HOLD_MAX)) && hold=$HOLD_MAX
       watch_set 1 "$hold"
+      if ((asked > hold)); then
+        printf 'watch: --hold %ss clamped to %ss — a hold past the host'"'"'s own hook timeout is\n' "$asked" "$hold"
+        printf '       worse than none: the host kills the hook and reports invalid JSON, while the\n'
+        printf '       bus still spends a wake on mail it never delivered. Raise AGENT_BUS_HOLD_MAX\n'
+        printf '       only for a host measured to allow longer.\n'
+      fi
       if ((hold > 0)); then
         printf 'watch on for %s, holding %ss — the Stop hook waits that long for mail before ending the turn\n' \
           "$ADDR" "$hold"

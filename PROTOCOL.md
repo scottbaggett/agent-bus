@@ -195,11 +195,16 @@ the end of a turn and have nothing that can reach a session parked at an empty
 prompt. With a hold, that Stop hook blocks for up to the given seconds instead
 of ending the turn, and returns a continuation the moment mail arrives. Mail
 already waiting skips the hold entirely; the default of 0 keeps the historical
-behaviour of answering at once. Capped by `AGENT_BUS_HOLD_MAX`, default 300.
+behaviour of answering at once. The ceiling is the **host's** hook timeout, not patience, and
+`AGENT_BUS_HOLD_MAX` defaults to 25s to stay under the lowest one measured. A
+hold past what the host allows is worse than no hold at all: the host kills the
+hook and reports invalid JSON, while the bus process runs on, finds the mail
+and spends a wake against `WAKE_BUDGET` that nothing ever received. `watch on`
+clamps and says so.
 
-Verified on Codex: a blocking Stop hook runs to completion and the human can
-still type throughout. A host that kills long hooks simply loses the hold and
-falls back to answering immediately.
+Measured on Codex: a 30s Stop hook runs to completion and the human can type
+throughout, a 60s one is killed. Raise the ceiling only for a host measured to
+allow longer.
 
 When watch is on, the lifecycle **Stop** hook runs `agent-bus stop-hook`. If
 there are unread **supervisory** packets (`needs-review`, `blocked`, `handoff`,

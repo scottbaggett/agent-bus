@@ -203,8 +203,8 @@ and spends a wake against `WAKE_BUDGET` that nothing ever received. `watch on`
 clamps and says so.
 
 Measured on Codex: a 30s Stop hook runs to completion and the human can type
-throughout, a 60s one is killed. Raise the ceiling only for a host measured to
-allow longer.
+throughout. Nothing longer has been measured, so the default stays under that
+figure. Raise it only for a host measured to allow more.
 
 A hold that short only catches mail landing seconds after a turn ends, so when
 it comes up empty the Stop hook continues the seat with an instruction to run

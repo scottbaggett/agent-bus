@@ -457,10 +457,14 @@ MAX_SHOWS="${AGENT_BUS_MAX_SHOWS:-3}"
 WAKE_BUDGET="${AGENT_BUS_WAKE_BUDGET:-3}"
 # Ceiling on Stop-hook hold, and it is the HOST's hook timeout that sets it,
 # not patience. A hold longer than the host allows is worse than no hold: the
-# host kills the hook and reports invalid JSON, while this process runs on,
-# finds the mail and spends a wake against WAKE_BUDGET that was never
-# delivered. Observed on Codex — a 30s hook completes, a 60s one is killed —
-# so the default sits under the lowest ceiling seen rather than over it.
+# host kills the hook, and this process runs on, finds the mail and spends a
+# wake against WAKE_BUDGET that was never delivered.
+#
+# The only ceiling actually measured here is Codex, where a 30s Stop hook runs
+# to completion and the human can still type throughout. Nothing longer has
+# been tested, so the default stays under the one known-good figure rather
+# than guessing upward. (An earlier note claimed a 60s hook was killed on
+# Codex; that was a misread of an unrelated hook failure on the same host.)
 HOLD_MAX="${AGENT_BUS_HOLD_MAX:-25}"
 HOLD_POLL="${AGENT_BUS_HOLD_POLL:-3}"
 # Minimum gap between `wait` handoffs for one seat. Sized to wait's own default
@@ -1169,8 +1173,17 @@ cmd_read() {
   done
 
   local msgs; msgs=$(select_unread "$all" "$digest")
+  # Claims from OTHER repos are not this seat's business. The filter used to be
+  # "not my seat" and nothing else, so every seat on the machine saw every
+  # claim anywhere: an agent-bus seat was shown a dozen salt-monorepo file
+  # holds on every read. Repo scoping everywhere else already works this way.
   local claims_other
-  claims_other=$(live_claims | jq -c --arg addr "$ADDR" 'select(.addr != $addr)' || true)
+  claims_other=$(live_claims | jq -c --arg addr "$ADDR" --arg repo "$REPO" --arg repoId "$REPO_ID" '
+    select(.addr != $addr)
+    | select(
+        (((.repo_id // "") != "") and (.repo_id == $repoId))
+        or (((.repo_id // "") == "") and (.repo == $repo))
+      )' || true)
 
   if [ -z "$msgs" ]; then
     ((quiet)) && exit 0

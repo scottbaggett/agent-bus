@@ -231,6 +231,17 @@ assert_contains "claim still held after foreign release" "README.md" "$out"
 out=$("$BIN" claims)
 assert_contains "owner can release" "no active claims" "$out"
 
+# --- claims: a seat only sees claims in its own repo ---
+# The digest filtered claims by "not my seat" and nothing else, so every seat
+# on the machine saw every claim anywhere. An agent-bus seat was shown a dozen
+# unrelated file holds from another repo on every single read.
+"$BIN" claim README.md >/dev/null
+out=$(AGENT_BUS_TOOL=codex "$BIN" read --peek)
+assert_contains "same-repo claims are shown" "README.md" "$out"
+out=$(AGENT_BUS_TOOL=codex AGENT_BUS_REPO_ID=someotherrepo "$BIN" read --peek)
+assert_not_contains "other-repo seats do not see them" "README.md" "$out"
+"$BIN" release README.md >/dev/null
+
 # --- claims: flag-shaped arguments are not paths ---
 # `agent-bus claim --all` once stored a claim on a file literally named "--all",
 # which showed in `who` as a real hold and needed hand-editing to clear.

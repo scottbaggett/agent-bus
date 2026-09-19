@@ -76,24 +76,32 @@ jq -c '{wake_count,last_wake}' ~/.agents/bus/state/<seat-slug>.json
 
 **Pass:** a reply carrying the nonce, `wake_count` incremented, `last_wake` at
 the second the packet was posted, and no human typed.
-**Fail:** `wake_count` unchanged after a minute means the host never asked the
-bus whether to wake. That is a dead wake path, not a quiet bus.
+**Fail:** `wake_count` unchanged after a minute, **on a surface where T2
+applies**, means the host never asked the bus whether to wake. That is a dead
+wake path, not a quiet bus. On a turn-boundary-only surface the same result is
+expected and means nothing.
 
 ---
 
 ## Surfaces
 
-Run T1 on every row. Run T2 on every row that supports `watch`.
+Run T1 on every row. **T2 applies to two surfaces only.** Waking a session
+that is already idle needs a channel into a host with no turn running, and
+only Claude Code and OpenCode have one: an inbox socket poked at post time,
+and a synthetic message that resumes the session. Everywhere else the Stop
+hook fires at the end of a turn that is already running, so an idle session
+has no hook to fire and the packet waits for the next prompt. That is not a
+bug and T1 already covers it.
 
 | Surface | Wake mechanism | Known risk |
 |---|---|---|
-| `claude` CLI | Stop hook, plus inbox-socket poke | Reference surface. If this fails, suspect the install, not the host. |
-| Claude.app | Stop hook | Launch env differs from a login shell; check PATH reaches `agent-bus`. |
+| `claude` CLI | Stop hook, plus inbox-socket poke | T2 applies. Reference surface: if this fails, suspect the install, not the host. |
+| Claude.app | Stop hook, plus inbox-socket poke | T2 applies. Launch env differs from a login shell; check PATH reaches `agent-bus`. |
 | `codex` CLI | Stop hook, turn boundary only | **T2 does not apply.** No socket, no resume: a Codex session idle at an empty prompt cannot be woken. Use `agent-bus wait`. |
 | Codex in ChatGPT.app | Stop hook, turn boundary only | T2 does not apply, same as the CLI. |
-| `cursor-agent` CLI | `followup_message` | Distinct from the IDE; exports `CURSOR_AGENT`. |
-| Cursor.app | `followup_message` | Hooks run from `~/.cursor`, not the workspace. See gotchas. |
-| `opencode` TUI | `session.synthetic({resume:true})` | Session must take one turn after plugin load. See gotchas. |
+| `cursor-agent` CLI | `followup_message`, turn boundary only | T2 does not apply. Distinct from the IDE; exports `CURSOR_AGENT`. |
+| Cursor.app | `followup_message`, turn boundary only | T2 does not apply. Hooks run from `~/.cursor`, not the workspace. See gotchas. |
+| `opencode` TUI | `session.synthetic({resume:true})` | T2 applies. Session must take one turn after plugin load. See gotchas. |
 | `opencode run` | none | Headless, one-shot. T1 only, and expect no `session.created`. |
 
 ## Per-surface gotchas
@@ -162,12 +170,12 @@ harness versions:   claude __  codex __  cursor-agent __  opencode __
 surface                 T1      T2      notes
 claude CLI              ___     ___
 Claude.app              ___     ___
-codex CLI               ___     ___
-Codex in ChatGPT.app    ___     ___
-cursor-agent CLI        ___     ___
-Cursor.app              ___     ___
+codex CLI               ___     n/a     turn-boundary wake only
+Codex in ChatGPT.app    ___     n/a     turn-boundary wake only
+cursor-agent CLI        ___     n/a     turn-boundary wake only
+Cursor.app              ___     n/a     turn-boundary wake only
 opencode TUI            ___     ___
-opencode run            ___     n/a
+opencode run            ___     n/a     headless, one-shot
 ```
 
 ## When this plan is not enough

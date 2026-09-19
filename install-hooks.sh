@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Wire agent-bus into Claude Code, Codex, and Cursor lifecycle hooks.
+# Wire agent-bus into Claude Code, Codex, Cursor, and OpenCode.
 #
 # Idempotent: every managed hook command carries the AGENT_BUS_MANAGED marker,
 # and existing marked entries are stripped before re-adding. Config files are
-# backed up next to themselves before any write.
+# backed up next to themselves before any write (first install only — see
+# ensure_backup).
 #
-# Usage: install-hooks.sh [--claude] [--codex] [--cursor] [--uninstall]
-#   (default: all three)
+# Usage: install-hooks.sh [--claude] [--codex] [--cursor] [--opencode] [--uninstall]
+#   (default: all four)
 set -euo pipefail
 
 MARKER='# agent-bus-managed'
@@ -21,21 +22,47 @@ else
   BIN="$HOME/.local/bin/agent-bus"
 fi
 CURSOR_HOOK="${AGENT_BUS_CURSOR_HOOK:-$ROOT/bin/agent-bus-cursor-hook}"
+OPENCODE_PLUGIN_DIR="${AGENT_BUS_OPENCODE_PLUGIN_DIR:-$ROOT/plugins/agent-bus}"
 CLAUDE_SETTINGS="$HOME/.claude/settings.json"
 CODEX_HOOKS="$HOME/.codex/hooks.json"
 CURSOR_HOOKS="$HOME/.cursor/hooks.json"
+# OpenCode installs a plugin, not shell hooks: the plugin is copied into the
+# global config dir and registered in the global opencode.json plugin array.
+OPENCODE_PLUGINS="$HOME/.config/opencode/plugins"
+OPENCODE_CONFIG="$HOME/.config/opencode/opencode.json"
+OPENCODE_PLUGIN_NAME="agent-bus"
 
-do_claude=0 do_codex=0 do_cursor=0 uninstall=0
+do_claude=0 do_codex=0 do_cursor=0 do_opencode=0 uninstall=0
 for a in "$@"; do
   case "$a" in
     --claude) do_claude=1 ;;
     --codex) do_codex=1 ;;
     --cursor) do_cursor=1 ;;
+    --opencode) do_opencode=1 ;;
     --uninstall) uninstall=1 ;;
     *) echo "unknown flag: $a" >&2; exit 1 ;;
   esac
 done
-((do_claude || do_codex || do_cursor)) || { do_claude=1; do_codex=1; do_cursor=1; }
+((do_claude || do_codex || do_cursor || do_opencode)) || { do_claude=1; do_codex=1; do_cursor=1; do_opencode=1; }
+
+# Back up once, not every run: re-copying would overwrite the pristine
+# pre-agent-bus snapshot with the currently-installed file on repeat runs.
+ensure_backup() {
+  local f="$1" bak="$1.agent-bus.bak"
+  [ -f "$bak" ] || cp "$f" "$bak"
+}
+
+# Host configs are commonly symlinks into a dotfiles repo. Every write here is
+# jq-to-tmp followed by mv, which replaces the LINK with a regular file and
+# silently detaches the user's dotfiles. Resolve to the real file first so the
+# edit lands where the link points and the link survives.
+resolve_link() {
+  local f="$1"
+  [ -L "$f" ] || { printf '%s' "$f"; return; }
+  local r
+  r=$(python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$f" 2>/dev/null) || r=""
+  [ -n "$r" ] && printf '%s' "$r" || printf '%s' "$f"
+}
 
 # Hook payloads are wrapped so a bus failure can never break the host agent.
 # AGENT_BUS_VIA=hook is what lets `agent-bus doctor` prove hooks are firing.
@@ -44,10 +71,17 @@ done
 # session into two identities (observed as codex-vs-shell on the same seat).
 digest_cmd() { printf 'AGENT_BUS_VIA=hook AGENT_BUS_TOOL=%s %s digest 2>/dev/null || true %s' "$1" "$BIN" "$MARKER"; }
 heartbeat_cmd() { printf 'AGENT_BUS_VIA=hook AGENT_BUS_TOOL=%s %s heartbeat 2>/dev/null || true %s' "$1" "$BIN" "$MARKER"; }
-release_cmd() { printf '%s release --all >/dev/null 2>&1 || true %s' "$BIN" "$MARKER"; }
+# Pinned like every other line: hooks_report counts a line without the pin as
+# a stale install, so an unpinned release line made `doctor` report STALE on a
+# freshly-run installer with no way to clear it.
+release_cmd() { printf 'AGENT_BUS_VIA=hook AGENT_BUS_TOOL=%s %s release --all >/dev/null 2>&1 || true %s' "$1" "$BIN" "$MARKER"; }
 # Stop hook: always emit JSON ({} or decision:block). Heartbeat is inside stop-hook.
 stop_cmd() { printf 'AGENT_BUS_VIA=hook AGENT_BUS_TOOL=%s %s stop-hook 2>/dev/null || echo "{}" %s' "$1" "$BIN" "$MARKER"; }
-cursor_cmd() { printf 'AGENT_BUS_VIA=hook AGENT_BUS_TOOL=cursor %s %s 2>/dev/null || echo "{}" %s' "$CURSOR_HOOK" "$1" "$MARKER"; }
+# Cursor does not document whether `command` runs through a shell, so this
+# line must work both ways: no env prefix, no redirects, no `||`. The adapter
+# pins AGENT_BUS_VIA/TOOL itself and always emits JSON; the trailing marker is
+# a comment under a shell and an ignored extra argv otherwise.
+cursor_cmd() { printf '%s %s %s' "$CURSOR_HOOK" "$1" "$MARKER"; }
 
 strip_marked() { jq --arg m "$MARKER" '
   def clean_groups:
@@ -82,9 +116,8 @@ add_cursor_hook() { # <event> <command>
 
 install_claude() {
   [ -f "$CLAUDE_SETTINGS" ] || echo '{}' >"$CLAUDE_SETTINGS"
-  # Keep the first backup: re-running the installer must not overwrite the
-  # pristine pre-agent-bus config with an already-managed one.
-  [ -f "$CLAUDE_SETTINGS.agent-bus.bak" ] || cp "$CLAUDE_SETTINGS" "$CLAUDE_SETTINGS.agent-bus.bak"
+  CLAUDE_SETTINGS=$(resolve_link "$CLAUDE_SETTINGS")
+  ensure_backup "$CLAUDE_SETTINGS"
   local out
   out=$(strip_marked <"$CLAUDE_SETTINGS")
   if ((!uninstall)); then
@@ -94,7 +127,7 @@ install_claude() {
     out=$(printf '%s' "$out" | add_group UserPromptSubmit "$(digest_cmd claude)")
     # Stop continues the agent when watch is on and supervisory mail is unread.
     out=$(printf '%s' "$out" | add_group Stop "$(stop_cmd claude)")
-    out=$(printf '%s' "$out" | add_group SessionEnd "$(release_cmd)")
+    out=$(printf '%s' "$out" | add_group SessionEnd "$(release_cmd claude)")
   fi
   printf '%s\n' "$out" | jq . >"$CLAUDE_SETTINGS.tmp" && mv "$CLAUDE_SETTINGS.tmp" "$CLAUDE_SETTINGS"
   echo "claude: $( ((uninstall)) && echo removed || echo installed ) (backup: $CLAUDE_SETTINGS.agent-bus.bak)"
@@ -102,7 +135,8 @@ install_claude() {
 
 install_codex() {
   [ -f "$CODEX_HOOKS" ] || echo '{}' >"$CODEX_HOOKS"
-  [ -f "$CODEX_HOOKS.agent-bus.bak" ] || cp "$CODEX_HOOKS" "$CODEX_HOOKS.agent-bus.bak"
+  CODEX_HOOKS=$(resolve_link "$CODEX_HOOKS")
+  ensure_backup "$CODEX_HOOKS"
   local out
   out=$(strip_marked <"$CODEX_HOOKS")
   if ((!uninstall)); then
@@ -119,7 +153,8 @@ install_codex() {
 install_cursor() {
   mkdir -p "$(dirname "$CURSOR_HOOKS")"
   [ -f "$CURSOR_HOOKS" ] || printf '%s\n' '{"version":1,"hooks":{}}' >"$CURSOR_HOOKS"
-  [ -f "$CURSOR_HOOKS.agent-bus.bak" ] || cp "$CURSOR_HOOKS" "$CURSOR_HOOKS.agent-bus.bak"
+  CURSOR_HOOKS=$(resolve_link "$CURSOR_HOOKS")
+  ensure_backup "$CURSOR_HOOKS"
   chmod +x "$CURSOR_HOOK" 2>/dev/null || true
   local out
   out=$(strip_marked_cursor <"$CURSOR_HOOKS")
@@ -133,9 +168,51 @@ install_cursor() {
   printf '%s\n' "$out" | jq . >"$CURSOR_HOOKS.tmp" && mv "$CURSOR_HOOKS.tmp" "$CURSOR_HOOKS"
   echo "cursor: $( ((uninstall)) && echo removed || echo installed ) (backup: $CURSOR_HOOKS.agent-bus.bak)"
   ((uninstall)) || echo "cursor: delivery still rests on the skill/AGENTS.md layer — sessionStart additional_context is unreliable in the IDE; enable agent-bus watch on for Stop-hook wake"
+  ((uninstall)) || echo "cursor: hooks.json is read at launch — restart Cursor (or reload the window) before expecting wakes"
+}
+
+# OpenCode has no shell-command lifecycle hooks; integration is a TypeScript
+# plugin. Install = copy the plugin into the global config dir + register it
+# in the global opencode.json plugin array. The entry string doubles as the
+# strip marker (any plugin path mentioning plugins/agent-bus is ours).
+#
+# The plugin installs as a DIRECTORY (plugins/agent-bus/ with index.ts and
+# package.json), not a bare .ts file. OpenCode 2 logs "configured plugin path
+# must be a directory" for a file entry, and its plugin discovery expects a
+# package directory; OpenCode 1 loads a directory entry just as happily. The
+# old flat agent-bus.ts from previous installs is removed either way.
+install_opencode() {
+  mkdir -p "$OPENCODE_PLUGINS" "$(dirname "$OPENCODE_CONFIG")"
+  [ -f "$OPENCODE_CONFIG" ] || printf '{}\n' >"$OPENCODE_CONFIG"
+  OPENCODE_CONFIG=$(resolve_link "$OPENCODE_CONFIG")
+  ensure_backup "$OPENCODE_CONFIG"
+  local plugin_src="$OPENCODE_PLUGIN_DIR/index.ts"
+  local dest="$OPENCODE_PLUGINS/$OPENCODE_PLUGIN_NAME"
+  [ -f "$plugin_src" ] || { echo "opencode: plugin source missing at $plugin_src — skipping" >&2; return 0; }
+  # Pre-v2 layout, removed on install and uninstall alike.
+  rm -f "$OPENCODE_PLUGINS/$OPENCODE_PLUGIN_NAME.ts"
+  if ((uninstall)); then
+    rm -rf "$dest"
+    jq --arg m "plugins/$OPENCODE_PLUGIN_NAME" '
+      .plugin //= [] | .plugin |= map(select(contains($m) | not))
+    ' "$OPENCODE_CONFIG" | jq . >"$OPENCODE_CONFIG.tmp" && mv "$OPENCODE_CONFIG.tmp" "$OPENCODE_CONFIG"
+    echo "opencode: removed (backup: $OPENCODE_CONFIG.agent-bus.bak)"
+    return 0
+  fi
+  mkdir -p "$dest"
+  cp "$plugin_src" "$dest/index.ts"
+  [ -f "$OPENCODE_PLUGIN_DIR/package.json" ] && cp "$OPENCODE_PLUGIN_DIR/package.json" "$dest/package.json"
+  # Replace any earlier entry (flat .ts or directory) with the directory form.
+  jq --arg e "./plugins/$OPENCODE_PLUGIN_NAME" '
+    .plugin //= [] | .plugin |= (map(select(contains("plugins/agent-bus") | not)) + [$e] | unique)
+  ' "$OPENCODE_CONFIG" | jq . >"$OPENCODE_CONFIG.tmp" && mv "$OPENCODE_CONFIG.tmp" "$OPENCODE_CONFIG"
+  echo "opencode: installed (backup: $OPENCODE_CONFIG.agent-bus.bak)"
+  echo "opencode: the plugin is copied as a snapshot — re-run this installer after upgrading agent-bus"
+  echo "opencode: requires agent-bus on PATH (or AGENT_BUS_BIN) — restart OpenCode; config is read once at startup"
 }
 
 ((do_claude)) && install_claude
 ((do_codex)) && install_codex
 ((do_cursor)) && install_cursor
+((do_opencode)) && install_opencode
 exit 0

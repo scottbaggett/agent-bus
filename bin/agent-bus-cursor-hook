@@ -5,11 +5,38 @@
 # which inject raw stdout). This wrapper consumes the event payload, runs the
 # bus, and returns Cursor-shaped JSON.
 #
+# Two Cursor-specific facts shape this adapter:
+#
+# 1. User-level hooks (~/.cursor/hooks.json) run with cwd = ~/.cursor, not the
+#    workspace. The bus derives repo/worktree identity from cwd, so without a
+#    cd the hook resolves to a bogus `cursor/.cursor` seat that has no watch
+#    flag and no mail — every wake silently no-ops. Cursor exports the
+#    workspace as CURSOR_PROJECT_DIR and lists it in the payload's
+#    workspace_roots; we cd there first.
+#
+# 2. The hook cannot see the agent's shell environment, so it may not resolve
+#    to the same seat the agent used when it ran `agent-bus watch on`. The
+#    adapter asks stop-hook to delegate within its scope (AGENT_BUS_DELEGATE_SCOPE):
+#    a hook seat without a watch flag of its own wakes on behalf of the most
+#    recently active watching cursor seat in the same worktree. sessionStart
+#    also returns `env` pinning tool + session so hooks (and, where Cursor
+#    propagates it, the agent's shell) share one identity.
+#
 # Note: Cursor's sessionStart additional_context injection has been unreliable
 # in the IDE; delivery for Cursor still rests primarily on the skill /
 # AGENTS.md instruction layer. Opt-in `agent-bus watch on` uses the stop hook's
 # followup_message to continue the agent when supervisory packets are unread.
 set -euo pipefail
+
+# Cursor never blocks on a hook that answers `{}`, and it is undocumented
+# whether a hook that dies without output is treated as a failure. Guarantee a
+# JSON object on every exit path, including a `set -e` abort.
+EMITTED=0
+emit() { printf '%s\n' "$1"; EMITTED=1; }
+trap '[ "$EMITTED" = 1 ] || printf "{}\n"' EXIT
+
+# Hooks may not inherit a login-shell PATH; the bus and this adapter need jq.
+export PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="${AGENT_BUS_BIN:-}"
@@ -21,39 +48,91 @@ if [ -z "$BIN" ]; then
 fi
 
 EVENT="${1:-sessionStart}"
-# Preserve stdin for stop-hook (it drains); other events just discard.
 export AGENT_BUS_VIA=hook
 export AGENT_BUS_TOOL="${AGENT_BUS_TOOL:-cursor}"
 
+# Consume the whole payload once; every branch needs at least a field or two.
+PAYLOAD=$(cat 2>/dev/null || true)
+[ -n "$PAYLOAD" ] || PAYLOAD='{}'
+printf '%s' "$PAYLOAD" | jq -e . >/dev/null 2>&1 || PAYLOAD='{}'
+
+field() { printf '%s' "$PAYLOAD" | jq -r "$1 // empty" 2>/dev/null || true; }
+
+# Pin the session for every bus call in this hook, including sessionStart's own
+# heartbeat/digest — otherwise those land on the bare cursor/<wt> seat while the
+# stop hook (which inherits the env we return below) lands on the instance.
+# Cursor documents session_id == conversation_id; the agent's shell sees the
+# same value as CURSOR_CONVERSATION_ID, so all three resolve to one seat.
+if [ -z "${AGENT_BUS_SESSION:-}" ]; then
+  CONV_PIN=$(field '.session_id // .conversation_id')
+  [ -n "$CONV_PIN" ] && export AGENT_BUS_SESSION="$CONV_PIN"
+fi
+
+# Keep the last raw payload per event (plus the host env the hook saw) so a
+# host's real contract can be inspected after the fact instead of guessed at:
+# state/capture/cursor-<event>.json, overwritten each fire, local to this user.
+capture_payload() {
+  local dir="${AGENT_BUS_HOME:-$HOME/.agents/bus}/state/capture" envj
+  mkdir -p "$dir" 2>/dev/null || return 0
+  # One jq call per variable: values may hold newlines, which break any
+  # line-oriented parse of `env`.
+  envj='{}'; local k
+  for k in $(env | grep -oE '^(CURSOR|CLAUDE|AGENT_BUS)[A-Z_]*=' | tr -d = | sort -u); do
+    envj=$(jq -c --arg k "$k" --arg v "${!k}" '. + {($k): $v}' <<<"$envj" 2>/dev/null || printf '%s' "$envj")
+  done
+  jq -n -c --arg ev "$EVENT" --arg cwd "$PWD" --argjson epoch "$(date +%s)" \
+    --argjson env "$envj" --argjson payload "$PAYLOAD" \
+    '{event:$ev, epoch:$epoch, hook_cwd:$cwd, env:$env, payload:$payload}' \
+    >"$dir/cursor-$EVENT.json.tmp" 2>/dev/null && mv "$dir/cursor-$EVENT.json.tmp" "$dir/cursor-$EVENT.json" || true
+}
+capture_payload
+
+# Re-anchor on the workspace so identity resolves to the agent's worktree.
+PROJECT="${CURSOR_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-}}"
+[ -n "$PROJECT" ] || PROJECT=$(field '.workspace_roots[0]')
+if [ -n "$PROJECT" ] && [ -d "$PROJECT" ]; then
+  cd "$PROJECT" || true
+fi
+
 case "$EVENT" in
   sessionStart)
-    cat >/dev/null || true
     "$BIN" heartbeat >/dev/null 2>&1 || true
     digest=$("$BIN" digest 2>/dev/null || true)
-    if [ -n "${digest:-}" ]; then
-      jq -n --arg c "$digest" '{additional_context:$c}'
-    else
-      printf '{}\n'
-    fi
+    # env: pins identity for every later hook in this conversation (and for
+    # the agent's shell where Cursor propagates it), so the seat that runs
+    # `watch on` and the seat the stop hook checks are one and the same.
+    # Cursor's session_id is documented as the same value as conversation_id.
+    CONV=$(field '.session_id // .conversation_id')
+    out=$(jq -n -c --arg c "${digest:-}" --arg s "${CONV:-}" --arg t "$AGENT_BUS_TOOL" '
+      ({} | if ($c | length) > 0 then .additional_context = $c else . end)
+      + {env: ({AGENT_BUS_TOOL: $t} + (if ($s | length) > 0 then {AGENT_BUS_SESSION: $s} else {} end))}
+    ' 2>/dev/null || echo '{}')
+    emit "$out"
     ;;
   sessionEnd)
-    cat >/dev/null || true
     "$BIN" release --all >/dev/null 2>&1 || true
-    printf '{}\n'
+    emit '{}'
     ;;
   stop)
+    # The user pressing stop (aborted) or an errored turn must not be
+    # auto-continued; only a completed turn may be followed up.
+    status=$(field '.status')
+    if [ -n "$status" ] && [ "$status" != completed ]; then
+      emit '{}'
+      exit 0
+    fi
     # Map Claude/Codex-shaped stop-hook JSON to Cursor followup_message.
-    raw=$("$BIN" stop-hook 2>/dev/null || echo '{}')
-    echo "$raw" | jq -c '
+    raw=$(printf '{}' | AGENT_BUS_DELEGATE_SCOPE=1 "$BIN" stop-hook 2>/dev/null || echo '{}')
+    out=$(printf '%s' "$raw" | jq -c '
       if .decision == "block" and ((.reason // "") | length) > 0 then
         {followup_message: .reason}
       else
         {}
       end
-    '
+    ' 2>/dev/null || echo '{}')
+    emit "$out"
     ;;
   *)
-    cat >/dev/null || true
-    printf '{}\n'
+    emit '{}'
     ;;
 esac

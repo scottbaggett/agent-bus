@@ -56,8 +56,30 @@ unset CLAUDE_CODE_MESSAGING_SOCKET
 # Fixtures pin identity explicitly via AGENT_BUS_TOOL / AGENT_BUS_SESSION.
 unset CLAUDECODE CLAUDE_CODE_SESSION_ID \
   CODEX_SHELL CODEX_SANDBOX CODEX_APP_TITLE CODEX_SESSION_ID CODEX_THREAD_ID \
-  CURSOR_TRACE_ID OPENCODE OPENCODE_SESSION_ID OPENCODE_SESSION_TITLE \
+  CURSOR_TRACE_ID CURSOR_AGENT CURSOR_CONVERSATION_ID \
+  OPENCODE OPENCODE_SESSION_ID OPENCODE_SESSION_TITLE \
   AGENT_BUS_SESSION AGENT_BUS_TOOL
+# Every other AGENT_BUS_* the caller happened to export is scrubbed too, then
+# the few the suite owns are re-set below. Naming them one by one let new knobs
+# (AGENT_BUS_VIA, AGENT_BUS_ENDPOINT, AGENT_BUS_DELEGATE_SCOPE) leak in from an
+# agent or hook shell and change results — a suite whose verdict depends on who
+# invoked it cannot certify anything.
+for _v in $(env | sed -n 's/^\(AGENT_BUS_[A-Z0-9_]*\)=.*/\1/p'); do
+  case "$_v" in
+    AGENT_BUS_HOME|AGENT_BUS_NO_PUSH|AGENT_BUS_NO_AUTO_GC) ;;
+    *) unset "$_v" ;;
+  esac
+done
+unset _v
+
+# Preflight: prove the scrub worked before any assertion runs. A leaked knob
+# must fail loudly here, not as a mystery failure hundreds of lines later.
+# `grep -v` exits 1 when nothing survives the filter, which is the PASSING
+# case here; under `set -o pipefail` that would abort the suite silently.
+_leaked=$( { env | sed -n 's/^\(AGENT_BUS_[A-Z0-9_]*\)=.*/\1/p' \
+  | grep -vE '^AGENT_BUS_(HOME|NO_PUSH|NO_AUTO_GC)$' || true; } | sort | tr '\n' ' ')
+assert_eq "harness env is hermetic" "" "$_leaked"
+unset _leaked
 
 # --- identity ---
 out=$("$BIN" whoami)
@@ -209,6 +231,41 @@ assert_contains "claim still held after foreign release" "README.md" "$out"
 out=$("$BIN" claims)
 assert_contains "owner can release" "no active claims" "$out"
 
+# --- claims: flag-shaped arguments are not paths ---
+# `agent-bus claim --all` once stored a claim on a file literally named "--all",
+# which showed in `who` as a real hold and needed hand-editing to clear.
+out=$("$BIN" claim --all 2>&1 || true)
+assert_contains "claim rejects a flag as a path" "looks like a flag" "$out"
+out=$("$BIN" claims)
+assert_contains "no claim recorded for the flag" "no active claims" "$out"
+out=$("$BIN" claim -x 2>&1 || true)
+assert_contains "claim rejects any leading dash" "looks like a flag" "$out"
+out=$("$BIN" release --force -x 2>&1 || true)
+assert_contains "release rejects a flag as a path" "looks like a flag" "$out"
+
+# --- claims: --force breaks a live foreign claim ---
+# A seat can die without releasing (crashed host, plugin that stopped loading);
+# its claims otherwise block the path until CLAIM_TTL with no CLI way out.
+AGENT_BUS_TOOL=codex AGENT_BUS_SESSION=holder "$BIN" claim README.md >/dev/null
+out=$("$BIN" release README.md 2>&1 || true)
+assert_contains "foreign release names the force escape" "release --force README.md" "$out"
+out=$("$BIN" claims)
+assert_contains "claim survives an unforced release" "README.md" "$out"
+out=$("$BIN" release --force README.md 2>&1)
+assert_contains "force break announces itself" "BROKE claim on README.md" "$out"
+assert_contains "force break names the holder" "codex/" "$out"
+out=$("$BIN" claims)
+assert_contains "claim gone after force" "no active claims" "$out"
+# The break is auditable, not silent.
+out=$(grep -c '"kind":"claim-break"' "$BUS_HOME/ledger.jsonl" || true)
+assert_eq "force break is recorded in the ledger" "1" "$out"
+# --force never means "everything".
+out=$("$BIN" release --force 2>&1 || true)
+assert_contains "force requires explicit paths" "needs one or more paths" "$out"
+# A path nobody holds is still a plain release.
+out=$("$BIN" release --force PROTOCOL.md 2>&1)
+assert_contains "force on an unheld path is a no-op" "not held" "$out"
+
 # --- resolve closes for everyone ---
 rid=$("$BIN" post --to @repo --state question -m $'# q\n\nwhy?' | awk -F= '/id=/{print $2}')
 AGENT_BUS_TOOL=codex "$BIN" resolve "$rid" >/dev/null
@@ -232,16 +289,39 @@ out=$("$BIN" watch)
 assert_contains "watch defaults off" "watch off" "$out"
 
 # Supervisory unread while watch off → no wake
-AGENT_BUS_TOOL=claude "$BIN" post --to @here --state needs-review \
+AGENT_BUS_TOOL=claude "$BIN" post --to @codex --state needs-review \
   -m $'# wake-target\n\nplease review' >/dev/null
 out=$(printf '{}' | AGENT_BUS_TOOL=codex "$BIN" stop-hook)
 assert_eq "stop-hook idle when watch off" "{}" "$(echo "$out" | jq -c .)"
 
+# Watch on, but the packet is a broadcast (@codex): the seat sees it as digest
+# context, yet is NOT woken — supervisory wake belongs to the packet's owner.
 AGENT_BUS_TOOL=codex "$BIN" watch on >/dev/null
+out=$(printf '{}' | AGENT_BUS_TOOL=codex "$BIN" stop-hook)
+assert_eq "broadcast supervisory does not wake bystander" "{}" "$(echo "$out" | jq -c .)"
+out=$(AGENT_BUS_TOOL=codex "$BIN" read --peek)
+assert_contains "bystander still sees broadcast in digest" "wake-target" "$out"
+assert_contains "bystander copy labeled as not theirs" "act only if it names you" "$out"
+AGENT_BUS_TOOL=codex "$BIN" read >/dev/null
+
+# Directly addressed supervisory mail does wake.
+WAKE_WT=$(awk '/^worktree/{print $2}' <<<"$(AGENT_BUS_TOOL=codex "$BIN" whoami)")
+AGENT_BUS_TOOL=claude "$BIN" post --to "codex/$WAKE_WT" --state needs-review \
+  -m $'# wake-target-direct\n\nplease review' >/dev/null
 out=$(printf '{}' | AGENT_BUS_TOOL=codex "$BIN" stop-hook)
 dec=$(echo "$out" | jq -r '.decision // empty')
 assert_eq "stop-hook blocks when watch on" "block" "$dec"
-assert_contains "stop-hook reason has subject" "wake-target" "$(echo "$out" | jq -r '.reason')"
+assert_contains "stop-hook reason has subject" "wake-target-direct" "$(echo "$out" | jq -r '.reason')"
+
+# A watching repo PM IS woken by @here supervisory traffic (owner via auto-CC).
+AGENT_BUS_TOOL=cursor AGENT_BUS_WT=pm-seat "$BIN" read >/dev/null
+AGENT_BUS_TOOL=cursor AGENT_BUS_WT=pm-seat "$BIN" watch on >/dev/null
+AGENT_BUS_TOOL=claude "$BIN" post --to @here --state needs-review \
+  -m $'# pm-wake\n\nreview me' >/dev/null
+out=$(printf '{}' | AGENT_BUS_TOOL=cursor AGENT_BUS_WT=pm-seat "$BIN" stop-hook)
+assert_eq "@here supervisory wakes the PM" "block" "$(echo "$out" | jq -r '.decision // empty')"
+AGENT_BUS_TOOL=cursor AGENT_BUS_WT=pm-seat "$BIN" read >/dev/null
+AGENT_BUS_TOOL=cursor AGENT_BUS_WT=pm-seat "$BIN" watch off >/dev/null
 
 # Ack so fyi test starts clean
 AGENT_BUS_TOOL=codex "$BIN" read >/dev/null
@@ -254,7 +334,7 @@ assert_eq "stop-hook ignores fyi" "{}" "$(echo "$out" | jq -c .)"
 # MAX_SHOWS cap: after three surfacings, further stop-hook is {}
 # Use @repo so a different worktree seat receives the packet.
 export AGENT_BUS_MAX_SHOWS=3
-AGENT_BUS_TOOL=claude "$BIN" post --to @repo --state question \
+AGENT_BUS_TOOL=claude "$BIN" post --to cursor/wake-cap --state question \
   -m $'# cap-me\n\nwhy?' >/dev/null
 AGENT_BUS_TOOL=cursor AGENT_BUS_WT=wake-cap "$BIN" watch on >/dev/null
 for i in 1 2 3; do
@@ -268,32 +348,92 @@ assert_eq "stop-hook silent after MAX_SHOWS" "{}" "$(echo "$out" | jq -c .)"
 
 # Cursor stop adapter maps block → followup_message
 AGENT_BUS_TOOL=cursor AGENT_BUS_WT=wake-map "$BIN" watch on >/dev/null
-AGENT_BUS_TOOL=claude "$BIN" post --to @cursor --state handoff \
+AGENT_BUS_TOOL=claude "$BIN" post --to cursor/wake-map --state handoff \
   -m $'# cursor-wake\n\ntake it' >/dev/null
 out=$(printf '{}' | AGENT_BUS_HOME="$BUS_HOME" AGENT_BUS_TOOL=cursor AGENT_BUS_WT=wake-map \
   "$HOOK" stop)
 assert_contains "cursor stop followup_message" "cursor-wake" \
   "$(echo "$out" | jq -r '.followup_message // empty')"
 
+# --- cursor adapter: identity from the workspace, not the hook's cwd ---
+# User-level Cursor hooks run from ~/.cursor. Without re-anchoring on the
+# workspace the hook resolves to a foreign seat and every wake no-ops.
+CURSOR_CWD=$(mktemp -d)
+pushd "$ROOT" >/dev/null
+CURSOR_WT=$(awk '/^worktree/{print $2}' <<<"$("$BIN" whoami)")
+AGENT_BUS_TOOL=cursor "$BIN" watch on >/dev/null
+AGENT_BUS_TOOL=claude AGENT_BUS_SESSION=cur-peer "$BIN" post --to "cursor/$CURSOR_WT" --state question \
+  -m $'# cursor-cwd-wake\n\nfrom afar' >/dev/null
+out=$(cd "$CURSOR_CWD" && printf '{"conversation_id":"c-1","status":"completed","loop_count":0}' \
+  | CURSOR_PROJECT_DIR="$ROOT" AGENT_BUS_HOME="$BUS_HOME" "$HOOK" stop)
+assert_contains "cursor stop re-anchors on CURSOR_PROJECT_DIR" "cursor-cwd-wake" \
+  "$(echo "$out" | jq -r '.followup_message // empty')"
+out=$(cd "$CURSOR_CWD" && printf '{"conversation_id":"c-1","status":"completed","loop_count":0,"workspace_roots":["%s"]}' "$ROOT" \
+  | env -u CURSOR_PROJECT_DIR -u CLAUDE_PROJECT_DIR AGENT_BUS_HOME="$BUS_HOME" "$HOOK" stop)
+assert_contains "cursor stop re-anchors on workspace_roots" "cursor-cwd-wake" \
+  "$(echo "$out" | jq -r '.followup_message // empty')"
+# An aborted turn (user pressed stop) is never auto-continued.
+out=$(cd "$CURSOR_CWD" && printf '{"conversation_id":"c-1","status":"aborted","loop_count":0}' \
+  | CURSOR_PROJECT_DIR="$ROOT" AGENT_BUS_HOME="$BUS_HOME" "$HOOK" stop)
+assert_eq "cursor stop ignores aborted turns" "{}" "$(echo "$out" | jq -c .)"
+# The hook must not leave a phantom seat named after its own cwd.
+out=$("$BIN" who)
+assert_not_contains "cursor hook registers no cwd-named seat" "cursor/$(basename "$CURSOR_CWD")" "$out"
+AGENT_BUS_TOOL=cursor "$BIN" read >/dev/null
+AGENT_BUS_TOOL=cursor "$BIN" watch off >/dev/null
+
+# sessionStart pins identity for later hooks via env.
+out=$(cd "$CURSOR_CWD" && printf '{"session_id":"conv-abc","composer_mode":"agent"}' \
+  | CURSOR_PROJECT_DIR="$ROOT" AGENT_BUS_HOME="$BUS_HOME" "$HOOK" sessionStart)
+assert_eq "cursor sessionStart pins AGENT_BUS_SESSION" "conv-abc" "$(echo "$out" | jq -r '.env.AGENT_BUS_SESSION // empty')"
+assert_eq "cursor sessionStart pins AGENT_BUS_TOOL" "cursor" "$(echo "$out" | jq -r '.env.AGENT_BUS_TOOL // empty')"
+
+# --- cursor adapter: scope delegation to the watching instance seat ---
+# The agent's shell registered an instance seat (session id) and turned watch
+# on there; the stop hook, which cannot see that session, arrives as the bare
+# scope seat. It must wake on the instance's behalf.
+AGENT_BUS_TOOL=cursor AGENT_BUS_SESSION=cursor-chat-1 "$BIN" watch on >/dev/null
+INST=$(awk '/^seat/{print $2}' <<<"$(AGENT_BUS_TOOL=cursor AGENT_BUS_SESSION=cursor-chat-1 "$BIN" whoami)")
+AGENT_BUS_TOOL=claude AGENT_BUS_SESSION=cur-peer "$BIN" post --to "$INST" --state needs-review \
+  -m $'# delegated-wake\n\nfor the instance' >/dev/null
+out=$(cd "$CURSOR_CWD" && printf '{"conversation_id":"unknown-to-shell","status":"completed","loop_count":0}' \
+  | CURSOR_PROJECT_DIR="$ROOT" AGENT_BUS_HOME="$BUS_HOME" "$HOOK" stop)
+assert_contains "cursor stop delegates to watching instance" "delegated-wake" \
+  "$(echo "$out" | jq -r '.followup_message // empty')"
+assert_contains "delegated wake names the instance seat" "$INST" \
+  "$(echo "$out" | jq -r '.followup_message // empty')"
+# Delegation is opt-in: a plain stop-hook for a non-watching seat stays quiet
+# even with a watching sibling in scope (Claude/Codex hooks are exact).
+out=$(printf '{}' | AGENT_BUS_TOOL=cursor AGENT_BUS_SESSION=cursor-chat-2 "$BIN" stop-hook)
+assert_eq "no delegation without AGENT_BUS_DELEGATE_SCOPE" "{}" "$(echo "$out" | jq -c .)"
+# Once the instance turns watch off, the hook has nobody to act for.
+AGENT_BUS_TOOL=cursor AGENT_BUS_SESSION=cursor-chat-1 "$BIN" watch off >/dev/null
+out=$(cd "$CURSOR_CWD" && printf '{"conversation_id":"unknown-to-shell","status":"completed","loop_count":0}' \
+  | CURSOR_PROJECT_DIR="$ROOT" AGENT_BUS_HOME="$BUS_HOME" "$HOOK" stop)
+assert_eq "cursor stop quiet when no instance watches" "{}" "$(echo "$out" | jq -c .)"
+AGENT_BUS_TOOL=cursor AGENT_BUS_SESSION=cursor-chat-1 "$BIN" read >/dev/null
+popd >/dev/null
+rm -rf "$CURSOR_CWD"
+
 # --- BLOCKER 1: per-seat wake budget across distinct packets ---
 export AGENT_BUS_WAKE_BUDGET=2
 AGENT_BUS_TOOL=cursor AGENT_BUS_WT=wake-budget "$BIN" watch on >/dev/null
-AGENT_BUS_TOOL=claude "$BIN" post --to @repo --state question -m $'# wb1\n\none' >/dev/null
+AGENT_BUS_TOOL=claude "$BIN" post --to cursor/wake-budget --state question -m $'# wb1\n\none' >/dev/null
 out=$(printf '{}' | AGENT_BUS_TOOL=cursor AGENT_BUS_WT=wake-budget AGENT_BUS_WAKE_BUDGET=2 \
   "$BIN" stop-hook)
 assert_eq "wake budget 1/2 blocks" "block" "$(echo "$out" | jq -r '.decision // empty')"
-AGENT_BUS_TOOL=claude "$BIN" post --to @repo --state question -m $'# wb2\n\ntwo' >/dev/null
+AGENT_BUS_TOOL=claude "$BIN" post --to cursor/wake-budget --state question -m $'# wb2\n\ntwo' >/dev/null
 out=$(printf '{}' | AGENT_BUS_TOOL=cursor AGENT_BUS_WT=wake-budget AGENT_BUS_WAKE_BUDGET=2 \
   "$BIN" stop-hook)
 assert_eq "wake budget 2/2 blocks" "block" "$(echo "$out" | jq -r '.decision // empty')"
-AGENT_BUS_TOOL=claude "$BIN" post --to @repo --state question -m $'# wb3\n\nthree' >/dev/null
+AGENT_BUS_TOOL=claude "$BIN" post --to cursor/wake-budget --state question -m $'# wb3\n\nthree' >/dev/null
 out=$(printf '{}' | AGENT_BUS_TOOL=cursor AGENT_BUS_WT=wake-budget AGENT_BUS_WAKE_BUDGET=2 \
   "$BIN" stop-hook)
 assert_eq "wake budget exhausted ignores new packet" "{}" "$(echo "$out" | jq -c .)"
 
 # read must NOT reset — well-behaved ping-pong would otherwise be unbounded
 AGENT_BUS_TOOL=cursor AGENT_BUS_WT=wake-budget "$BIN" read >/dev/null
-AGENT_BUS_TOOL=claude "$BIN" post --to @repo --state question -m $'# wb4\n\nfour' >/dev/null
+AGENT_BUS_TOOL=claude "$BIN" post --to cursor/wake-budget --state question -m $'# wb4\n\nfour' >/dev/null
 out=$(printf '{}' | AGENT_BUS_TOOL=cursor AGENT_BUS_WT=wake-budget AGENT_BUS_WAKE_BUDGET=2 \
   "$BIN" stop-hook)
 assert_eq "wake budget NOT reset by read" "{}" "$(echo "$out" | jq -c .)"
@@ -317,7 +457,7 @@ rid=$(jq -r 'select(.kind=="msg") | .id' "$BUS_HOME/ledger.jsonl" | tail -1)
 AGENT_BUS_TOOL=cursor AGENT_BUS_WT=wake-budget "$BIN" resolve "$rid" >/dev/null
 out=$(AGENT_BUS_TOOL=cursor AGENT_BUS_WT=wake-budget AGENT_BUS_WAKE_BUDGET=2 "$BIN" watch)
 assert_contains "resolve resets wake budget" "wake 0/2" "$out"
-AGENT_BUS_TOOL=claude "$BIN" post --to @repo --state blocked -m $'# wb5\n\nfive' >/dev/null
+AGENT_BUS_TOOL=claude "$BIN" post --to cursor/wake-budget --state blocked -m $'# wb5\n\nfive' >/dev/null
 out=$(printf '{}' | AGENT_BUS_TOOL=cursor AGENT_BUS_WT=wake-budget AGENT_BUS_WAKE_BUDGET=2 \
   "$BIN" stop-hook)
 assert_eq "wake works again after resolve" "block" "$(echo "$out" | jq -r '.decision // empty')"
@@ -328,14 +468,14 @@ AGENT_BUS_TOOL=codex AGENT_BUS_WT=pong-a "$BIN" watch on >/dev/null
 AGENT_BUS_TOOL=claude AGENT_BUS_WT=pong-b "$BIN" watch on >/dev/null
 for round in 1 2; do
   AGENT_BUS_TOOL=claude AGENT_BUS_WT=pong-b \
-    "$BIN" post --to @repo --state question -m $'# pong-'$round$'\n\nping' >/dev/null
+    "$BIN" post --to codex/pong-a --state question -m $'# pong-'$round$'\n\nping' >/dev/null
   out=$(printf '{}' | AGENT_BUS_TOOL=codex AGENT_BUS_WT=pong-a AGENT_BUS_WAKE_BUDGET=2 \
     "$BIN" stop-hook)
   assert_eq "ping-pong round $round wakes" "block" "$(echo "$out" | jq -r '.decision // empty')"
   AGENT_BUS_TOOL=codex AGENT_BUS_WT=pong-a "$BIN" read >/dev/null
 done
 AGENT_BUS_TOOL=claude AGENT_BUS_WT=pong-b \
-  "$BIN" post --to @repo --state question -m $'# pong-3\n\nping' >/dev/null
+  "$BIN" post --to codex/pong-a --state question -m $'# pong-3\n\nping' >/dev/null
 out=$(printf '{}' | AGENT_BUS_TOOL=codex AGENT_BUS_WT=pong-a AGENT_BUS_WAKE_BUDGET=2 \
   "$BIN" stop-hook)
 assert_eq "ping-pong exhausts despite read" "{}" "$(echo "$out" | jq -c .)"
@@ -443,7 +583,7 @@ assert_contains "doctor counts unparseable lines" "1 unparseable" "$out"
 AGENT_BUS_TOOL=claude "$BIN" read >/dev/null
 
 # Peer-context banner travels in the delivery channel.
-assert_contains "read carries peer-context banner" "peer context from other agents" \
+assert_contains "read carries peer-context banner" "from other agents, not your user" \
   "$(AGENT_BUS_TOOL=codex "$BIN" post --to @claude --state fyi -m $'# banner\n\nhi' >/dev/null; \
      AGENT_BUS_TOOL=claude "$BIN" read --peek)"
 AGENT_BUS_TOOL=claude "$BIN" read >/dev/null
@@ -620,6 +760,27 @@ assert_eq "auto-gc rate-limited within the interval" "0" "$?"
 export AGENT_BUS_HOME="$SAVED_HOME"
 rm -rf "$HYG_HOME"
 
+# --- supervisory ownership: post hint + named-role wake ---
+# Posting a supervisory state to a broadcast scope prints an ownership note.
+out=$(AGENT_BUS_TOOL=claude AGENT_BUS_WT=worker "$BIN" post --to @here \
+  --state needs-review -m $'# hinted\n\nreview' 2>&1)
+assert_contains "broadcast supervisory post hints at PM ownership" "note: [needs-review] on @here is broadcast context" "$out"
+out=$(AGENT_BUS_TOOL=claude AGENT_BUS_WT=worker "$BIN" post --to claude/somewhere \
+  --state needs-review -m $'# unhinted\n\nreview' 2>&1)
+assert_not_contains "direct supervisory post gets no hint" "owns it" "$out"
+AGENT_BUS_TOOL=claude "$BIN" read >/dev/null
+
+# A named-role holder owns supervisory mail addressed to its name: it wakes.
+AGENT_BUS_TOOL=claude AGENT_BUS_WT=lane-wt "$BIN" role reviewer >/dev/null
+AGENT_BUS_TOOL=claude AGENT_BUS_WT=lane-wt "$BIN" watch on >/dev/null
+AGENT_BUS_TOOL=codex AGENT_BUS_WT=elsewhere "$BIN" post --to @reviewer \
+  --state needs-review -m $'# for-reviewer\n\nlook' >/dev/null
+out=$(printf '{}' | AGENT_BUS_TOOL=claude AGENT_BUS_WT=lane-wt "$BIN" stop-hook)
+assert_eq "named-role supervisory mail wakes the holder" "block" "$(echo "$out" | jq -r '.decision // empty')"
+AGENT_BUS_TOOL=claude AGENT_BUS_WT=lane-wt "$BIN" read >/dev/null
+AGENT_BUS_TOOL=claude AGENT_BUS_WT=lane-wt "$BIN" watch off >/dev/null
+AGENT_BUS_TOOL=claude AGENT_BUS_WT=lane-wt "$BIN" role reviewer --clear >/dev/null
+
 # --- instance seats: tool detection, per-session identity, legacy compat ---
 INST_HOME=$(mktemp -d)
 export AGENT_BUS_HOME="$INST_HOME"
@@ -728,6 +889,376 @@ assert_contains "wait --timeout without value dies cleanly" "--timeout needs a v
 
 export AGENT_BUS_HOME="$SAVED_HOME"
 rm -rf "$INST_HOME"
+
+# --- opencode: builtin scope, endpoint seat registry, HTTP push wake ---
+OC_HOME=$(mktemp -d)
+export AGENT_BUS_HOME="$OC_HOME"
+
+out=$(<"$ROOT/plugins/agent-bus/index.ts")
+assert_contains "plugin CLI calls use host session identity" "OPENCODE_SESSION_ID: sessionID" "$out"
+assert_contains "plugin polls already-idle sessions" "setInterval" "$out"
+assert_contains "plugin wakes through injected SDK client" "client.session.promptAsync" "$out"
+
+# --- opencode plugin: loads on both major versions ---
+# OpenCode 2 reads the default export's id + setup(); OpenCode 1 calls server().
+assert_contains "plugin declares a v2 id" 'id: "agent-bus"' "$out"
+assert_contains "plugin exposes a v2 setup" "async setup(ctx" "$out"
+assert_contains "plugin keeps the v1 server export" "async function server()" "$out"
+assert_contains "plugin default-exports both halves" "export default { ...v2, server }" "$out"
+# v2 bindings replace the v1 hook names, which do not exist in v2.
+assert_contains "plugin registers the v2 shell hook" 'shell.hook("create.before"' "$out"
+assert_contains "plugin registers the v2 prompt hook" 'session.hook("prompt"' "$out"
+assert_contains "plugin wakes v2 through synthetic resume" "resume: wake" "$out"
+
+# Shell children get the TOOL pin but never VIA: a command the agent runs is a
+# CLI call, not a lifecycle hook fire, and stamping VIA made every one of them
+# register as a hook touch — the single signal doctor uses to prove hooks work.
+# Dropping the tool pin instead is the other failure: the shell then resolves to
+# a markerless shell/<worktree> seat.
+assert_contains "shell stamp keeps the tool pin" 'AGENT_BUS_TOOL: "opencode",' "$out"
+shell_env_body=$(sed -n '/shellEnv(sessionID = executing)/,/^    },/p' "$ROOT/plugins/agent-bus/index.ts")
+assert_not_contains "shell stamp omits AGENT_BUS_VIA" "AGENT_BUS_VIA" "$shell_env_body"
+assert_contains "shell stamp carries the session when known" "OPENCODE_SESSION_ID: sid" "$shell_env_body"
+
+# A wake is spent against WAKE_BUDGET inside stop-hook, before the host has
+# accepted the text, so delivery is awaited and retried rather than swallowed.
+assert_contains "wake confirms delivery before spending" "await deliver(text)) || (await deliver(text)" "$out"
+assert_contains "injection reports failure" "return false" "$out"
+# A failed session lookup is unknown, not foreign; caching it would disown the
+# session for the rest of its life.
+assert_contains "ownership never caches a lookup failure" "Caching false here" "$out"
+# The CLI runs inside prompt admission, so it cannot hang the user's turn.
+assert_contains "plugin bounds the CLI spawn" "RUN_TIMEOUT_MS" "$out"
+# Registrations outlive a reload unless disposed; the installer rewrites this
+# file in place and the host watches it.
+assert_contains "plugin disposes its registrations" "r.dispose()" "$out"
+
+# The installer copies this one file into a directory with no node_modules, so
+# a VALUE import fails at load with "Cannot find package '@opencode/plugin'".
+# Plugin.define is an identity function, so the object literal is equivalent.
+bad_import=$(grep -nE '^\s*import[^;]*from ' "$ROOT/plugins/agent-bus/index.ts" | grep -v 'import type' || true)
+assert_eq "plugin has no runtime imports" "" "$bad_import"
+
+# Ownership: the v2 event stream is server-wide, so an unfiltered handler makes
+# one chat register as several seats — the identity split, reintroduced.
+assert_contains "plugin resolves event ownership by directory" "sameDir(info.location?.directory, ctx.location.directory)" "$out"
+assert_contains "plugin ignores child sessions" "!info.parentID" "$out"
+
+# The installer must lay the plugin out as a directory package: OpenCode 2
+# rejects a bare .ts config entry with "configured plugin path must be a directory".
+inst=$(<"$ROOT/install-hooks.sh")
+assert_contains "installer registers a directory entry" 'plugins/$OPENCODE_PLUGIN_NAME"' "$inst"
+assert_contains "installer removes the pre-v2 flat file" 'rm -f "$OPENCODE_PLUGINS/$OPENCODE_PLUGIN_NAME.ts"' "$inst"
+# Host configs are often dotfiles symlinks; jq-to-tmp + mv would replace the
+# link with a regular file and silently detach them.
+assert_contains "installer writes through symlinks" "resolve_link" "$inst"
+# Every managed line carries the tool pin, including release: hooks_report
+# counts an unpinned line as a stale install, which the installer could not clear.
+assert_contains "installer pins the release line" 'AGENT_BUS_TOOL=%s %s release --all' "$inst"
+
+# Hook capture writes host env to disk. It records identity markers only — a
+# prefix sweep had been persisting CLAUDE_CODE_MESSAGING_TOKEN in the clear.
+cli=$(<"$ROOT/bin/agent-bus")
+assert_contains "capture uses an allowlist" "CAPTURE_ENV_KEYS" "$cli"
+assert_not_contains "capture allowlist holds no credentials" "TOKEN" \
+  "$(sed -n '/^CAPTURE_ENV_KEYS=/,/^$/p' "$ROOT/bin/agent-bus")"
+assert_contains "capture files are private" "chmod 600" "$cli"
+
+# @opencode is a builtin scope: postable before any opencode seat exists.
+out=$(AGENT_BUS_TOOL=claude "$BIN" post --to @opencode --state fyi \
+  -m $'# builtin opencode scope\n\nhi' 2>&1)
+assert_contains "@opencode postable with no seat" "posted" "$out"
+
+# 'opencode' is a reserved role name — can never shadow the tool scope.
+out=$("$BIN" role opencode 2>&1 || true)
+assert_contains "opencode reserved as role name" "invalid role name" "$out"
+
+# A seat with a recorded endpoint (as the plugin writes it via
+# AGENT_BUS_ENDPOINT) is push-wakeable: poke_endpoint curls prompt_async.
+# Fake server: records the request body; response ignored (best-effort).
+FAKE_PORT=18472
+cat >"$OC_HOME/fake-server.py" <<PY
+import http.server
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length", 0))
+        open("$OC_HOME/poke-body.txt", "ab").write(self.rfile.read(n))
+        self.send_response(204)
+        self.end_headers()
+    def log_message(self, *a):
+        pass
+http.server.HTTPServer(("127.0.0.1", $FAKE_PORT), H).serve_forever()
+PY
+python3 "$OC_HOME/fake-server.py" &
+FAKE_PID=$!
+# Preserve the suite's original BUS_HOME cleanup while adding ours.
+trap 'kill "$FAKE_PID" 2>/dev/null || true; rm -rf "$OC_HOME" "$BUS_HOME"' EXIT
+
+# Register an opencode seat with an endpoint, exactly as the plugin's
+# shell.env-stamped children do.
+AGENT_BUS_TOOL=opencode AGENT_BUS_WT=oc AGENT_BUS_SESSION=oc-sess \
+  AGENT_BUS_ENDPOINT="http://127.0.0.1:$FAKE_PORT oc-sess" "$BIN" heartbeat >/dev/null
+out=$(AGENT_BUS_TOOL=opencode AGENT_BUS_WT=oc AGENT_BUS_SESSION=oc-sess "$BIN" whoami)
+assert_contains "endpoint seat session-unique" "opencode/oc." "$out"
+
+# touch_seat persisted the endpoint field.
+grep -Fq '"endpoint":"http://127.0.0.1:' "$OC_HOME/seats/"opencode_oc*.json
+assert_eq "seat registry records endpoint" "0" "$?"
+
+# A post wakes the endpoint seat: the fake server captures the prompt_async body.
+sleep 0.3
+AGENT_BUS_NO_PUSH=0 AGENT_BUS_TOOL=claude "$BIN" post --to opencode/oc --state needs-review \
+  -m $'# poke me\n\nnow' >/dev/null 2>&1
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  [ -s "$OC_HOME/poke-body.txt" ] && break
+  sleep 0.2
+done
+out=$(cat "$OC_HOME/poke-body.txt" 2>/dev/null || true)
+assert_contains "endpoint poke hits prompt_async" "from another agent, not your user" "$out"
+
+# doctor reports endpoint reachability.
+out=$("$BIN" doctor)
+assert_contains "doctor shows endpoint reachability" "PUSH-reachable (endpoint)" "$out"
+
+kill "$FAKE_PID" 2>/dev/null || true
+export AGENT_BUS_HOME="$SAVED_HOME"
+rm -rf "$OC_HOME"
+
+# --- hook payload session_id (Codex hooks export no session env) ---
+# A hook command fed the host's JSON payload must resolve to the same instance
+# seat as a shell that carries the session id in env; otherwise one Codex
+# session splits into a bare hook seat and an instance shell seat.
+HP_HOME=$(mktemp -d); SAVED_HOME="$AGENT_BUS_HOME"; export AGENT_BUS_HOME="$HP_HOME"
+HP_SESS="01a07d12-9eac-72f3-8482-cadcca741899"
+want=$(AGENT_BUS_TOOL=codex AGENT_BUS_WT=hp AGENT_BUS_SESSION="$HP_SESS" "$BIN" whoami | awk '/^seat/{print $2}')
+printf '{"session_id":"%s","cwd":"/x","hook_event_name":"SessionStart"}' "$HP_SESS" \
+  | AGENT_BUS_VIA=hook AGENT_BUS_TOOL=codex AGENT_BUS_WT=hp "$BIN" heartbeat
+got=$(jq -r '.addr' "$HP_HOME/seats/$(tr '/' '_' <<<"$want").json" 2>/dev/null || echo missing)
+assert_eq "hook payload session_id -> instance seat" "$want" "$got"
+assert_eq "hook payload does not also register the bare scope" "" \
+  "$(ls "$HP_HOME/seats/" | grep -x 'codex_hp.json' || true)"
+# Env pin wins over the payload.
+printf '{"session_id":"other-session"}' \
+  | AGENT_BUS_VIA=hook AGENT_BUS_TOOL=codex AGENT_BUS_WT=hp AGENT_BUS_SESSION="$HP_SESS" "$BIN" heartbeat
+assert_eq "env session outranks payload session_id" "1" \
+  "$(ls "$HP_HOME/seats/" | grep -c '^codex_hp\.' || true)"
+# The payload outranks inherited host markers (a Codex CLI launched from inside
+# another agent's shell inherits that agent's session id).
+printf '{"session_id":"%s"}' "$HP_SESS" \
+  | CLAUDE_CODE_SESSION_ID=parent-claude-session AGENT_BUS_VIA=hook AGENT_BUS_TOOL=codex AGENT_BUS_WT=hp "$BIN" heartbeat
+assert_eq "payload session_id outranks inherited host marker" "1" \
+  "$(ls "$HP_HOME/seats/" | grep -c '^codex_hp\.' || true)"
+# A payload without session_id (or unparseable) keeps the bare scope.
+printf 'not json' | AGENT_BUS_VIA=hook AGENT_BUS_TOOL=codex AGENT_BUS_WT=hp2 "$BIN" heartbeat
+assert_eq "unparseable payload -> bare scope" "codex/hp2" \
+  "$(jq -r '.addr' "$HP_HOME/seats/codex_hp2.json" 2>/dev/null || echo missing)"
+# Non-hook commands ignore stdin entirely (post reads a body from it).
+out=$(printf '{"session_id":"%s"}' "$HP_SESS" | AGENT_BUS_TOOL=codex AGENT_BUS_WT=hp3 "$BIN" whoami)
+assert_contains "whoami ignores piped payload" "seat     codex/hp3" "$out"
+# stop-hook still parses the payload and drains stdin.
+out=$(printf '{"session_id":"%s"}' "$HP_SESS" | AGENT_BUS_TOOL=codex AGENT_BUS_WT=hp "$BIN" stop-hook)
+assert_eq "stop-hook with payload emits json" "{}" "$(jq -c . <<<"$out")"
+
+# Hook payloads are captured per tool/event for later inspection.
+printf '{"session_id":"%s","hook_event_name":"UserPromptSubmit","cwd":"/x"}' "$HP_SESS" \
+  | AGENT_BUS_VIA=hook AGENT_BUS_TOOL=codex AGENT_BUS_WT=hp "$BIN" digest >/dev/null
+assert_eq "hook payload captured per tool/event" "UserPromptSubmit" \
+  "$(jq -r '.payload.hook_event_name' "$HP_HOME/state/capture/codex-UserPromptSubmit.json" 2>/dev/null || echo missing)"
+assert_contains "capture records hook env markers" '"AGENT_BUS_TOOL":"codex"' "$(jq -c '.env' "$HP_HOME/state/capture/codex-UserPromptSubmit.json")"
+printf '{"conversation_id":"c-1","workspace_roots":["/nowhere"],"hook_event_name":"stop","status":"completed"}' \
+  | AGENT_BUS_HOME="$HP_HOME" "$ROOT/bin/agent-bus-cursor-hook" stop >/dev/null 2>&1 || true
+assert_eq "cursor adapter captures payload" "c-1" \
+  "$(jq -r '.payload.conversation_id' "$HP_HOME/state/capture/cursor-stop.json" 2>/dev/null || echo missing)"
+
+# Cursor: the agent's tool shell (CURSOR_AGENT + CURSOR_CONVERSATION_ID) and the
+# adapter-run hooks (payload session_id) must resolve to one instance seat.
+CUR_CONV="337a04c0-fc3c-4f74-baa1-4631088b66e8"
+shell_seat=$(CURSOR_AGENT=1 CURSOR_CONVERSATION_ID="$CUR_CONV" AGENT_BUS_WT=cw "$BIN" whoami | awk '/^seat/{print $2}')
+assert_contains "cursor shell markers -> cursor instance seat" "cursor/cw." "$shell_seat"
+printf '{"conversation_id":"%s","session_id":"%s","hook_event_name":"sessionStart","workspace_roots":["%s"]}' \
+  "$CUR_CONV" "$CUR_CONV" "$ROOT" | AGENT_BUS_HOME="$HP_HOME" AGENT_BUS_WT=cw "$ROOT/bin/agent-bus-cursor-hook" sessionStart >/dev/null 2>&1 || true
+assert_eq "cursor sessionStart hook lands on the shell's seat" "1" \
+  "$(ls "$HP_HOME/seats/" | grep -c "^$(tr '/' '_' <<<"$shell_seat")\.json$" || true)"
+assert_eq "cursor sessionStart does not create a bare seat" "" "$(ls "$HP_HOME/seats/" | grep -x 'cursor_cw.json' || true)"
+
+# Cursor executing Claude-format hooks: recognizable payload, must stand down.
+COMPAT='{"conversation_id":"c-9","session_id":"c-9","cursor_version":"3.20.21","hook_event_name":"sessionStart","workspace_roots":["/x"]}'
+out=$(printf '%s' "$COMPAT" | AGENT_BUS_VIA=hook AGENT_BUS_TOOL=claude AGENT_BUS_WT=compat "$BIN" digest)
+assert_eq "cursor-compat digest is silent" "" "$out"
+assert_eq "cursor-compat hook registers no seat" "" "$(ls "$HP_HOME/seats/" | grep 'compat' || true)"
+out=$(printf '%s' "$COMPAT" | AGENT_BUS_VIA=hook AGENT_BUS_TOOL=claude AGENT_BUS_WT=compat "$BIN" stop-hook)
+assert_eq "cursor-compat stop-hook emits {}" "{}" "$(jq -c . <<<"$out")"
+out=$(printf '%s' "$COMPAT" | AGENT_BUS_VIA=hook AGENT_BUS_TOOL=cursor AGENT_BUS_WT=compat "$BIN" heartbeat; ls "$HP_HOME/seats/" | grep -c 'cursor_compat' || true)
+assert_eq "same payload under the cursor tool is honored" "1" "$out"
+
+# Same session anchored elsewhere: hooks at the workspace repo, shell in another.
+printf '{"session_id":"anch-1","hook_event_name":"sessionStart"}' \
+  | AGENT_BUS_VIA=hook AGENT_BUS_TOOL=cursor AGENT_BUS_WT=wsroot AGENT_BUS_REPO_ID=repo-A "$BIN" heartbeat
+out=$(AGENT_BUS_TOOL=cursor AGENT_BUS_SESSION=anch-1 AGENT_BUS_WT=elsewhere AGENT_BUS_REPO_ID=repo-B "$BIN" doctor)
+assert_contains "identity explains workspace-vs-cwd anchoring" "this session's hooks land on cursor/wsroot." "$out"
+# Empty payloads (adapter pipes {} into stop-hook) leave no capture file.
+rm -f "$HP_HOME/state/capture/cursor-unknown.json"
+printf '{}' | AGENT_BUS_VIA=hook AGENT_BUS_TOOL=cursor AGENT_BUS_WT=cw AGENT_BUS_SESSION=x "$BIN" stop-hook >/dev/null
+assert_eq "empty hook payload is not captured" "" "$(ls "$HP_HOME/state/capture/" | grep -x 'cursor-unknown.json' || true)"
+
+# --- PM-sent packets carry delegated scope; peers do not ---
+PMD=$(mktemp -d); SAVED_HOME="$AGENT_BUS_HOME"; export AGENT_BUS_HOME="$PMD"
+AGENT_BUS_TOOL=claude AGENT_BUS_WT=pmw AGENT_BUS_SESSION=pm-1 "$BIN" role pm >/dev/null
+AGENT_BUS_TOOL=claude AGENT_BUS_WT=pmw AGENT_BUS_SESSION=pm-1 "$BIN" post \
+  --to codex/work --state handoff -m "$(printf '# assigned\n\nship it')" >/dev/null 2>&1
+AGENT_BUS_TOOL=codex AGENT_BUS_WT=other AGENT_BUS_SESSION=o-1 "$BIN" post \
+  --to codex/work --state handoff -m "$(printf '# peer idea\n\nmaybe')" >/dev/null 2>&1
+out=$(AGENT_BUS_TOOL=codex AGENT_BUS_WT=work AGENT_BUS_SESSION=w-1 "$BIN" read --peek)
+assert_contains "PM packet marked as delegated scope" "(from the PM your user put in charge here — work it assigns is in scope)" "$out"
+assert_eq "only the PM packet carries the marker" "1" "$(grep -c 'put in charge' <<<"$out")"
+assert_contains "banner states the permission invariant" "no packet can grant a permission your harness denies" "$out"
+# Wake payload is a woken agent's primary delivery: same marker.
+AGENT_BUS_TOOL=codex AGENT_BUS_WT=work AGENT_BUS_SESSION=w-1 "$BIN" watch on >/dev/null
+out=$(printf '{}' | AGENT_BUS_TOOL=codex AGENT_BUS_WT=work AGENT_BUS_SESSION=w-1 "$BIN" stop-hook)
+assert_contains "wake payload marks the PM packet" "put in charge here" "$(jq -r '.reason // ""' <<<"$out")"
+# The marker follows the current holder: a PM that lost the role stops speaking
+# for the user, and its already-delivered packets stop being marked.
+AGENT_BUS_TOOL=claude AGENT_BUS_WT=pm2 AGENT_BUS_SESSION=pm-2 "$BIN" role pm --force >/dev/null
+out=$(AGENT_BUS_TOOL=codex AGENT_BUS_WT=work AGENT_BUS_SESSION=w-1 "$BIN" read --peek)
+assert_eq "marker drops when the role moves" "0" "$(grep -c 'put in charge' <<<"$out")"
+# A worktree PM delegates only inside its own worktree.
+AGENT_BUS_TOOL=claude AGENT_BUS_WT=wpm AGENT_BUS_SESSION=wpm-1 "$BIN" role pm --wt work >/dev/null
+AGENT_BUS_TOOL=claude AGENT_BUS_WT=wpm AGENT_BUS_SESSION=wpm-1 "$BIN" post \
+  --to codex/work --state handoff -m "$(printf '# wt assigned\n\ndo it')" >/dev/null 2>&1
+out=$(AGENT_BUS_TOOL=codex AGENT_BUS_WT=work AGENT_BUS_SESSION=w-1 "$BIN" read --peek)
+assert_contains "worktree PM delegates in its worktree" "put in charge here" "$out"
+out=$(AGENT_BUS_TOOL=codex AGENT_BUS_WT=elsewhere AGENT_BUS_SESSION=e-1 "$BIN" read --peek)
+assert_eq "worktree PM does not delegate elsewhere" "0" "$(grep -c 'put in charge' <<<"$out")"
+export AGENT_BUS_HOME="$SAVED_HOME"; rm -rf "$PMD"
+
+# --- digest re-surfacing carries no body; cost reports what was injected ---
+CO_HOME=$(mktemp -d); SAVED_HOME="$AGENT_BUS_HOME"; export AGENT_BUS_HOME="$CO_HOME"
+co() { AGENT_BUS_TOOL=codex AGENT_BUS_WT=co AGENT_BUS_SESSION=co-sess "$BIN" "$@"; }
+AGENT_BUS_TOOL=claude AGENT_BUS_WT=cosend AGENT_BUS_SESSION=cosend-sess "$BIN" post \
+  --to codex/co --state needs-review -m "$(printf '# cost probe\n\nBODYMARKER line one\nBODYMARKER line two')" >/dev/null
+out=$(co read --digest)
+assert_contains "first digest renders the body" "BODYMARKER" "$out"
+out=$(co read --digest)
+assert_not_contains "repeat digest omits the body" "BODYMARKER" "$out"
+assert_contains "repeat digest points at show" "body shown earlier" "$out"
+out=$(co read)
+assert_contains "an explicit read still renders the body" "BODYMARKER" "$out"
+out=$("$BIN" cost)
+assert_contains "cost names the seat" "$(co whoami | awk '/^seat/{print $2}' | tr '/' '_')" "$out"
+assert_contains "cost reports a token total" "agent-bus has injected ~" "$out"
+assert_contains "cost states its method" "Tokens are bytes/4" "$out"
+export AGENT_BUS_HOME="$SAVED_HOME"; rm -rf "$CO_HOME"
+
+# --- doctor: stale/missing host hook installs ---
+HK=$(mktemp -d)
+# Current-shape install: tool pinned everywhere, Stop runs stop-hook.
+jq -n '{hooks:{SessionStart:[{hooks:[{command:"AGENT_BUS_VIA=hook AGENT_BUS_TOOL=codex /b/agent-bus heartbeat"}]}],
+                Stop:[{hooks:[{command:"AGENT_BUS_VIA=hook AGENT_BUS_TOOL=codex /b/agent-bus stop-hook"}]}]}}' >"$HK/codex-ok.json"
+# Stale: Stop runs heartbeat (no wake) and the digest line has no tool pin.
+jq -n '{hooks:{SessionStart:[{hooks:[{command:"AGENT_BUS_VIA=hook /b/agent-bus digest"}]}],
+                Stop:[{hooks:[{command:"AGENT_BUS_VIA=hook AGENT_BUS_TOOL=codex /b/agent-bus heartbeat"}]}]}}' >"$HK/codex-stale.json"
+jq -n '{hooks:{sessionStart:[{command:"/b/agent-bus-cursor-hook sessionStart"}]}}' >"$HK/cursor.json"
+jq -n '{hooks:{SessionStart:[{hooks:[{command:"/other/tool run"}]}]}}' >"$HK/none.json"
+out=$(AGENT_BUS_CODEX_HOOKS="$HK/codex-ok.json" AGENT_BUS_CURSOR_HOOKS="$HK/cursor.json" \
+  AGENT_BUS_CLAUDE_SETTINGS="$HK/none.json" "$BIN" doctor)
+assert_contains "doctor: current codex install is ok" "codex   ok (2 line(s), stop-hook present)" "$out"
+assert_contains "doctor: cursor adapter counted" "cursor  ok (1 line(s), adapter)" "$out"
+assert_contains "doctor: config without agent-bus lines is not installed" "claude  not installed — run ./install-hooks.sh --claude" "$out"
+out=$(AGENT_BUS_CODEX_HOOKS="$HK/codex-stale.json" AGENT_BUS_CURSOR_HOOKS="$HK/cursor.json" \
+  AGENT_BUS_CLAUDE_SETTINGS="$HK/codex-ok.json" "$BIN" doctor)
+assert_contains "doctor: stale install names the missing stop-hook" "no stop-hook line (this host can never be woken)" "$out"
+assert_contains "doctor: stale install counts unpinned lines" "1 of 2 line(s) missing the AGENT_BUS_TOOL pin" "$out"
+out=$(AGENT_BUS_CODEX_HOOKS="$HK/absent.json" "$BIN" doctor)
+assert_contains "doctor: absent config reported" "codex   not installed — no $HK/absent.json" "$out"
+rm -rf "$HK"
+
+# --- doctor: unacked-after-MAX_SHOWS lists live seats and unacked packets only ---
+DT_SEAT=$(AGENT_BUS_TOOL=codex AGENT_BUS_WT=dt AGENT_BUS_SESSION=dt-sess "$BIN" whoami | awk '/^seat/{print $2}' | tr '/' '_')
+AGENT_BUS_TOOL=codex AGENT_BUS_WT=dt AGENT_BUS_SESSION=dt-sess "$BIN" heartbeat </dev/null
+mkdir -p "$HP_HOME/state"
+# Two capped packets, one later acked: only the unacked one counts.
+jq -n '{read:["p-acked"], shown:{"p-acked":3,"p-unacked":3,"p-once":1}}' >"$HP_HOME/state/$DT_SEAT.json"
+# Dead seat (no seats/ file) with capped packets: history, not reported.
+jq -n '{shown:{"p-old":5}}' >"$HP_HOME/state/codex_deadseat.json"
+out=$("$BIN" doctor)
+assert_contains "doctor lists live seat with unacked capped packet" "$DT_SEAT" "$out"
+assert_contains "doctor counts only unacked capped packets" "1 packet(s)" "$out"
+assert_not_contains "doctor skips dead seats" "codex_deadseat" "$out"
+export AGENT_BUS_HOME="$SAVED_HOME"
+rm -rf "$HP_HOME"
+
+# --- selftest: end-to-end delivery probe ---
+ST_HOME=$(mktemp -d); SAVED_HOME="$AGENT_BUS_HOME"; export AGENT_BUS_HOME="$ST_HOME"
+st() { AGENT_BUS_TOOL=codex AGENT_BUS_WT=st AGENT_BUS_SESSION=st-sess "$BIN" "$@"; }
+st_hook() { printf '{"session_id":"st-sess"}' | AGENT_BUS_VIA=hook AGENT_BUS_TOOL=codex AGENT_BUS_WT=st "$BIN" "$@"; }
+ST_ADDR=$(st whoami | awk '/^seat/{print $2}')
+st watch on >/dev/null
+out=$(st selftest)
+assert_contains "selftest arms a probe" "selftest armed for $ST_ADDR" "$out"
+assert_eq "selftest arm output never leaks the nonce" "" "$(grep -oE 'selftest check [0-9a-f]{6}' <<<"$out" || true)"
+assert_contains "probe row is flagged" '"probe":true' "$(grep -F '"from":"selftest/probe"' "$ST_HOME/ledger.jsonl")"
+# A PM is never CC'd on a probe, and triage never lists one.
+AGENT_BUS_TOOL=claude AGENT_BUS_WT=stpm AGENT_BUS_SESSION=stpm-sess "$BIN" role pm >/dev/null
+out=$(AGENT_BUS_TOOL=claude AGENT_BUS_WT=stpm AGENT_BUS_SESSION=stpm-sess "$BIN" read --peek)
+assert_contains "PM not auto-CC'd on probe" "nothing unread" "$out"
+assert_contains "triage ignores probes" "no unresolved supervisory" "$(st triage)"
+# Digest surfaces the probe with the check instruction; the nonce comes only
+# from the body, so this must be the probe's FIRST surfacing — a later one
+# carries a pointer instead (see the re-surfacing tests above).
+out=$(st_hook digest)
+assert_contains "digest surfaces the probe" "agent-bus selftest" "$out"
+ST_NONCE=$(grep -oE 'selftest check [0-9a-f]{6}' <<<"$out" | head -1 | awk '{print $3}')
+assert_eq "digest carries a 6-hex nonce" "6" "${#ST_NONCE}"
+# Stop hook (watch on, owned supervisory unread) continues the seat = wake check.
+# The wake payload always renders the body: it is that agent's primary delivery.
+out=$(st_hook stop-hook)
+assert_eq "probe wakes the seat via stop-hook" "block" "$(jq -r '.decision // empty' <<<"$out")"
+assert_contains "wake payload carries the body even on a repeat surfacing" "selftest check $ST_NONCE" "$out"
+out=$(st selftest check "$ST_NONCE"); rc=$?
+assert_eq "selftest check passes end to end" "0" "$rc"
+assert_contains "check: identity shared" "PASS  identity: hooks and shell share seat $ST_ADDR" "$out"
+assert_contains "check: hooks fired" "PASS  hooks fire" "$out"
+assert_contains "check: digest surfaced" "PASS  digest surfaced" "$out"
+assert_contains "check: injection proven by nonce" "PASS  injection: nonce matches" "$out"
+assert_contains "check: stop-hook wake" "PASS  stop-hook wake" "$out"
+assert_contains "check: probe resolved" "probe acked and resolved" "$out"
+assert_contains "probe gone after check" "nothing unread" "$(st read --peek)"
+assert_eq "check resets the wake budget" "0" "$(jq -r '.wake_count // 0' "$ST_HOME/state/$(tr '/' '_' <<<"$ST_ADDR").json")"
+out=$(st selftest check 2>&1 || true)
+assert_contains "check without a probe refuses" "no probe armed" "$out"
+# Without the nonce, injection is unproven (not failed); wake is skipped when watch was off.
+st watch off >/dev/null
+st selftest >/dev/null; st_hook digest >/dev/null
+out=$(st selftest check); rc=$?
+assert_eq "check without nonce is not a failure" "0" "$rc"
+assert_contains "check: injection unproven without nonce" "UNPROVEN  injection" "$out"
+assert_contains "check: wake skipped when watch off" "SKIP  stop-hook wake" "$out"
+# Wrong nonce fails.
+st selftest >/dev/null; st_hook digest >/dev/null
+out=$(st selftest check deadbe || true)
+assert_contains "check: wrong nonce fails" "FAIL  injection: wrong nonce" "$out"
+# Identity split: a bare-scope seat with hook touches while the shell is an instance.
+AGENT_BUS_VIA=hook AGENT_BUS_TOOL=codex AGENT_BUS_WT=st "$BIN" heartbeat </dev/null
+out=$(st selftest)
+assert_contains "selftest flags identity split" "FAIL  identity split: hooks register as codex/st" "$out"
+assert_contains "doctor flags identity split" "identity split" "$(st doctor)"
+st selftest check >/dev/null 2>&1 || true
+# Once hooks land on the instance seat again, the lingering bare seat is history.
+sleep 1; st_hook heartbeat
+out=$(st doctor)
+assert_contains "fixed split downgrades to info" "INFO  a bare seat codex/st" "$out"
+assert_contains "fixed split passes identity" "PASS  identity: hooks and shell share seat $ST_ADDR" "$out"
+# Cross-tool split: a markerless shell (tool=shell) inside a host whose hooks
+# register under the host's tool name — the Cursor-panel signature.
+printf '{"session_id":"cur-1"}' | AGENT_BUS_VIA=hook AGENT_BUS_TOOL=cursor AGENT_BUS_WT=xt "$BIN" heartbeat
+out=$(AGENT_BUS_TOOL=shell AGENT_BUS_WT=xt "$BIN" selftest)
+assert_contains "selftest flags markerless shell beside hook seat" "FAIL  identity split: this shell carries no host markers, so it is the bare seat shell/xt" "$out"
+assert_contains "markerless split lists hook-touched candidates" "Hook-touched seats in this worktree: cursor/xt." "$out"
+AGENT_BUS_TOOL=shell AGENT_BUS_WT=xt "$BIN" selftest check >/dev/null 2>&1 || true
+out=$(AGENT_BUS_TOOL=shell AGENT_BUS_WT=lonely "$BIN" self-test)
+assert_contains "self-test alias works; lone markerless shell is a warning" "WARN  identity: no host markers in this shell" "$out"
+AGENT_BUS_TOOL=shell AGENT_BUS_WT=lonely "$BIN" selftest check >/dev/null 2>&1 || true
+export AGENT_BUS_HOME="$SAVED_HOME"; rm -rf "$ST_HOME"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 ((fail == 0))

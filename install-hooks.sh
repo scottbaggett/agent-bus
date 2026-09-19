@@ -71,7 +71,10 @@ resolve_link() {
 # session into two identities (observed as codex-vs-shell on the same seat).
 digest_cmd() { printf 'AGENT_BUS_VIA=hook AGENT_BUS_TOOL=%s %s digest 2>/dev/null || true %s' "$1" "$BIN" "$MARKER"; }
 heartbeat_cmd() { printf 'AGENT_BUS_VIA=hook AGENT_BUS_TOOL=%s %s heartbeat 2>/dev/null || true %s' "$1" "$BIN" "$MARKER"; }
-release_cmd() { printf '%s release --all >/dev/null 2>&1 || true %s' "$BIN" "$MARKER"; }
+# Pinned like every other line: hooks_report counts a line without the pin as
+# a stale install, so an unpinned release line made `doctor` report STALE on a
+# freshly-run installer with no way to clear it.
+release_cmd() { printf 'AGENT_BUS_VIA=hook AGENT_BUS_TOOL=%s %s release --all >/dev/null 2>&1 || true %s' "$1" "$BIN" "$MARKER"; }
 # Stop hook: always emit JSON ({} or decision:block). Heartbeat is inside stop-hook.
 stop_cmd() { printf 'AGENT_BUS_VIA=hook AGENT_BUS_TOOL=%s %s stop-hook 2>/dev/null || echo "{}" %s' "$1" "$BIN" "$MARKER"; }
 # Cursor does not document whether `command` runs through a shell, so this
@@ -124,7 +127,7 @@ install_claude() {
     out=$(printf '%s' "$out" | add_group UserPromptSubmit "$(digest_cmd claude)")
     # Stop continues the agent when watch is on and supervisory mail is unread.
     out=$(printf '%s' "$out" | add_group Stop "$(stop_cmd claude)")
-    out=$(printf '%s' "$out" | add_group SessionEnd "$(release_cmd)")
+    out=$(printf '%s' "$out" | add_group SessionEnd "$(release_cmd claude)")
   fi
   printf '%s\n' "$out" | jq . >"$CLAUDE_SETTINGS.tmp" && mv "$CLAUDE_SETTINGS.tmp" "$CLAUDE_SETTINGS"
   echo "claude: $( ((uninstall)) && echo removed || echo installed ) (backup: $CLAUDE_SETTINGS.agent-bus.bak)"

@@ -59,6 +59,27 @@ unset CLAUDECODE CLAUDE_CODE_SESSION_ID \
   CURSOR_TRACE_ID CURSOR_AGENT CURSOR_CONVERSATION_ID \
   OPENCODE OPENCODE_SESSION_ID OPENCODE_SESSION_TITLE \
   AGENT_BUS_SESSION AGENT_BUS_TOOL
+# Every other AGENT_BUS_* the caller happened to export is scrubbed too, then
+# the few the suite owns are re-set below. Naming them one by one let new knobs
+# (AGENT_BUS_VIA, AGENT_BUS_ENDPOINT, AGENT_BUS_DELEGATE_SCOPE) leak in from an
+# agent or hook shell and change results — a suite whose verdict depends on who
+# invoked it cannot certify anything.
+for _v in $(env | sed -n 's/^\(AGENT_BUS_[A-Z0-9_]*\)=.*/\1/p'); do
+  case "$_v" in
+    AGENT_BUS_HOME|AGENT_BUS_NO_PUSH|AGENT_BUS_NO_AUTO_GC) ;;
+    *) unset "$_v" ;;
+  esac
+done
+unset _v
+
+# Preflight: prove the scrub worked before any assertion runs. A leaked knob
+# must fail loudly here, not as a mystery failure hundreds of lines later.
+# `grep -v` exits 1 when nothing survives the filter, which is the PASSING
+# case here; under `set -o pipefail` that would abort the suite silently.
+_leaked=$( { env | sed -n 's/^\(AGENT_BUS_[A-Z0-9_]*\)=.*/\1/p' \
+  | grep -vE '^AGENT_BUS_(HOME|NO_PUSH|NO_AUTO_GC)$' || true; } | sort | tr '\n' ' ')
+assert_eq "harness env is hermetic" "" "$_leaked"
+unset _leaked
 
 # --- identity ---
 out=$("$BIN" whoami)
@@ -889,6 +910,29 @@ assert_contains "plugin registers the v2 shell hook" 'shell.hook("create.before"
 assert_contains "plugin registers the v2 prompt hook" 'session.hook("prompt"' "$out"
 assert_contains "plugin wakes v2 through synthetic resume" "resume: wake" "$out"
 
+# Shell children get the TOOL pin but never VIA: a command the agent runs is a
+# CLI call, not a lifecycle hook fire, and stamping VIA made every one of them
+# register as a hook touch — the single signal doctor uses to prove hooks work.
+# Dropping the tool pin instead is the other failure: the shell then resolves to
+# a markerless shell/<worktree> seat.
+assert_contains "shell stamp keeps the tool pin" 'AGENT_BUS_TOOL: "opencode",' "$out"
+shell_env_body=$(sed -n '/shellEnv(sessionID = executing)/,/^    },/p' "$ROOT/plugins/agent-bus/index.ts")
+assert_not_contains "shell stamp omits AGENT_BUS_VIA" "AGENT_BUS_VIA" "$shell_env_body"
+assert_contains "shell stamp carries the session when known" "OPENCODE_SESSION_ID: sid" "$shell_env_body"
+
+# A wake is spent against WAKE_BUDGET inside stop-hook, before the host has
+# accepted the text, so delivery is awaited and retried rather than swallowed.
+assert_contains "wake confirms delivery before spending" "await deliver(text)) || (await deliver(text)" "$out"
+assert_contains "injection reports failure" "return false" "$out"
+# A failed session lookup is unknown, not foreign; caching it would disown the
+# session for the rest of its life.
+assert_contains "ownership never caches a lookup failure" "Caching false here" "$out"
+# The CLI runs inside prompt admission, so it cannot hang the user's turn.
+assert_contains "plugin bounds the CLI spawn" "RUN_TIMEOUT_MS" "$out"
+# Registrations outlive a reload unless disposed; the installer rewrites this
+# file in place and the host watches it.
+assert_contains "plugin disposes its registrations" "r.dispose()" "$out"
+
 # The installer copies this one file into a directory with no node_modules, so
 # a VALUE import fails at load with "Cannot find package '@opencode/plugin'".
 # Plugin.define is an identity function, so the object literal is equivalent.
@@ -908,6 +952,17 @@ assert_contains "installer removes the pre-v2 flat file" 'rm -f "$OPENCODE_PLUGI
 # Host configs are often dotfiles symlinks; jq-to-tmp + mv would replace the
 # link with a regular file and silently detach them.
 assert_contains "installer writes through symlinks" "resolve_link" "$inst"
+# Every managed line carries the tool pin, including release: hooks_report
+# counts an unpinned line as a stale install, which the installer could not clear.
+assert_contains "installer pins the release line" 'AGENT_BUS_TOOL=%s %s release --all' "$inst"
+
+# Hook capture writes host env to disk. It records identity markers only — a
+# prefix sweep had been persisting CLAUDE_CODE_MESSAGING_TOKEN in the clear.
+cli=$(<"$ROOT/bin/agent-bus")
+assert_contains "capture uses an allowlist" "CAPTURE_ENV_KEYS" "$cli"
+assert_not_contains "capture allowlist holds no credentials" "TOKEN" \
+  "$(sed -n '/^CAPTURE_ENV_KEYS=/,/^$/p' "$ROOT/bin/agent-bus")"
+assert_contains "capture files are private" "chmod 600" "$cli"
 
 # @opencode is a builtin scope: postable before any opencode seat exists.
 out=$(AGENT_BUS_TOOL=claude "$BIN" post --to @opencode --state fyi \

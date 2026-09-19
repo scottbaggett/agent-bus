@@ -131,17 +131,37 @@ hook_payload_capture() {
   ev=$(jq -r '.hook_event_name // "unknown"' <<<"$payload" 2>/dev/null | tr -d '\n' | tr -c 'A-Za-z0-9_-' '_' | cut -c1-40)
   [ -n "$ev" ] || ev=unknown
   tool="${TOOL:-${AGENT_BUS_TOOL:-host}}"
+  # Allowlist, not a prefix match. The old `^(CLAUDE|CODEX|...)[A-Z_]*=` sweep
+  # captured whatever the host happened to export under those prefixes and wrote
+  # it to disk: CLAUDE_CODE_MESSAGING_TOKEN landed in these files in the clear,
+  # and any future *_TOKEN / *_KEY would too. Capture exists to show which
+  # IDENTITY markers a host sets, so it records exactly those and nothing else.
   # One jq call per variable: values may hold newlines, which break any
   # line-oriented parse of `env`.
   envj='{}'; local k
-  for k in $(env | grep -oE '^(CLAUDE|CODEX|CURSOR|OPENCODE|AGENT_BUS)[A-Z_]*=' | tr -d = | sort -u); do
+  for k in $CAPTURE_ENV_KEYS; do
+    [ -n "${!k:-}" ] || continue
     envj=$(jq -c --arg k "$k" --arg v "${!k}" '. + {($k): $v}' <<<"$envj" 2>/dev/null || printf '%s' "$envj")
   done
+  # Payloads and env land in a file only this user should read; the default
+  # umask would leave them world-readable.
+  local prev_umask; prev_umask=$(umask); umask 077
   jq -n -c --arg ev "$ev" --arg cwd "$PWD" --argjson epoch "$(now_epoch)" \
     --argjson env "$envj" --argjson payload "$payload" \
     '{event:$ev, epoch:$epoch, hook_cwd:$cwd, env:$env, payload:$payload}' \
     >"$dir/$tool-$ev.json.tmp" 2>/dev/null && mv "$dir/$tool-$ev.json.tmp" "$dir/$tool-$ev.json" || true
+  chmod 600 "$dir/$tool-$ev.json" 2>/dev/null || true
+  umask "$prev_umask"
 }
+
+# Exactly the host identity markers resolve_identity reads, and nothing else.
+# Anything added here is written to disk in the clear, so it must never name a
+# credential: tokens, keys and secrets are not identity.
+CAPTURE_ENV_KEYS='CLAUDECODE CLAUDE_CODE_SESSION_ID CLAUDE_PROJECT_DIR
+CODEX_SHELL CODEX_SANDBOX CODEX_APP_TITLE CODEX_SESSION_ID CODEX_THREAD_ID
+CURSOR_TRACE_ID CURSOR_AGENT CURSOR_CONVERSATION_ID CURSOR_PROJECT_DIR
+OPENCODE OPENCODE_SESSION_ID OPENCODE_SESSION_TITLE
+AGENT_BUS_TOOL AGENT_BUS_SESSION AGENT_BUS_VIA AGENT_BUS_WT AGENT_BUS_HOME'
 
 HOOK_SESSION='' HOOK_PAYLOAD='' HOOK_COMPAT=''
 hook_payload_read() {

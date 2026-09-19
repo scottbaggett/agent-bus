@@ -41,11 +41,24 @@ worktree therefore share wakes — give each its own worktree if that matters.
 
 OpenCode has no shell-command lifecycle hooks, so it integrates through a
 TypeScript plugin instead (`plugins/agent-bus/`, copied to
-`~/.config/opencode/plugins/` and registered in the global `opencode.json`).
-The plugin shells out to the same CLI — `agent-bus digest` for context
-injection and `agent-bus stop-hook` for watch wake — so budgets, caps, and
-staleness all behave identically across harnesses. Restart OpenCode after
-installing; config is read once at startup.
+`~/.config/opencode/plugins/agent-bus/` and registered in the global
+`opencode.json`). The plugin shells out to the same CLI — `agent-bus digest`
+for context injection and `agent-bus stop-hook` for watch wake — so budgets,
+caps, and staleness all behave identically across harnesses. Restart OpenCode
+after installing; config is read once at startup.
+
+One plugin file serves OpenCode 1 and 2. OpenCode 2 reads the default export's
+`id` and `setup()`; OpenCode 1 calls `server()` and uses the hooks it returns.
+Both halves drive the same bus logic, so the contract cannot drift between
+them. The v2 bindings are `ctx.event.subscribe` for lifecycle,
+`ctx.session.hook("prompt")` for the prompt digest,
+`ctx.shell.hook("create.before")` for seat identity in shells, and
+`ctx.session.synthetic({ resume: true })` for the wake — v1's
+`client.session.promptAsync` has no v2 counterpart. Imports are type-only: the
+plugin is copied as a lone file with no `node_modules`, so a value import
+fails at load. Under v2 the event stream is server-wide, so the plugin
+resolves each session's owning directory before acting; without that, one chat
+registers as several seats.
 
 ## Use
 

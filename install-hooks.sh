@@ -52,6 +52,18 @@ ensure_backup() {
   [ -f "$bak" ] || cp "$f" "$bak"
 }
 
+# Host configs are commonly symlinks into a dotfiles repo. Every write here is
+# jq-to-tmp followed by mv, which replaces the LINK with a regular file and
+# silently detaches the user's dotfiles. Resolve to the real file first so the
+# edit lands where the link points and the link survives.
+resolve_link() {
+  local f="$1"
+  [ -L "$f" ] || { printf '%s' "$f"; return; }
+  local r
+  r=$(python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$f" 2>/dev/null) || r=""
+  [ -n "$r" ] && printf '%s' "$r" || printf '%s' "$f"
+}
+
 # Hook payloads are wrapped so a bus failure can never break the host agent.
 # AGENT_BUS_VIA=hook is what lets `agent-bus doctor` prove hooks are firing.
 # Every hook pins AGENT_BUS_TOOL: env-sniffing can misread a hook subshell,
@@ -101,6 +113,7 @@ add_cursor_hook() { # <event> <command>
 
 install_claude() {
   [ -f "$CLAUDE_SETTINGS" ] || echo '{}' >"$CLAUDE_SETTINGS"
+  CLAUDE_SETTINGS=$(resolve_link "$CLAUDE_SETTINGS")
   ensure_backup "$CLAUDE_SETTINGS"
   local out
   out=$(strip_marked <"$CLAUDE_SETTINGS")
@@ -119,6 +132,7 @@ install_claude() {
 
 install_codex() {
   [ -f "$CODEX_HOOKS" ] || echo '{}' >"$CODEX_HOOKS"
+  CODEX_HOOKS=$(resolve_link "$CODEX_HOOKS")
   ensure_backup "$CODEX_HOOKS"
   local out
   out=$(strip_marked <"$CODEX_HOOKS")
@@ -136,6 +150,7 @@ install_codex() {
 install_cursor() {
   mkdir -p "$(dirname "$CURSOR_HOOKS")"
   [ -f "$CURSOR_HOOKS" ] || printf '%s\n' '{"version":1,"hooks":{}}' >"$CURSOR_HOOKS"
+  CURSOR_HOOKS=$(resolve_link "$CURSOR_HOOKS")
   ensure_backup "$CURSOR_HOOKS"
   chmod +x "$CURSOR_HOOK" 2>/dev/null || true
   local out
@@ -157,22 +172,35 @@ install_cursor() {
 # plugin. Install = copy the plugin into the global config dir + register it
 # in the global opencode.json plugin array. The entry string doubles as the
 # strip marker (any plugin path mentioning plugins/agent-bus is ours).
+#
+# The plugin installs as a DIRECTORY (plugins/agent-bus/ with index.ts and
+# package.json), not a bare .ts file. OpenCode 2 logs "configured plugin path
+# must be a directory" for a file entry, and its plugin discovery expects a
+# package directory; OpenCode 1 loads a directory entry just as happily. The
+# old flat agent-bus.ts from previous installs is removed either way.
 install_opencode() {
   mkdir -p "$OPENCODE_PLUGINS" "$(dirname "$OPENCODE_CONFIG")"
   [ -f "$OPENCODE_CONFIG" ] || printf '{}\n' >"$OPENCODE_CONFIG"
+  OPENCODE_CONFIG=$(resolve_link "$OPENCODE_CONFIG")
   ensure_backup "$OPENCODE_CONFIG"
   local plugin_src="$OPENCODE_PLUGIN_DIR/index.ts"
+  local dest="$OPENCODE_PLUGINS/$OPENCODE_PLUGIN_NAME"
   [ -f "$plugin_src" ] || { echo "opencode: plugin source missing at $plugin_src — skipping" >&2; return 0; }
+  # Pre-v2 layout, removed on install and uninstall alike.
+  rm -f "$OPENCODE_PLUGINS/$OPENCODE_PLUGIN_NAME.ts"
   if ((uninstall)); then
-    rm -f "$OPENCODE_PLUGINS/$OPENCODE_PLUGIN_NAME.ts"
+    rm -rf "$dest"
     jq --arg m "plugins/$OPENCODE_PLUGIN_NAME" '
       .plugin //= [] | .plugin |= map(select(contains($m) | not))
     ' "$OPENCODE_CONFIG" | jq . >"$OPENCODE_CONFIG.tmp" && mv "$OPENCODE_CONFIG.tmp" "$OPENCODE_CONFIG"
     echo "opencode: removed (backup: $OPENCODE_CONFIG.agent-bus.bak)"
     return 0
   fi
-  cp "$plugin_src" "$OPENCODE_PLUGINS/$OPENCODE_PLUGIN_NAME.ts"
-  jq --arg e "./plugins/$OPENCODE_PLUGIN_NAME.ts" '
+  mkdir -p "$dest"
+  cp "$plugin_src" "$dest/index.ts"
+  [ -f "$OPENCODE_PLUGIN_DIR/package.json" ] && cp "$OPENCODE_PLUGIN_DIR/package.json" "$dest/package.json"
+  # Replace any earlier entry (flat .ts or directory) with the directory form.
+  jq --arg e "./plugins/$OPENCODE_PLUGIN_NAME" '
     .plugin //= [] | .plugin |= (map(select(contains("plugins/agent-bus") | not)) + [$e] | unique)
   ' "$OPENCODE_CONFIG" | jq . >"$OPENCODE_CONFIG.tmp" && mv "$OPENCODE_CONFIG.tmp" "$OPENCODE_CONFIG"
   echo "opencode: installed (backup: $OPENCODE_CONFIG.agent-bus.bak)"

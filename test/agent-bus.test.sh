@@ -209,6 +209,7 @@ assert_contains "claim still held after foreign release" "README.md" "$out"
 "$BIN" release README.md >/dev/null
 out=$("$BIN" claims)
 assert_contains "owner can release" "no active claims" "$out"
+
 # --- claims: flag-shaped arguments are not paths ---
 # `agent-bus claim --all` once stored a claim on a file literally named "--all",
 # which showed in `who` as a real hold and needed hand-editing to clear.
@@ -243,7 +244,6 @@ assert_contains "force requires explicit paths" "needs one or more paths" "$out"
 # A path nobody holds is still a plain release.
 out=$("$BIN" release --force PROTOCOL.md 2>&1)
 assert_contains "force on an unheld path is a no-op" "not held" "$out"
-
 
 # --- resolve closes for everyone ---
 rid=$("$BIN" post --to @repo --state question -m $'# q\n\nwhy?' | awk -F= '/id=/{print $2}')
@@ -877,6 +877,37 @@ out=$(<"$ROOT/plugins/agent-bus/index.ts")
 assert_contains "plugin CLI calls use host session identity" "OPENCODE_SESSION_ID: sessionID" "$out"
 assert_contains "plugin polls already-idle sessions" "setInterval" "$out"
 assert_contains "plugin wakes through injected SDK client" "client.session.promptAsync" "$out"
+
+# --- opencode plugin: loads on both major versions ---
+# OpenCode 2 reads the default export's id + setup(); OpenCode 1 calls server().
+assert_contains "plugin declares a v2 id" 'id: "agent-bus"' "$out"
+assert_contains "plugin exposes a v2 setup" "async setup(ctx" "$out"
+assert_contains "plugin keeps the v1 server export" "async function server()" "$out"
+assert_contains "plugin default-exports both halves" "export default { ...v2, server }" "$out"
+# v2 bindings replace the v1 hook names, which do not exist in v2.
+assert_contains "plugin registers the v2 shell hook" 'shell.hook("create.before"' "$out"
+assert_contains "plugin registers the v2 prompt hook" 'session.hook("prompt"' "$out"
+assert_contains "plugin wakes v2 through synthetic resume" "resume: wake" "$out"
+
+# The installer copies this one file into a directory with no node_modules, so
+# a VALUE import fails at load with "Cannot find package '@opencode/plugin'".
+# Plugin.define is an identity function, so the object literal is equivalent.
+bad_import=$(grep -nE '^\s*import[^;]*from ' "$ROOT/plugins/agent-bus/index.ts" | grep -v 'import type' || true)
+assert_eq "plugin has no runtime imports" "" "$bad_import"
+
+# Ownership: the v2 event stream is server-wide, so an unfiltered handler makes
+# one chat register as several seats — the identity split, reintroduced.
+assert_contains "plugin resolves event ownership by directory" "sameDir(info.location?.directory, ctx.location.directory)" "$out"
+assert_contains "plugin ignores child sessions" "!info.parentID" "$out"
+
+# The installer must lay the plugin out as a directory package: OpenCode 2
+# rejects a bare .ts config entry with "configured plugin path must be a directory".
+inst=$(<"$ROOT/install-hooks.sh")
+assert_contains "installer registers a directory entry" 'plugins/$OPENCODE_PLUGIN_NAME"' "$inst"
+assert_contains "installer removes the pre-v2 flat file" 'rm -f "$OPENCODE_PLUGINS/$OPENCODE_PLUGIN_NAME.ts"' "$inst"
+# Host configs are often dotfiles symlinks; jq-to-tmp + mv would replace the
+# link with a regular file and silently detach them.
+assert_contains "installer writes through symlinks" "resolve_link" "$inst"
 
 # @opencode is a builtin scope: postable before any opencode seat exists.
 out=$(AGENT_BUS_TOOL=claude "$BIN" post --to @opencode --state fyi \

@@ -104,7 +104,10 @@ function runner(directory: string) {
     sessions,
     track(sessionID: string, parentID?: string) {
       if (parentID) return false
-      sessions.set(sessionID, { idle: false, polling: false })
+      // Idle until proven otherwise. A tracked session that is not executing
+      // is wakeable; starting at false meant a host which never emits
+      // session.idle could never be woken at all, which is what OpenCode 2 did.
+      sessions.set(sessionID, { idle: true, polling: false })
       return true
     },
     forget(sessionID: string) {
@@ -112,10 +115,22 @@ function runner(directory: string) {
       if (executing === sessionID) executing = undefined
     },
     startExecuting(sessionID: string) {
-      if (sessions.has(sessionID)) executing = sessionID
+      const state = sessions.get(sessionID)
+      if (!state) return
+      executing = sessionID
+      state.idle = false
     },
+    /**
+     * A turn ended. This is the reliable idle signal: session.idle is in the
+     * v2 schema but was not observed on this host, and gating the wake on it
+     * alone left every OpenCode 2 seat unwakeable even with watch on. The
+     * execution.* events do fire, so idleness is derived from them and
+     * session.idle is treated as a second, optional source.
+     */
     stopExecuting(sessionID: string) {
       if (executing === sessionID) executing = undefined
+      const state = sessions.get(sessionID)
+      if (state) state.idle = true
     },
     /**
      * Env stamped onto shell children so a seat's shell and its hooks agree.
@@ -298,6 +313,15 @@ const v2: Plugin.Plugin = {
       return mine
     }
 
+    // Discovery is event-driven, and cannot be otherwise: ctx.session exposes
+    // exactly create/get/prompt/synthetic/hook and friends — there is no list —
+    // so a plugin cannot enumerate sessions that already exist. A session
+    // becomes known the first time it emits an event carrying its id, which is
+    // its first turn. The practical consequence is that a plugin start or
+    // reload cannot see a session that is sitting idle right then; that session
+    // is picked up as soon as it takes one more turn. Reinstalling the plugin
+    // under an idle watch-enabled chat therefore leaves it unwakeable until the
+    // human prompts it once.
     const controller = new AbortController()
     void (async () => {
       try {
@@ -320,10 +344,12 @@ const v2: Plugin.Plugin = {
               case "session.execution.succeeded":
               case "session.execution.failed":
               case "session.execution.interrupted":
-                bus.stopExecuting(sid)
-                break
               case "session.idle": {
-                if (!bus.markIdle(sid)) break
+                if (event.type === "session.idle") {
+                  if (!bus.markIdle(sid)) break
+                } else {
+                  bus.stopExecuting(sid)
+                }
                 await bus.wake(sid, (text) => inject(sid, text, true))
                 break
               }

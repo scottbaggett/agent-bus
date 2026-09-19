@@ -74,12 +74,20 @@ agent-bus read --peek                                  # did a reply arrive?
 jq -c '{wake_count,last_wake}' ~/.agents/bus/state/<seat-slug>.json
 ```
 
-**Pass:** a reply carrying the nonce, `wake_count` incremented, `last_wake` at
-the second the packet was posted, and no human typed.
-**Fail:** `wake_count` unchanged after a minute, **on a surface where T2
-applies**, means the host never asked the bus whether to wake. That is a dead
-wake path, not a quiet bus. On a turn-boundary-only surface the same result is
-expected and means nothing.
+**Pass:** a reply carrying the nonce, and no human typed. That is the whole
+test; the counters below only say *which* path delivered it.
+
+`wake_count` moves on the Stop-hook path and not on the socket poke, so the
+two surfaces read differently:
+
+- **Claude**: `post` prints `pushed wake to 1 peer(s)` and `wake_count` stays
+  put. The poke woke it at post time, before any hook was involved.
+- **OpenCode**: `wake_count` increments and `last_wake` matches the second the
+  packet was posted, because the plugin asked `stop-hook` whether to resume.
+
+**Fail:** no reply after a minute on a surface where T2 applies. On Claude
+also check that the seat records a socket, since a seat with none silently
+degrades to the pull digest.
 
 ---
 

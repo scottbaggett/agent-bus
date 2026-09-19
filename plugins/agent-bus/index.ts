@@ -6,10 +6,10 @@
 // CLI; the plugin only moves bytes between the CLI and the host. All failures
 // are swallowed — the plugin must never break or delay a host turn.
 //
-// One file serves OpenCode 1 and 2. OpenCode 2 reads the default export's `id`
-// and `setup()`; OpenCode 1 calls `server()` and uses the hooks it returns.
-// The two runtimes share `runner()` below, so the bus contract cannot drift
-// between them — only the host bindings differ.
+// OpenCode 2 only. The plugin reads the default export's `id` and `setup()`.
+// A v1 `server()` half shipped alongside this through v0.2.0 and was removed
+// once every seat here had moved to 2.x: it was untested on every release and
+// would have rotted into a false promise.
 //
 // The v2 bindings, and why each one:
 //   digest at session start   event session.created -> session.synthetic(queue)
@@ -17,9 +17,10 @@
 //   idle wake                 event session.idle    -> session.synthetic(resume)
 //   seat identity in shells   shell.hook("create.before") -> event.env
 //
-// v1's `client.session.promptAsync` has no v2 counterpart; `session.synthetic`
-// with `resume: true` is the supported way to re-enter an idle session, and it
-// marks the text as synthetic rather than forging a user turn.
+// `session.synthetic` with `resume: true` is the supported way to re-enter an
+// idle session, and it marks the text as synthetic rather than forging a user
+// turn. Nothing in the v1 API did this, which is why idle wake arrived here
+// only with OpenCode 2.
 //
 // Imports are TYPE-ONLY on purpose. The installer copies this single file into
 // ~/.config/opencode/plugins/agent-bus/, which has no node_modules, so any
@@ -75,9 +76,10 @@ async function runIn(directory: string, args: string[], extraEnv: Record<string,
 }
 
 /**
- * Host-independent bus logic. `directory` pins identity to this session's
- * worktree rather than the server process's launch dir — without it a project
- * picker or $HOME launch lands every session of the host on one seat.
+ * Bus logic, kept separate from the host bindings below. `directory` pins
+ * identity to this session's worktree rather than the server process's launch
+ * dir — without it a project picker or $HOME launch lands every session of the
+ * host on one seat.
  */
 function runner(directory: string) {
   // Primary sessions only. Subagent/child sessions must not rebind identity:
@@ -385,93 +387,4 @@ const v2: Plugin.Plugin = {
   },
 }
 
-// ------------------------------------------------------------------ v1
-//
-// Kept verbatim in behavior so an OpenCode 1 host upgrading the plugin file
-// sees no change. v1 pushes a synthetic part into the message and wakes an
-// idle chat through promptAsync; neither API exists in v2.
-
-async function server() {
-  return async ({ client, directory }: any) => {
-    const bus = runner(directory)
-
-    const wake = (sessionID: string) =>
-      bus.wake(sessionID, async (text) => {
-        try {
-          await client.session.promptAsync({
-            path: { id: sessionID },
-            query: { directory },
-            body: { parts: [{ type: "text", synthetic: true, text }] },
-          })
-          return true
-        } catch {
-          // Already-idle wake is best-effort and must never break the host.
-          return false
-        }
-      })
-
-    pollEvery(() => {
-      for (const sessionID of bus.sessions.keys()) void wake(sessionID)
-    })
-
-    return {
-      "shell.env": async (input: any, output: any) => {
-        Object.assign(output.env, bus.shellEnv(input?.sessionID))
-      },
-
-      event: async ({ event }: any) => {
-        try {
-          if (event.type === "session.created") {
-            const info = event.properties.info
-            if (!bus.track(info.id, info.parentID)) return
-            const digest = await bus.digest(info.id)
-            if (digest) {
-              void client.session
-                .prompt({
-                  path: { id: info.id },
-                  query: { directory },
-                  body: { noReply: true, parts: [{ type: "text", synthetic: true, text: digest }] },
-                })
-                .catch(() => {})
-            }
-            return
-          }
-          if (event.type === "session.idle") {
-            const sid = event.properties.sessionID
-            if (bus.markIdle(sid)) await wake(sid)
-            return
-          }
-          if (event.type === "session.deleted") bus.forget(event.properties.info.id)
-        } catch {
-          // Never break the host event loop.
-        }
-      },
-
-      "chat.message": async (input: any, output: any) => {
-        try {
-          if (!bus.sessions.has(input.sessionID)) return
-          bus.markBusy(input.sessionID)
-          const digest = await bus.digest(input.sessionID)
-          if (digest && output.parts) {
-            // Parts here are already persisted-shaped (assign() ran before the
-            // hook), so a pushed part must carry a valid prt_-prefixed id —
-            // fabricated message-derived ids fail the server's part schema and
-            // kill the whole prompt submission.
-            output.parts.push({
-              id: `prt_bus_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`,
-              sessionID: output.message.sessionID,
-              messageID: output.message.id,
-              type: "text",
-              synthetic: true,
-              text: digest,
-            })
-          }
-        } catch {
-          // Never break prompt submission.
-        }
-      },
-    }
-  }
-}
-
-export default { ...v2, server }
+export default v2

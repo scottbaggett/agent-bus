@@ -47,10 +47,10 @@ for context injection and `agent-bus stop-hook` for watch wake — so budgets,
 caps, and staleness all behave identically across harnesses. Restart OpenCode
 after installing; config is read once at startup.
 
-One plugin file serves OpenCode 1 and 2. OpenCode 2 reads the default export's
-`id` and `setup()`; OpenCode 1 calls `server()` and uses the hooks it returns.
-Both halves drive the same bus logic, so the contract cannot drift between
-them. The v2 bindings are `ctx.event.subscribe` for lifecycle,
+The plugin targets OpenCode 2: it default-exports an `id` and a `setup()`. A
+v1 `server()` half shipped alongside it through v0.2.0 and was removed once
+every seat had moved to 2.x, since it was untested on every release. The v2
+bindings are `ctx.event.subscribe` for lifecycle,
 `ctx.session.hook("prompt")` for the prompt digest,
 `ctx.shell.hook("create.before")` for seat identity in shells, and
 `ctx.session.synthetic({ resume: true })` for the wake — v1's

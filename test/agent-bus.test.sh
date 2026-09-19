@@ -912,18 +912,19 @@ export AGENT_BUS_HOME="$OC_HOME"
 out=$(<"$ROOT/plugins/agent-bus/index.ts")
 assert_contains "plugin CLI calls use host session identity" "OPENCODE_SESSION_ID: sessionID" "$out"
 assert_contains "plugin polls already-idle sessions" "setInterval" "$out"
-assert_contains "plugin wakes through injected SDK client" "client.session.promptAsync" "$out"
 
-# --- opencode plugin: loads on both major versions ---
-# OpenCode 2 reads the default export's id + setup(); OpenCode 1 calls server().
+# --- opencode plugin: v2 shape ---
+# OpenCode 2 reads the default export's id + setup(). The v1 server() half was
+# removed after v0.2.0; it was untested on every release.
 assert_contains "plugin declares a v2 id" 'id: "agent-bus"' "$out"
 assert_contains "plugin exposes a v2 setup" "async setup(ctx" "$out"
-assert_contains "plugin keeps the v1 server export" "async function server()" "$out"
-assert_contains "plugin default-exports both halves" "export default { ...v2, server }" "$out"
+assert_contains "plugin default-exports the v2 definition" "export default v2" "$out"
 # v2 bindings replace the v1 hook names, which do not exist in v2.
 assert_contains "plugin registers the v2 shell hook" 'shell.hook("create.before"' "$out"
 assert_contains "plugin registers the v2 prompt hook" 'session.hook("prompt"' "$out"
-assert_contains "plugin wakes v2 through synthetic resume" "resume: wake" "$out"
+assert_contains "plugin wakes through synthetic resume" "resume: wake" "$out"
+assert_not_contains "no v1 server export remains" "async function server()" "$out"
+assert_not_contains "no v1 promptAsync remains" "client.session.promptAsync" "$out"
 
 # Shell children get the TOOL pin but never VIA: a command the agent runs is a
 # CLI call, not a lifecycle hook fire, and stamping VIA made every one of them

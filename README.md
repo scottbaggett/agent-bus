@@ -121,10 +121,12 @@ do not go idle until you manually poke them. Off by default. Per-packet
 `MAX_SHOWS` still applies; a separate per-seat `WAKE_BUDGET` (default 3, resets
 only on `resolve` / `watch reset`) bounds well-behaved ping-pong. Exhaustion
 with pending mail shows in `watch status` and `doctor`. Stop only fires after a
-turn ends, so a seat idle at an empty prompt is not woken by watch alone —
-Claude seats close that gap with the post-time socket poke; hosts without an
-inbox socket (codex desktop) use `agent-bus wait`, which blocks the current
-turn in a shell sleep-loop (no tokens) until supervisory mail arrives.
+turn ends, so a seat idle at an empty prompt is not woken by watch alone.
+Claude seats close that gap with the post-time socket poke and OpenCode
+resumes the session in-process. Codex and Cursor have neither, so
+`agent-bus watch on --hold <secs>` makes their Stop hook block that long
+waiting for mail rather than ending the turn — automatic, where
+`agent-bus wait` needed the agent to remember to run it.
 
 ### Scopes
 

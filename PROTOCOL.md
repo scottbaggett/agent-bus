@@ -182,10 +182,24 @@ By default a seat that finishes a turn goes idle until the human sends another
 prompt — digests only run on `SessionStart` / `UserPromptSubmit`. Opt in:
 
 ```
-agent-bus watch on       # this seat
-agent-bus watch          # status
-agent-bus watch off      # disable
+agent-bus watch on              # this seat
+agent-bus watch on --hold 60    # ...and let the Stop hook wait 60s for mail
+agent-bus watch                 # status
+agent-bus watch off             # disable
 ```
+
+`--hold` is the only automatic idle wake available to a host with no push
+channel. Claude Code is poked through its inbox socket at post time and
+OpenCode is resumed in-process, but Codex and Cursor fire their Stop hook at
+the end of a turn and have nothing that can reach a session parked at an empty
+prompt. With a hold, that Stop hook blocks for up to the given seconds instead
+of ending the turn, and returns a continuation the moment mail arrives. Mail
+already waiting skips the hold entirely; the default of 0 keeps the historical
+behaviour of answering at once. Capped by `AGENT_BUS_HOLD_MAX`, default 300.
+
+Verified on Codex: a blocking Stop hook runs to completion and the human can
+still type throughout. A host that kills long hooks simply loses the hold and
+falls back to answering immediately.
 
 When watch is on, the lifecycle **Stop** hook runs `agent-bus stop-hook`. If
 there are unread **supervisory** packets (`needs-review`, `blocked`, `handoff`,

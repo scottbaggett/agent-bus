@@ -93,7 +93,12 @@ degrades to the pull digest.
 
 ## Surfaces
 
-Run T1 on every row. **T2 applies to two surfaces only.** Waking a session
+Run T1 on every row. **T2 applies to two surfaces by default**, and to Codex
+and Cursor once `agent-bus watch on --hold <secs>` is set, which makes their
+Stop hook block for mail rather than ending the turn. Test those with the hold
+longer than the gap between posting and checking.
+
+**Without a hold:** Waking a session
 that is already idle needs a channel into a host with no turn running, and
 only Claude Code and OpenCode have one: an inbox socket poked at post time,
 and a synthetic message that resumes the session. Everywhere else the Stop
@@ -105,10 +110,10 @@ bug and T1 already covers it.
 |---|---|---|
 | `claude` CLI | Stop hook, plus inbox-socket poke | T2 applies. Reference surface: if this fails, suspect the install, not the host. |
 | Claude.app | Stop hook, plus inbox-socket poke | T2 applies. Launch env differs from a login shell; check PATH reaches `agent-bus`. |
-| `codex` CLI | Stop hook, turn boundary only | **T2 does not apply.** No socket, no resume: a Codex session idle at an empty prompt cannot be woken. Use `agent-bus wait`. |
-| Codex in ChatGPT.app | Stop hook, turn boundary only | T2 does not apply, same as the CLI. |
-| `cursor-agent` CLI | `followup_message`, turn boundary only | T2 does not apply. Separate binary from the app; both use the same adapter. |
-| Cursor.app | `followup_message`, turn boundary only | T2 does not apply. Hooks run from `~/.cursor`, not the workspace. See gotchas. |
+| `codex` CLI | Stop hook; idle only with `--hold` | **T2 does not apply.** No socket, no resume: a Codex session idle at an empty prompt cannot be woken. Use `agent-bus wait`. |
+| Codex in ChatGPT.app | Stop hook; idle only with `--hold` | T2 does not apply, same as the CLI. |
+| `cursor-agent` CLI | `followup_message`; idle only with `--hold` | T2 does not apply. Separate binary from the app; both use the same adapter. |
+| Cursor.app | `followup_message`; idle only with `--hold` | T2 does not apply. Hooks run from `~/.cursor`, not the workspace. See gotchas. |
 | `opencode` TUI | `session.synthetic({resume:true})` | T2 applies. Session must take one turn after plugin load. See gotchas. |
 | `opencode run` | none | Headless, one-shot. T1 only, and expect no `session.created`. |
 

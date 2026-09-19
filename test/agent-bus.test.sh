@@ -890,6 +890,53 @@ assert_contains "wait --timeout without value dies cleanly" "--timeout needs a v
 export AGENT_BUS_HOME="$SAVED_HOME"
 rm -rf "$INST_HOME"
 
+# --- watch --hold: Stop hook blocks instead of ending the turn empty ---
+# The only automatic idle wake available to a host with no push channel. Codex
+# and Cursor fire Stop at the end of a turn and have nothing that can reach a
+# session parked at an empty prompt; holding keeps the seat reachable without
+# the agent remembering to run `agent-bus wait`.
+HOLD_HOME=$(mktemp -d)
+hb() { AGENT_BUS_HOME="$HOLD_HOME" AGENT_BUS_TOOL=codex AGENT_BUS_SESSION=hold1 "$BIN" "$@" </dev/null; }
+out=$(hb watch on --hold 4)
+assert_contains "watch --hold reports the hold" "holding 4s" "$out"
+HOLD_SEAT=$(hb whoami | awk '/^seat/{print $2}')
+
+# Nothing waiting: the hook blocks for the hold, then answers empty.
+t0=$(date +%s); out=$(hb stop-hook); t1=$(date +%s)
+assert_eq "hold with no mail still answers {}" "{}" "$(echo "$out" | jq -c .)"
+[ $((t1 - t0)) -ge 3 ] && assert_eq "hold actually blocked" "ok" "ok"   || assert_eq "hold actually blocked" "ok" "returned in $((t1-t0))s"
+
+# Mail already waiting: no reason to hold at all.
+AGENT_BUS_HOME="$HOLD_HOME" AGENT_BUS_TOOL=claude AGENT_BUS_SESSION=holdpeer "$BIN"   post --to "$HOLD_SEAT" --state question -m $'# hold-now
+
+x' >/dev/null
+t0=$(date +%s); out=$(hb stop-hook); t1=$(date +%s)
+assert_eq "waiting mail skips the hold" "block" "$(echo "$out" | jq -r '.decision // empty')"
+[ $((t1 - t0)) -le 2 ] && assert_eq "no needless delay" "ok" "ok"   || assert_eq "no needless delay" "ok" "took $((t1-t0))s"
+
+# Mail arriving mid-hold is what the feature is for.
+hb read >/dev/null
+( sleep 2; AGENT_BUS_HOME="$HOLD_HOME" AGENT_BUS_TOOL=claude AGENT_BUS_SESSION=holdpeer "$BIN"   post --to "$HOLD_SEAT" --state question -m $'# hold-mid
+
+y' >/dev/null ) &
+out=$(hb stop-hook); wait 2>/dev/null || true
+assert_eq "mail mid-hold wakes the seat" "block" "$(echo "$out" | jq -r '.decision // empty')"
+assert_contains "mid-hold wake carries the packet" "hold-mid" "$(echo "$out" | jq -r '.reason // empty')"
+
+# Default is unchanged: no hold, answer immediately.
+hb read >/dev/null; hb watch off >/dev/null; hb watch on >/dev/null
+t0=$(date +%s); out=$(hb stop-hook); t1=$(date +%s)
+assert_eq "no hold by default" "{}" "$(echo "$out" | jq -c .)"
+[ $((t1 - t0)) -le 1 ] && assert_eq "default returns at once" "ok" "ok"   || assert_eq "default returns at once" "ok" "took $((t1-t0))s"
+
+# A hold beyond the ceiling is clamped, not honoured.
+out=$(AGENT_BUS_HOME="$HOLD_HOME" AGENT_BUS_HOLD_MAX=10 AGENT_BUS_TOOL=codex   AGENT_BUS_SESSION=hold1 "$BIN" watch on --hold 9999 </dev/null)
+assert_contains "hold is clamped to the ceiling" "holding 10s" "$out"
+out=$(hb watch on --bogus 2>&1 || true)
+assert_contains "watch on rejects unknown flags" "unknown flag" "$out"
+hb watch off >/dev/null
+rm -rf "$HOLD_HOME"
+
 # --- init: one command to bring a seat up for a host check ---
 # watch on and selftest arm are separately easy to half-do, and a probe armed
 # with watch off reports the wake check SKIPPED, which reads like a pass.

@@ -107,6 +107,7 @@ bug and T1 already covers it.
 | Claude.app | Stop hook, plus inbox-socket poke | T2 applies. Launch env differs from a login shell; check PATH reaches `agent-bus`. |
 | `codex` CLI | Stop hook, turn boundary only | **T2 does not apply.** No socket, no resume: a Codex session idle at an empty prompt cannot be woken. Use `agent-bus wait`. |
 | Codex in ChatGPT.app | Stop hook, turn boundary only | T2 does not apply, same as the CLI. |
+| `cursor-agent` CLI | `followup_message`, turn boundary only | T2 does not apply. Separate binary from the app; both use the same adapter. |
 | Cursor.app | `followup_message`, turn boundary only | T2 does not apply. Hooks run from `~/.cursor`, not the workspace. See gotchas. |
 | `opencode` TUI | `session.synthetic({resume:true})` | T2 applies. Session must take one turn after plugin load. See gotchas. |
 | `opencode run` | none | Headless, one-shot. T1 only, and expect no `session.created`. |
@@ -171,7 +172,7 @@ Keep the result with the release. A surface that was not run is not a pass.
 
 ### v0.2.0 — 2026-09-19
 
-claude 2.1.278 · codex 0.154.0 · Cursor 3.21.13 · opencode 2.0.8
+claude 2.1.278 · codex 0.154.0 · Cursor 3.21.13 · cursor-agent 2026.09.15 · opencode 2.0.8
 
 | Surface | T1 | T2 | Notes |
 |---|---|---|---|
@@ -179,6 +180,7 @@ claude 2.1.278 · codex 0.154.0 · Cursor 3.21.13 · opencode 2.0.8
 | Claude.app | pass 5/5 | **pass, 3s** | Socket poke; `wake_count` stays 0 by design. |
 | `codex` CLI | pass 5/5 | n/a | Turn-boundary wake only. |
 | Codex in ChatGPT.app | pass 5/5 | n/a | Turn-boundary wake only. |
+| `cursor-agent` CLI | pass 5/5 | n/a | 2026.09.15-d2fe57e. Turn-boundary wake only. |
 | Cursor.app | pass 5/5 | n/a | Cursor 3.21.13. Turn-boundary wake only. |
 | `opencode` TUI | — | **pass, 4s** | `session.synthetic({resume:true})`, 2.0.8. |
 | `opencode run` | — | n/a | Headless one-shot, not run. |
@@ -186,8 +188,9 @@ claude 2.1.278 · codex 0.154.0 · Cursor 3.21.13 · opencode 2.0.8
 Both idle-wake paths are proven: the inbox socket on Claude, the synthetic
 resume on OpenCode. Every other surface is turn-boundary only, which T1 covers.
 
-Codex exports only `CODEX_SHELL` from both its CLI and the ChatGPT
-app, and both were run: same result, as expected.
+Codex exports only `CODEX_SHELL` from both its CLI and the ChatGPT app, and
+Cursor's two surfaces share one adapter. Both pairs were run separately anyway,
+and each pair agreed.
 
 `agent-bus init` run from a plain terminal rather than inside a harness arms a
 probe on a markerless `shell/<worktree>` seat that no hook will ever touch, so

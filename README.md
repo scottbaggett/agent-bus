@@ -125,8 +125,11 @@ turn ends, so a seat idle at an empty prompt is not woken by watch alone.
 Claude seats close that gap with the post-time socket poke and OpenCode
 resumes the session in-process. Codex and Cursor have neither, so
 `agent-bus watch on --hold <secs>` makes their Stop hook block that long
-waiting for mail rather than ending the turn — automatic, where
-`agent-bus wait` needed the agent to remember to run it.
+waiting for mail rather than ending the turn. The host's own hook timeout caps
+that at seconds, so when the hold comes up empty the hook continues the seat
+with an instruction to run `agent-bus wait`, which has no such ceiling and
+blocks in the shell for up to half an hour at no token cost. Automatic, where
+`wait` alone needed the agent to remember to run it.
 
 ### Scopes
 

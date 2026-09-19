@@ -463,6 +463,10 @@ WAKE_BUDGET="${AGENT_BUS_WAKE_BUDGET:-3}"
 # so the default sits under the lowest ceiling seen rather than over it.
 HOLD_MAX="${AGENT_BUS_HOLD_MAX:-25}"
 HOLD_POLL="${AGENT_BUS_HOLD_POLL:-3}"
+# Minimum gap between `wait` handoffs for one seat. Sized to wait's own default
+# timeout so a parked seat waits in the shell rather than bouncing through the
+# model once per turn.
+HANDOFF_COOLDOWN="${AGENT_BUS_HANDOFF_COOLDOWN:-1800}"
 
 # Serialize read-modify-write of the seat state file. Concurrent hook fires
 # (SessionStart heartbeat + digest) could otherwise interleave and drop a
@@ -2432,6 +2436,51 @@ cmd_stop_hook() {
   fi
   if [ -z "$msgs" ]; then
     set_wake_pending 0
+    # Hand off to `wait` when the hold came up empty. The hold can only be as
+    # long as the host's hook timeout allows — 25s by default — which catches
+    # mail landing right after a turn and nothing else. A supervisor posting a
+    # review five minutes later misses it entirely.
+    #
+    # `agent-bus wait` has no such ceiling: it runs as a tool call inside a
+    # turn rather than as a hook, so it can block for half an hour in a shell
+    # sleep loop at no token cost. The seat just has to be told to run it, and
+    # this continuation is that instruction — which is the whole point, since
+    # relying on the agent to remember was the thing that never worked.
+    #
+    # Costs one turn per idle period, not one per poll.
+    # Rate-limited, and that is load-bearing. Without it every turn that ends
+    # with no mail is continued into `wait`, `wait` times out, the next turn
+    # ends the same way, and the seat never returns to the human — a loop the
+    # agent cannot leave. One handoff per cooldown means at worst one wasted
+    # turn per window, and the cooldown is sized to `wait`'s own timeout so a
+    # seat that is genuinely parked stays parked in the shell, not in the model.
+    local last_handoff=0 now_h
+    now_h=$(now_epoch)
+    if [ -f "$(state_src)" ]; then
+      last_handoff=$(jq -r '.last_handoff // 0' "$(state_src)" 2>/dev/null || echo 0)
+      [[ "$last_handoff" =~ ^[0-9]+$ ]] || last_handoff=0
+    fi
+    if ((hold > 0)) && [ "${AGENT_BUS_HOLD_HANDOFF:-1}" = 1 ] \
+      && (( now_h - last_handoff >= HANDOFF_COOLDOWN )); then
+      write_state "$(read_ids)" "$(shown_counts)" "$(wake_count)" last_handoff "$now_h"
+      local hint
+      hint=$(printf 'agent-bus: nothing waiting after a %ss hold.\n' "$hold")
+      hint+=$(printf '\nDo not start new work. Run exactly:\n\n    agent-bus wait\n')
+      hint+=$(printf '\nIt blocks in the shell until supervisory mail arrives — no tokens, no polling —\n')
+      hint+=$(printf 'then returns so you can act. On timeout it returns a re-arm hint; run it again.\n')
+      hint+=$(printf 'This seat has watch on, so staying reachable while idle is the expected state.\n')
+      case "$TOOL" in
+        codex)
+          jq -n -c --arg r "$hint" --arg m "agent-bus: idle — handing off to agent-bus wait" \
+            '{decision:"block",prompt:$r,reason:$r,systemMessage:$m}'
+          ;;
+        *)
+          jq -n -c --arg r "$hint" --arg m "agent-bus: idle — handing off to agent-bus wait" \
+            '{decision:"block",reason:$r,systemMessage:$m}'
+          ;;
+      esac
+      return 0
+    fi
     quiet_exit
     return 0
   fi

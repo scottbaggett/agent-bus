@@ -206,6 +206,19 @@ Measured on Codex: a 30s Stop hook runs to completion and the human can type
 throughout, a 60s one is killed. Raise the ceiling only for a host measured to
 allow longer.
 
+A hold that short only catches mail landing seconds after a turn ends, so when
+it comes up empty the Stop hook continues the seat with an instruction to run
+`agent-bus wait`. That has no ceiling — it runs as a tool call inside a turn
+rather than as a hook — and blocks in a shell sleep loop for up to half an hour
+at no token cost. The seat only ever had to be told to run it, and this is
+what tells it. Costs one turn per idle period rather than one per poll.
+
+The handoff is rate-limited per seat by `AGENT_BUS_HANDOFF_COOLDOWN`, default
+1800s, and that limit is load-bearing: without it every turn ending with no
+mail is continued into `wait`, `wait` times out, the next turn ends the same
+way, and the seat never returns to the human. Real mail always outranks the
+handoff. `AGENT_BUS_HOLD_HANDOFF=0` disables it.
+
 When watch is on, the lifecycle **Stop** hook runs `agent-bus stop-hook`. If
 there are unread **supervisory** packets (`needs-review`, `blocked`, `handoff`,
 `question`) that this seat **owns**, it blocks the stop and feeds the digest

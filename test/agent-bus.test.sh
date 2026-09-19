@@ -901,8 +901,10 @@ out=$(hb watch on --hold 4)
 assert_contains "watch --hold reports the hold" "holding 4s" "$out"
 HOLD_SEAT=$(hb whoami | awk '/^seat/{print $2}')
 
-# Nothing waiting: the hook blocks for the hold, then answers empty.
-t0=$(date +%s); out=$(hb stop-hook); t1=$(date +%s)
+# Nothing waiting: the hook blocks for the hold, then answers empty. Handoff
+# off here so this tests the hold itself; the handoff has its own section.
+t0=$(date +%s); out=$(AGENT_BUS_HOME="$HOLD_HOME" AGENT_BUS_HOLD_HANDOFF=0 \
+  AGENT_BUS_TOOL=codex AGENT_BUS_SESSION=hold1 "$BIN" stop-hook </dev/null); t1=$(date +%s)
 assert_eq "hold with no mail still answers {}" "{}" "$(echo "$out" | jq -c .)"
 [ $((t1 - t0)) -ge 3 ] && assert_eq "hold actually blocked" "ok" "ok"   || assert_eq "hold actually blocked" "ok" "returned in $((t1-t0))s"
 

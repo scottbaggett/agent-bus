@@ -1490,9 +1490,14 @@ cmd_log() {
 }
 
 # Host hook configs, overridable for tests.
+# Where this CLI lives, so doctor can compare an installed plugin snapshot
+# against the source it came from.
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd || printf '')"
 CLAUDE_SETTINGS_FILE="${AGENT_BUS_CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
 CODEX_HOOKS_FILE="${AGENT_BUS_CODEX_HOOKS:-$HOME/.codex/hooks.json}"
 CURSOR_HOOKS_FILE="${AGENT_BUS_CURSOR_HOOKS:-$HOME/.cursor/hooks.json}"
+OPENCODE_CONFIG_FILE="${AGENT_BUS_OPENCODE_CONFIG:-$HOME/.config/opencode/opencode.json}"
+OPENCODE_PLUGIN_FILE="${AGENT_BUS_OPENCODE_PLUGIN:-$HOME/.config/opencode/plugins/agent-bus/index.ts}"
 
 # Whether the hook lines a host actually has still match what install-hooks.sh
 # would write. An install made by an older version keeps firing, so nothing
@@ -1504,6 +1509,39 @@ CURSOR_HOOKS_FILE="${AGENT_BUS_CURSOR_HOOKS:-$HOME/.cursor/hooks.json}"
 # Prints one line per host; returns 1 if any host is stale or missing.
 hooks_report() {
   local rc=0 host file cmds n_total n_pin n_stop label
+  # OpenCode integrates through a plugin, not hook lines, and was missing from
+  # this loop entirely. `doctor` therefore printed nothing for it, and an
+  # OpenCode seat read that silence as "no hooks installed" and told its user
+  # watch could never wake it — while its own hooks were firing that second.
+  # Absence of a row is not evidence of absence of an install.
+  local oc_state='not installed' oc_detail=''
+  if [ -f "$OPENCODE_PLUGIN_FILE" ]; then
+    if jq -e --arg m "plugins/agent-bus" \
+      '(.plugin // []) | any(contains($m))' "$OPENCODE_CONFIG_FILE" >/dev/null 2>&1; then
+      oc_state=ok
+      # The plugin is copied as a snapshot, so an old copy keeps running happily
+      # while the repo moves on. Compare against the source it was copied from.
+      local src="$ROOT_DIR/plugins/agent-bus/index.ts"
+      if [ -f "$src" ] && ! cmp -s "$src" "$OPENCODE_PLUGIN_FILE"; then
+        oc_state=STALE
+        oc_detail='installed plugin differs from this checkout'
+      fi
+    else
+      oc_state=STALE
+      oc_detail='plugin present but not registered in opencode.json'
+    fi
+  fi
+  local oc_live
+  oc_live=$(find "$BUS/seats" -name 'opencode_*.json' 2>/dev/null | while read -r f; do
+    jq -r 'select((.last_hook // 0) > (now - 7200)) | .addr' "$f" 2>/dev/null || true
+  done | grep -c . || true)
+  case "$oc_state" in
+    ok)   printf '%-7s ok (plugin, %s seat(s) with hooks firing)\n' opencode "$oc_live" ;;
+    STALE) printf '%-7s STALE — %s — run ./install-hooks.sh --opencode, then restart OpenCode\n' \
+             opencode "$oc_detail"; rc=1 ;;
+    *)    printf '%-7s not installed — run ./install-hooks.sh --opencode\n' opencode; rc=1 ;;
+  esac
+
   for host in claude codex cursor; do
     case "$host" in
       claude) file="$CLAUDE_SETTINGS_FILE" ;;

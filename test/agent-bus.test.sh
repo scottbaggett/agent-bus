@@ -950,6 +950,34 @@ assert_contains "watch on rejects unknown flags" "unknown flag" "$out"
 hb watch off >/dev/null
 rm -rf "$HOLD_HOME"
 
+# --- doctor: opencode is a host too ---
+# doctor looped over claude/codex/cursor only, so it printed nothing for
+# OpenCode. An OpenCode seat read that silence as "no hooks installed" and told
+# its user watch could never wake it, while its own hooks were firing that
+# second. Absence of a row is not evidence of absence of an install.
+DOC_HOME=$(mktemp -d)
+mkdir -p "$DOC_HOME/plugins/agent-bus"
+doc() { AGENT_BUS_HOME="$BUS_HOME" AGENT_BUS_OPENCODE_CONFIG="$DOC_HOME/opencode.json"   AGENT_BUS_OPENCODE_PLUGIN="$DOC_HOME/plugins/agent-bus/index.ts" "$BIN" doctor 2>&1; }
+
+printf '{}\n' >"$DOC_HOME/opencode.json"
+out=$(doc)
+assert_contains "doctor names opencode when absent" "opencode not installed" "$out"
+
+cp "$ROOT/plugins/agent-bus/index.ts" "$DOC_HOME/plugins/agent-bus/index.ts"
+out=$(doc)
+assert_contains "plugin unregistered is stale" "not registered in opencode.json" "$out"
+
+printf '{"plugin":["./plugins/agent-bus"]}\n' >"$DOC_HOME/opencode.json"
+out=$(doc)
+assert_contains "registered current plugin is ok" "opencode ok (plugin" "$out"
+
+# The plugin is copied as a snapshot, so an old copy keeps running happily
+# while the repo moves on. That drift is invisible without this check.
+printf '// drifted\n' >>"$DOC_HOME/plugins/agent-bus/index.ts"
+out=$(doc)
+assert_contains "a drifted snapshot is stale" "differs from this checkout" "$out"
+rm -rf "$DOC_HOME"
+
 # --- init: one command to bring a seat up for a host check ---
 # watch on and selftest arm are separately easy to half-do, and a probe armed
 # with watch off reports the wake check SKIPPED, which reads like a pass.

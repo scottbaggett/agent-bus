@@ -950,6 +950,44 @@ assert_contains "watch on rejects unknown flags" "unknown flag" "$out"
 hb watch off >/dev/null
 rm -rf "$HOLD_HOME"
 
+# --- roles: abandoned registrations do not live forever ---
+# Nothing pruned the role registry, so names accumulated pointing at seats that
+# died weeks ago — 41 of them here, nearly all dead, including both PM rows. A
+# name is postable as long as it is registered, so `--to @design` delivered to
+# a corpse and reported success: the silent non-delivery this bus exists to stop.
+RL_HOME=$(mktemp -d)
+rl() { AGENT_BUS_HOME="$RL_HOME" AGENT_BUS_NO_AUTO_GC=1 "$@" </dev/null; }
+
+# Session end drops this seat's names: a finished session is not @reviewer.
+rl env AGENT_BUS_TOOL=codex AGENT_BUS_SESSION=rl1 "$BIN" role reviewer >/dev/null
+rl env AGENT_BUS_TOOL=codex AGENT_BUS_SESSION=rl1 "$BIN" role pm >/dev/null
+out=$(rl env AGENT_BUS_TOOL=codex AGENT_BUS_SESSION=rl1 "$BIN" release --roles)
+assert_contains "release --roles drops this seat's names" "released 2 role(s)" "$out"
+out=$(rl env AGENT_BUS_TOOL=codex AGENT_BUS_SESSION=rl1 "$BIN" role)
+assert_not_contains "the name is gone" "reviewer" "$out"
+
+# A seat's names survive its own mid-session cleanup of claims.
+rl env AGENT_BUS_TOOL=codex AGENT_BUS_SESSION=rl1 "$BIN" role keeper >/dev/null
+rl env AGENT_BUS_TOOL=codex AGENT_BUS_SESSION=rl1 "$BIN" release --all >/dev/null
+out=$(rl env AGENT_BUS_TOOL=codex AGENT_BUS_SESSION=rl1 "$BIN" role)
+assert_contains "release --all leaves roles alone" "keeper" "$out"
+
+# gc is the backstop for a seat that crashed without cleaning up. The window is
+# much longer than SEAT_TTL: offline overnight keeps the name, gone for days
+# does not.
+out=$(rl env AGENT_BUS_ROLE_TTL=99999 AGENT_BUS_TOOL=codex AGENT_BUS_SESSION=rl1 "$BIN" gc)
+out=$(rl env AGENT_BUS_TOOL=codex AGENT_BUS_SESSION=rl1 "$BIN" role)
+assert_contains "a live holder keeps its role through gc" "keeper" "$out"
+# The real abandoned case: the holder's seat is gone entirely, which is what a
+# crashed session leaves behind once its seat ages out. No clock involved.
+RL_SEAT=$(rl env AGENT_BUS_TOOL=codex AGENT_BUS_SESSION=rl1 "$BIN" whoami | awk '/^seat/{print $2}')
+rm -f "$RL_HOME/seats/$(printf '%s' "$RL_SEAT" | tr '/:@ ' '____').json"
+out=$(rl env AGENT_BUS_TOOL=claude AGENT_BUS_SESSION=rlgc "$BIN" gc)
+assert_contains "gc reports abandoned roles" "abandoned roles" "$out"
+out=$(rl env AGENT_BUS_TOOL=codex AGENT_BUS_SESSION=rl1 "$BIN" role)
+assert_not_contains "an abandoned role is pruned" "keeper" "$out"
+rm -rf "$RL_HOME"
+
 # --- doctor: opencode is a host too ---
 # doctor looped over claude/codex/cursor only, so it printed nothing for
 # OpenCode. An OpenCode seat read that silence as "no hooks installed" and told
@@ -1058,7 +1096,7 @@ assert_contains "installer removes the pre-v2 flat file" 'rm -f "$OPENCODE_PLUGI
 assert_contains "installer writes through symlinks" "resolve_link" "$inst"
 # Every managed line carries the tool pin, including release: hooks_report
 # counts an unpinned line as a stale install, which the installer could not clear.
-assert_contains "installer pins the release line" 'AGENT_BUS_TOOL=%s %s release --all' "$inst"
+assert_contains "installer pins the release line" 'AGENT_BUS_TOOL=%s %s release --roles --all' "$inst"
 
 # Hook capture writes host env to disk. It records identity markers only — a
 # prefix sweep had been persisting CLAUDE_CODE_MESSAGING_TOKEN in the clear.

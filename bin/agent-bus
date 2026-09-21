@@ -467,6 +467,10 @@ WAKE_BUDGET="${AGENT_BUS_WAKE_BUDGET:-3}"
 # Codex; that was a misread of an unrelated hook failure on the same host.)
 HOLD_MAX="${AGENT_BUS_HOLD_MAX:-25}"
 HOLD_POLL="${AGENT_BUS_HOLD_POLL:-3}"
+# How long a role survives its holder going quiet. Much longer than SEAT_TTL on
+# purpose: a seat offline overnight keeps its name, a seat gone for days does
+# not. gc drops the rest.
+ROLE_TTL="${AGENT_BUS_ROLE_TTL:-172800}"
 # Minimum gap between `wait` handoffs for one seat. Sized to wait's own default
 # timeout so a parked seat waits in the shell rather than bouncing through the
 # model once per turn.
@@ -1419,7 +1423,29 @@ cmd_claim() {
   done
 }
 
+# Drop every role this seat holds. Session end is the honest moment for it: a
+# finished session is not @reviewer any more, and a name left pointing at it
+# makes `--to @reviewer` look deliverable when nothing is listening.
+release_my_roles() {
+  local n=0 f holder
+  for f in "$BUS"/state/roles/*; do
+    [ -f "$f" ] || continue
+    holder=$(jq -r '.addr // empty' "$f" 2>/dev/null || true)
+    [ -n "$holder" ] || holder=$(head -1 "$f" 2>/dev/null | tr -d '\n')
+    { [ "$holder" = "$ADDR" ] || [ "$holder" = "$SCOPE" ]; } || continue
+    rm -f "$f"
+    n=$((n + 1))
+  done
+  printf '%s' "$n"
+}
+
 cmd_release() {
+  if [ "${1:-}" = --roles ]; then
+    local n; n=$(release_my_roles)
+    printf 'released %s role(s) held by %s\n' "$n" "$ADDR"
+    shift
+    [ $# -eq 0 ] && return
+  fi
   if [ "${1:-}" = --all ]; then
     for f in "$BUS"/claims/*.json; do
       [ -f "$f" ] || continue
@@ -2252,8 +2278,33 @@ cmd_gc() {
     n_state=$((n_state + 1))
   done
 
-  printf 'gc: removed %s expired claims, %s stale seats, %s old message bodies, %s stale state files; rotated %s ledger rows (>%sd)\n' \
-    "$n_claim" "$n_seat" "$n_msg" "$n_state" "$n_rot" "$GC_DAYS"
+  # Roles outlived everything. Nothing pruned them, so a registry filled with
+  # names pointing at seats that died weeks ago — and a name is postable as
+  # long as it is registered, so `--to @design` delivered to a corpse and
+  # reported success. That is the silent non-delivery this bus exists to stop.
+  #
+  # The window is deliberately much longer than SEAT_TTL: a seat that is merely
+  # offline overnight must keep its name, and only a holder gone past
+  # ROLE_TTL loses it.
+  local n_role=0 role_cut=$(( $(now_epoch) - ROLE_TTL ))
+  for f in "$BUS"/state/roles/*; do
+    [ -f "$f" ] || continue
+    local holder seat_f held_epoch
+    holder=$(jq -r '.addr // empty' "$f" 2>/dev/null || true)
+    # The repo PM file is a bare address, not JSON.
+    [ -n "$holder" ] || holder=$(head -1 "$f" 2>/dev/null | tr -d '\n')
+    [ -n "$holder" ] || continue
+    seat_f="$BUS/seats/$(slugify "$holder").json"
+    held_epoch=0
+    [ -f "$seat_f" ] && held_epoch=$(jq -r '.epoch // 0' "$seat_f" 2>/dev/null || echo 0)
+    [[ "$held_epoch" =~ ^[0-9]+$ ]] || held_epoch=0
+    ((held_epoch >= role_cut)) && continue
+    rm -f "$f"
+    n_role=$((n_role + 1))
+  done
+
+  printf 'gc: removed %s expired claims, %s stale seats, %s old message bodies, %s stale state files, %s abandoned roles; rotated %s ledger rows (>%sd)\n' \
+    "$n_claim" "$n_seat" "$n_msg" "$n_state" "$n_role" "$n_rot" "$GC_DAYS"
 }
 
 # Opportunistic gc: hook entry points (digest, heartbeat, stop-hook) call this
@@ -2598,6 +2649,7 @@ agent-bus — handoff bus for coding agents sharing repos/worktrees.
                                   PM whose scope covers it)
   claim <path>...                 take an advisory claim (warns if contested)
   release <path>... | --all       drop claims (own claims only)
+  release --roles                 drop every role this seat holds (session end)
   release --force <path>...       break another seat's live claim (announced + logged)
   claims                          list active claims
   triage                          unresolved supervisory packets by worktree,

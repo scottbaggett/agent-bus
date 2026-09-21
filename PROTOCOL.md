@@ -135,6 +135,13 @@ agent-bus role research --clear    # release it
 - One holder per name; taking a name from a **live** holder requires
   `--force`, exactly like the PM role. Re-registering moves the alias — the
   name follows the work, not the worktree.
+- A name is released when its holder's session ends, and `gc` drops any whose
+  holder has been gone past `AGENT_BUS_ROLE_TTL` (default 48h) as a backstop
+  for a session that crashed. The window is deliberately far longer than
+  `SEAT_TTL`: a seat offline overnight keeps its name. Without this the
+  registry only ever grew, and since a name is postable as long as it is
+  registered, `--to @design` delivered to a seat that died weeks ago and
+  reported success.
 - Names are `[a-z0-9-]`, max 32 chars, and may not be a reserved scope
   (`here`, `repo`, `all`, `pm`, `codex`, `claude`, `cursor`, `opencode`, `shell`), so a
   name can never shadow a builtin.

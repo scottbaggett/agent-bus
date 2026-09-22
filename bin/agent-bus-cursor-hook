@@ -110,7 +110,9 @@ case "$EVENT" in
     emit "$out"
     ;;
   sessionEnd)
-    "$BIN" release --all >/dev/null 2>&1 || true
+    # Full stand-down, not just claims: a released claim with watch still on and
+    # a name still held leaves a dead seat looking reachable and addressable.
+    "$BIN" offboard >/dev/null 2>&1 || true
     emit '{}'
     ;;
   stop)

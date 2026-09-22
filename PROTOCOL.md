@@ -315,6 +315,28 @@ EOF
 Reply with `--re <id>`. Close a thread for everyone with
 `agent-bus resolve <id>` — otherwise it stays unread for seats that never saw it.
 
+## Offboarding
+
+A seat that stops working should let go of everything it holds:
+
+```
+agent-bus offboard
+```
+
+Watch off, every name released, every claim released, and any supervisory
+thread the seat still owns listed by id. It will not resolve those: closing a
+review thread is a judgement about the work, not about the session.
+
+Hosts run this at session end — Claude and Codex through a `SessionEnd` hook,
+Cursor through the adapter's `sessionEnd`, OpenCode from the plugin's
+`session.deleted`. A session that crashes never reaches any of them, which is
+what `gc` and the role TTL are for, so an agent told to stand down should run
+it directly rather than assume the host will.
+
+Leaving a seat half-offboarded is not tidy-up debt: watch left on keeps a dead
+seat counted as reachable, and a held name makes `--to @reviewer` resolve to a
+session that has exited and report success.
+
 ## Claims
 
 Claims are **advisory** and exist to stop two agents editing one file in the

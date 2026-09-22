@@ -1439,6 +1439,36 @@ release_my_roles() {
   printf '%s' "$n"
 }
 
+# Everything a seat should let go of when it stops working. Offboarding was
+# four commands nobody ran in full: watch left on kept a dead seat counted as
+# reachable, a held name made `--to @reviewer` resolve to nothing, and claims
+# blocked paths until they expired. Hosts call this at session end; an agent
+# told to stand down runs it directly.
+cmd_offboard() {
+  [ $# -eq 0 ] || die "offboard: takes no arguments"
+  local roles claims=0 f
+  roles=$(release_my_roles)
+  for f in "$BUS"/claims/*.json; do
+    [ -f "$f" ] || continue
+    local h; h=$(jq -r '.addr // empty' "$f" 2>/dev/null || true)
+    { [ "$h" = "$ADDR" ] || [ "$h" = "$SCOPE" ]; } || continue
+    rm -f "$f"; claims=$((claims + 1))
+  done
+  watch_set 0
+  printf 'offboarded %s — watch off, %s role(s) released, %s claim(s) released\n' \
+    "$ADDR" "$roles" "$claims"
+  # Threads this seat owns do not close on their own, and the bus will not
+  # close them: resolution is a judgement about the work, not about the
+  # session. Naming them is the most it can honestly do.
+  local open_n
+  open_n=$(select_unread 1 0 1 2>/dev/null | grep -c . || true)
+  if [ "${open_n:-0}" != 0 ]; then
+    printf '\n%s supervisory thread(s) still open for this seat:\n' "$open_n"
+    select_unread 1 0 1 2>/dev/null | jq -r '"  [\(.state)] \(.from): \(.subject) (\(.id))"' | sanitize
+    printf '\nHand them on or close them: agent-bus post --re <id> ... | agent-bus resolve <id>\n'
+  fi
+}
+
 cmd_release() {
   if [ "${1:-}" = --roles ]; then
     local n; n=$(release_my_roles)
@@ -2650,6 +2680,8 @@ agent-bus — handoff bus for coding agents sharing repos/worktrees.
   claim <path>...                 take an advisory claim (warns if contested)
   release <path>... | --all       drop claims (own claims only)
   release --roles                 drop every role this seat holds (session end)
+  offboard                        stand this seat down: watch off, roles and
+                                  claims released, open threads listed
   release --force <path>...       break another seat's live claim (announced + logged)
   claims                          list active claims
   triage                          unresolved supervisory packets by worktree,
@@ -2755,6 +2787,7 @@ case "$cmd" in
   resolve) cmd_resolve "$@" ;;
   claim) touch_seat; cmd_claim "$@" ;;
   release) cmd_release "$@" ;;
+  offboard) touch_seat; cmd_offboard "$@" ;;
   claims) cmd_claims ;;
   triage) touch_seat; cmd_triage ;;
   log) cmd_log "$@" ;;

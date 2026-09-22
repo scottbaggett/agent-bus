@@ -40,6 +40,7 @@ agent-bus role pm --wt <w>       # supervising just one worktree (coexists with 
 agent-bus role <name>            # take a lane alias (e.g. research) — peers target --to @<name>
 agent-bus watch on               # when coordinating — Stop-hook wake on supervisory mail
 agent-bus triage                 # PMs: unresolved review threads by worktree/age — resolve the done ones
+agent-bus offboard               # standing down: watch off, roles + claims released
 ```
 
 Rules:
@@ -51,7 +52,12 @@ Rules:
 3. Claims are advisory. `CONTESTED` → post a `question`, don't overwrite. Only the
    holder can `release` a live claim.
 4. Post before finishing a turn that changed code another seat cares about.
-5. When the user is coordinating multiple seats, `agent-bus watch on` so Stop
+5. Told to stand down, or finished with multi-seat work? `agent-bus offboard`.
+   It drops watch, roles and claims in one step and lists any supervisory
+   thread you still own — hand those on or resolve them, the bus will not close
+   them for you. Hosts run it at session end, but a crashed session never gets
+   there, so run it yourself when you are told to stop.
+6. When the user is coordinating multiple seats, `agent-bus watch on` so Stop
    continues you on `needs-review` / `blocked` / `handoff` / `question` without
    a manual poll loop. `agent-bus read` acks packets but does **not** reset the
    wake budget — only `resolve` (or `watch reset`) does. Turn watch off when done.

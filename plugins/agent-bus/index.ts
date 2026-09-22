@@ -152,6 +152,7 @@ function runner(directory: string) {
       }
     },
     digest: (sessionID: string) => run(["digest"], sessionID),
+    offboard: (sessionID: string) => run(["offboard"], sessionID),
     /**
      * Ask the CLI whether this seat should be continued, and deliver the
      * continuation. stop-hook is the single source of truth for watch on/off,
@@ -334,6 +335,12 @@ const v2: Plugin.Plugin = {
             const sid = typeof data.sessionID === "string" ? data.sessionID : undefined
             if (!sid) continue
             if (event.type === "session.deleted") {
+              // Forgetting the session in memory is not cleanup: watch stayed
+              // on, claims stayed held and names stayed registered, so a chat
+              // that had exited still looked reachable and still answered to
+              // `--to @reviewer`. OpenCode has no session-end hook, so this
+              // event is the only place to stand the seat down.
+              if (verdict.get(sid)) await bus.offboard(sid)
               verdict.delete(sid)
               bus.forget(sid)
               continue

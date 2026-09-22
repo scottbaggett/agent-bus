@@ -988,6 +988,44 @@ out=$(rl env AGENT_BUS_TOOL=codex AGENT_BUS_SESSION=rl1 "$BIN" role)
 assert_not_contains "an abandoned role is pruned" "keeper" "$out"
 rm -rf "$RL_HOME"
 
+# --- offboard: one command to stand a seat down ---
+# Offboarding was four commands nobody ran in full. Watch left on kept a dead
+# seat counted as reachable, a held name made --to @reviewer resolve to a
+# session that had exited, and claims blocked paths until they expired.
+OB_HOME=$(mktemp -d)
+ob() { AGENT_BUS_HOME="$OB_HOME" AGENT_BUS_NO_PUSH=1 AGENT_BUS_TOOL=codex   AGENT_BUS_SESSION=ob1 "$BIN" "$@" </dev/null; }
+ob watch on >/dev/null
+ob role reviewer >/dev/null
+ob claim README.md >/dev/null
+OB_SEAT=$(ob whoami | awk '/^seat/{print $2}')
+AGENT_BUS_HOME="$OB_HOME" AGENT_BUS_NO_PUSH=1 AGENT_BUS_TOOL=claude AGENT_BUS_SESSION=obpeer   "$BIN" post --to "$OB_SEAT" --state needs-review -m $'# still-open\n\nreview' >/dev/null
+
+out=$(ob offboard)
+assert_contains "offboard reports the stand-down" "watch off" "$out"
+assert_contains "offboard releases the role" "1 role(s) released" "$out"
+assert_contains "offboard releases the claim" "1 claim(s) released" "$out"
+# It will not close a review thread: resolution is a judgement about the work,
+# not about the session. Naming them is the most it can honestly do.
+assert_contains "offboard names open threads" "still-open" "$out"
+assert_contains "offboard says how to close them" "agent-bus resolve" "$out"
+
+out=$(ob watch); assert_contains "watch is off after offboard" "watch off" "$out"
+out=$(ob role); assert_not_contains "the name is gone" "reviewer" "$out"
+out=$(ob claims); assert_contains "claims are gone" "no active claims" "$out"
+out=$(ob offboard foo 2>&1 || true)
+assert_contains "offboard takes no arguments" "takes no arguments" "$out"
+rm -rf "$OB_HOME"
+
+# Every host stands its seat down, not just Claude. Codex had no SessionEnd at
+# all and Cursor released claims only, so those seats never fully cleaned up.
+inst=$(<"$ROOT/install-hooks.sh")
+assert_contains "session end offboards" "%s offboard" "$inst"
+assert_contains "codex gets a SessionEnd" 'add_group SessionEnd "$(release_cmd codex)"' "$inst"
+cur=$(<"$ROOT/bin/agent-bus-cursor-hook")
+assert_contains "cursor sessionEnd offboards" '"$BIN" offboard' "$cur"
+oc=$(<"$ROOT/plugins/agent-bus/index.ts")
+assert_contains "opencode offboards on session.deleted" "bus.offboard(sid)" "$oc"
+
 # --- doctor: opencode is a host too ---
 # doctor looped over claude/codex/cursor only, so it printed nothing for
 # OpenCode. An OpenCode seat read that silence as "no hooks installed" and told
@@ -1096,7 +1134,7 @@ assert_contains "installer removes the pre-v2 flat file" 'rm -f "$OPENCODE_PLUGI
 assert_contains "installer writes through symlinks" "resolve_link" "$inst"
 # Every managed line carries the tool pin, including release: hooks_report
 # counts an unpinned line as a stale install, which the installer could not clear.
-assert_contains "installer pins the release line" 'AGENT_BUS_TOOL=%s %s release --roles --all' "$inst"
+assert_contains "installer pins the session-end line" 'AGENT_BUS_TOOL=%s %s offboard' "$inst"
 
 # Hook capture writes host env to disk. It records identity markers only — a
 # prefix sweep had been persisting CLAUDE_CODE_MESSAGING_TOKEN in the clear.

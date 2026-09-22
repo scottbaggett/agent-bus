@@ -74,7 +74,10 @@ heartbeat_cmd() { printf 'AGENT_BUS_VIA=hook AGENT_BUS_TOOL=%s %s heartbeat 2>/d
 # Pinned like every other line: hooks_report counts a line without the pin as
 # a stale install, so an unpinned release line made `doctor` report STALE on a
 # freshly-run installer with no way to clear it.
-release_cmd() { printf 'AGENT_BUS_VIA=hook AGENT_BUS_TOOL=%s %s release --roles --all >/dev/null 2>&1 || true %s' "$1" "$BIN" "$MARKER"; }
+# Session end stands the seat down entirely: watch off, roles and claims
+# released. Leaving watch on kept a dead seat counted as reachable, and a held
+# name made `--to @reviewer` resolve to a session that had exited.
+release_cmd() { printf 'AGENT_BUS_VIA=hook AGENT_BUS_TOOL=%s %s offboard >/dev/null 2>&1 || true %s' "$1" "$BIN" "$MARKER"; }
 # Stop hook: always emit JSON ({} or decision:block). Heartbeat is inside stop-hook.
 stop_cmd() { printf 'AGENT_BUS_VIA=hook AGENT_BUS_TOOL=%s %s stop-hook 2>/dev/null || echo "{}" %s' "$1" "$BIN" "$MARKER"; }
 # Cursor does not document whether `command` runs through a shell, so this
@@ -144,6 +147,7 @@ install_codex() {
     out=$(printf '%s' "$out" | add_group UserPromptSubmit "$(digest_cmd codex)")
     # Codex Stop requires JSON on stdout; stop-hook emits {} or decision:block.
     out=$(printf '%s' "$out" | add_group Stop "$(stop_cmd codex)")
+    out=$(printf '%s' "$out" | add_group SessionEnd "$(release_cmd codex)")
   fi
   printf '%s\n' "$out" | jq . >"$CODEX_HOOKS.tmp" && mv "$CODEX_HOOKS.tmp" "$CODEX_HOOKS"
   echo "codex:  $( ((uninstall)) && echo removed || echo installed ) (backup: $CODEX_HOOKS.agent-bus.bak)"

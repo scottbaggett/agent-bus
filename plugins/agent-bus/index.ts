@@ -125,7 +125,7 @@ function runner(directory: string) {
     /**
      * A turn ended. This is the reliable idle signal: session.idle is in the
      * v2 schema but was not observed on this host, and gating the wake on it
-     * alone left every OpenCode 2 seat unwakeable even with watch on. The
+     * alone left every OpenCode 2 seat unwakeable. The
      * execution.* events do fire, so idleness is derived from them and
      * session.idle is treated as a second, optional source.
      */
@@ -155,15 +155,13 @@ function runner(directory: string) {
     offboard: (sessionID: string) => run(["offboard"], sessionID),
     /**
      * Ask the CLI whether this seat should be continued, and deliver the
-     * continuation. stop-hook is the single source of truth for watch on/off,
-     * unread selection, MAX_SHOWS, WAKE_BUDGET, and the PM stale-thread nag.
+     * continuation. stop-hook is the single source of truth for which owned
+     * items wake this seat and for WAKE_BUDGET.
      *
-     * The CLI spends a wake against WAKE_BUDGET inside stop-hook, before this
-     * process knows whether the host accepted the text. So `deliver` is awaited
-     * and retried once before the session is marked woken: an injection the
-     * host dropped would otherwise burn a wake AND leave the packet unsurfaced
-     * until the budget ran out. The packet itself is never lost either way —
-     * stop-hook does not mark it read, so the next digest still carries it.
+     * stop-hook spends a wake and marks the items read before this process
+     * knows whether the host accepted the text, so `deliver` is retried once.
+     * If both attempts fail the items drop out of the digest but stay open:
+     * they still show in `agent-bus triage` under their owner.
      */
     async wake(sessionID: string, deliver: (text: string) => Promise<boolean>) {
       const state = sessions.get(sessionID)
@@ -323,7 +321,7 @@ const v2: Plugin.Plugin = {
     // its first turn. The practical consequence is that a plugin start or
     // reload cannot see a session that is sitting idle right then; that session
     // is picked up as soon as it takes one more turn. Reinstalling the plugin
-    // under an idle watch-enabled chat therefore leaves it unwakeable until the
+    // under an idle chat therefore leaves it unwakeable until the
     // human prompts it once.
     const controller = new AbortController()
     void (async () => {
@@ -335,10 +333,9 @@ const v2: Plugin.Plugin = {
             const sid = typeof data.sessionID === "string" ? data.sessionID : undefined
             if (!sid) continue
             if (event.type === "session.deleted") {
-              // Forgetting the session in memory is not cleanup: watch stayed
-              // on, claims stayed held and names stayed registered, so a chat
-              // that had exited still looked reachable and still answered to
-              // `--to @reviewer`. OpenCode has no session-end hook, so this
+              // Forgetting the session in memory is not cleanup: claims stayed
+              // held and the PM role stayed registered, so a chat that had
+              // exited still looked reachable. OpenCode has no session-end hook, so this
               // event is the only place to stand the seat down.
               if (verdict.get(sid)) await bus.offboard(sid)
               verdict.delete(sid)

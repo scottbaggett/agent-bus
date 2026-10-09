@@ -177,6 +177,51 @@ assert_has "offboard drops the PM role and claims" "1 role(s), 1 claim(s) releas
 assert_has "offboard lists items still owned" "pm owns this" "$out"
 assert_has "PM role is gone" "no PM registered" "$(a role)"
 
+# --- lanes: a feature's seats, across worktrees, with their own PM ---
+l1() { seat l1 claude wl1 "$@"; }
+l2() { seat l2 opencode wl2 "$@"; }
+lp() { seat lp claude wlp "$@"; }
+ot() { seat ot claude wot "$@"; }
+L1=$(addr l1); L2=$(addr l2); LP=$(addr lp)
+out=$(l1 lane here 2>&1 || true)
+assert_has "reserved lane names are refused" "not a lane name" "$out"
+l1 lane spaces >/dev/null; l2 lane spaces >/dev/null; ot lane other >/dev/null; lp who >/dev/null
+assert_has "whoami shows the lane" "lane     spaces" "$(l1 whoami)"
+assert_has "who tags lane members" "@spaces" "$(lp who | grep "$L1")"
+out=$(l1 post --to @nolane -m x 2>&1 || true)
+assert_has "an unknown lane is refused" "unknown scope" "$out"
+out=$(l1 post --to @pm -m x 2>&1 || true)
+assert_has "@pm with no lane or repo PM is refused" "no PM registered for lane @spaces" "$out"
+ot read >/dev/null; l2 read >/dev/null
+l1 post --to @spaces -m $'# lane news\n\nhi' >/dev/null
+assert_has "@lane reaches lane members in other worktrees" "lane news" "$(l2 read --peek)"
+assert_lacks "@lane skips other lanes" "lane news" "$(ot read --peek)"
+lp role pm --lane spaces >/dev/null
+assert_has "role shows the lane PM" "PM for lane @spaces: $LP" "$(lp role)"
+out=$(ot role pm --lane spaces 2>&1 || true)
+assert_has "live lane PM takeover needs --force" "--force" "$out"
+lid=$(l1 post --to "$L2" --state needs-review -m $'# lane review\n\nx' | idof)
+oid=$(ot post --to claude/wsomeone --state blocked -m $'# other lane stuck\n\nx' | idof)
+out=$(lp read --peek)
+assert_has "lane PM gets a copy of its lane's work" "lane review" "$out"
+assert_lacks "lane PM does not see other lanes' work" "other lane stuck" "$out"
+assert_has "lane PM is woken for its lane" "block" "$(lp stop-hook </dev/null | jq -r .decision)"
+pid=$(l1 post --to @pm --state question -m $'# ask lane pm\n\nx' | idof)
+assert_has "@pm from a lane seat reaches the lane PM" "ask lane pm" "$(lp read --peek)"
+bid=$(l1 post --to @spaces --state blocked -m $'# lane blocker\n\nx' | idof)
+out=$(lp triage --lane spaces)
+assert_has "lane broadcasts are owned by the lane PM" "owner $LP" "$out"
+assert_lacks "triage --lane filters to the lane" "other lane stuck" "$out"
+assert_has "lane PM can close its lane's items" "resolved $lid (done)" "$(lp resolve "$lid" --reason done)"
+out=$(lp resolve "$oid" --reason done 2>&1 || true)
+assert_has "lane PM cannot close other lanes' items" "not its sender" "$out"
+assert_has "lane PM packets are marked as the PM's" "from the PM your user put in charge" \
+  "$(lp post --to "$L1" --state handoff -m '# lane task' >/dev/null; l1 read --peek)"
+assert_has "offboard releases the lane PM role" "1 role(s)" "$(lp offboard)"
+assert_has "lane PM is gone" "no PM registered for lane @spaces" "$(lp role --lane spaces)"
+l1 lane --clear >/dev/null
+assert_has "a seat can leave its lane" "lane     (none)" "$(l1 whoami)"
+
 # --- safety ---
 out=$("$BIN" show ../../etc/passwd 2>&1 || true)
 assert_has "show refuses non-ids" "needs a packet id" "$out"

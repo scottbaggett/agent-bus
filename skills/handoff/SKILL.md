@@ -70,10 +70,17 @@ stay open until closed; `done` and `fyi` are messages.
 
 ## "you're the PM / oversee these agents"
 
+Supervising one feature (the usual case): put its seats in a lane and take that
+lane's PM role.
+
 ```sh
-agent-bus role pm      # receive every work item in the repo
-agent-bus triage       # what is open; GONE owners first
+agent-bus lane spaces             # each seat on the feature runs this
+agent-bus role pm --lane spaces   # the supervisor: every work item from the lane
+agent-bus triage --lane spaces    # what is open; GONE owners first
 ```
+
+Supervising the whole repo: `agent-bus role pm` and `agent-bus triage`. Seats in
+a lane reach their lane PM with `--to @pm`, and each other with `--to @spaces`.
 
 For each item: close it with a reason, or hand it on. Never bulk-close another
 lane's work.

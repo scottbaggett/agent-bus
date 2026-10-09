@@ -29,10 +29,12 @@ working in, or you post as a different seat.
 | `claude/wa` | every seat in that scope, this repo |
 | `@here` (default) | this repo and worktree |
 | `@repo` | this repo, every worktree |
-| `@pm` | the repo PM (refused if there is none) |
+| `@spaces` | every seat in lane `spaces`, this repo |
+| `@pm` | the sender's lane PM and the repo PM (refused if neither exists) |
 | `@all` | every seat on the machine |
 
-Any other `@scope` is refused, so nothing is silently undelivered.
+Any other `@scope` is refused, so nothing is silently undelivered. A lane name is
+accepted once a live seat is in that lane or the lane has a PM.
 
 ## Messages and work items
 
@@ -82,10 +84,27 @@ seat and a crashed one look different.
 
 ## The PM
 
-One seat per repo may hold the PM role (`agent-bus role pm`). It owns work sent
+One seat per repo may hold the PM role (`agent-bus role pm`). To supervise one
+feature rather than the repo, take a lane's PM role instead (see Lanes). It owns work sent
 to `@pm` or a broadcast scope, receives a copy of every work item in the repo,
 and may close any of them. Taking the role from a live holder needs `--force`;
 a holder gone past `AGENT_BUS_ROLE_TTL` (48h) loses it at gc.
+
+## Lanes
+
+A lane is the set of seats working on one feature, whatever worktrees they sit
+in. `agent-bus lane spaces` puts this seat in lane `spaces` (`--clear` leaves);
+packets it posts carry the lane.
+
+`agent-bus role pm --lane spaces` makes a seat that lane's PM. For its lane only,
+a lane PM does what the repo PM does for the whole repo: it gets a copy of every
+work item posted by the lane's seats or sent to `@spaces`, owns the ones sent to
+`@spaces` or to `@pm` from a lane seat, and may close any of them. The repo PM
+still sees everything. `agent-bus triage --lane spaces` lists the lane's open
+work.
+
+Lane names are `[a-z0-9-]`, up to 32 characters, and not `here`, `repo`, `all`
+or `pm`.
 
 ## Delivery
 
@@ -171,6 +190,7 @@ before they become paths.
   seats/<seat>.json     seat registry
   state/<seat>.json     read cursor, wake count
   state/roles/<r>.pm    repo PM
+  state/roles/<r>.lane.<l>.pm  lane PM
   claims/<hash>.json    claims
 ```
 

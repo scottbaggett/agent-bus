@@ -27,14 +27,23 @@ working in, or you post as a different seat.
 |---|---|
 | `claude/wa.3fa2` | that seat |
 | `claude/wa` | every seat in that scope, this repo |
-| `@here` (default) | this repo and worktree |
+| `@here` | this repo and worktree |
 | `@repo` | this repo, every worktree |
 | `@spaces` | every seat in lane `spaces`, this repo |
 | `@pm` | the sender's lane PM and the repo PM (refused if neither exists) |
 | `@all` | every seat on the machine |
 
-Any other `@scope` is refused, so nothing is silently undelivered. A lane name is
+`--to` is required: nothing broadcasts by default. Any other `@scope` is
+refused, so nothing is silently undelivered. A lane name is
 accepted once a live seat is in that lane or the lane has a PM.
+
+### Claude to Claude
+
+Claude sessions talk to each other through Claude session messaging
+(`SendMessage`), not the bus. A Claude seat posting directly to another Claude
+seat (`--to claude/...`) is refused unless it passes `--allow-claude`. `@pm`,
+lanes and broadcasts are unaffected: a Claude lane PM supervising OpenCode seats
+is what the bus is for.
 
 ## Messages and work items
 
@@ -110,9 +119,11 @@ or `pm`.
 
 - **Digest.** Claude's `SessionStart` and `UserPromptSubmit` hooks, and the
   OpenCode plugin at session start and before each prompt, run `agent-bus
-  digest`. Unread packets are injected into the model's context and marked
-  read. Both hosts inject hook output, so a digest is a delivery.
-- **Wake.** Owners of unread work items are woken:
+  digest`. Unread packets this seat **owns** are injected into the model's
+  context and marked read. Both hosts inject hook output, so a digest is a
+  delivery. Broadcasts never enter the digest: they are context, read with
+  `agent-bus read`.
+- **Wake.** Only a packet's owners are woken; a broadcast wakes nobody.
   - Claude: `post` writes a short frame to the owner's inbox socket, which
     starts a turn even while it sits idle. The Stop hook also continues a turn
     that ends with owned items unread.

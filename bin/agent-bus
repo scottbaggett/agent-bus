@@ -251,7 +251,8 @@ reset_wake() { state_update '.wakes = 0'; }
 # ------------------------------------------------------------------ select
 
 # Packets addressed to this seat within the lookback window, never its own and
-# never closed. Mode: unread | all | wake (unread, supervisory, owned).
+# never closed. Mode: unread | all | owned (unread, owned: the digest) |
+# wake (unread, owned, supervisory).
 # Each row gains own (this seat must act) and from_pm (sent by the repo PM).
 select_packets() {
   local mode="$1" cut=$(( $(now_epoch) - LOOKBACK_DAYS * 86400 ))
@@ -261,6 +262,7 @@ select_packets() {
     | $L[] | select(.kind == "msg" and (.epoch // 0) >= $cut)
     | select((authored($me) | not) and gets($me) and ($c[.id] | not))
     | select($mode == "all" or ($r[.id] | not))
+    | select($mode != "owned" or owns($me))
     | select($mode != "wake" or (sup and owns($me)))
     | . + {own: owns($me), from_pm: (from_pm($me) and same_repo($me))}' \
     --arg mode "$mode" --argjson cut "$cut" --argjson read "$(state_get '.read // []')"
@@ -356,16 +358,16 @@ poke_seat() {
     | nc -U "$sock" -w 2 >/dev/null 2>&1 || true
 }
 
-# Live seats with a socket that should be woken for packet $1: recipients, but
-# for supervisory packets only the owner — waking every bystander in a shared
-# worktree made all of them grab the same review.
+# Live seats with a socket that should be woken for packet $1: its owners only.
+# A broadcast wakes nobody — poking every Claude seat in the repo for one fyi
+# interrupted all of them.
 push_targets() {
   seat_rows | jq -rn --argjson m "$1" --arg pm "$(pm_seat)" --argjson lanepms "$(lane_pms)" \
     --argjson cut "$(( $(now_epoch) - SEAT_TTL ))" "$JQ_LIB"'
     inputs | select((.epoch // 0) >= $cut and (.socket // "") != "")
     | seatme as $s
     | select(($m | authored($s)) | not)
-    | select($m | gets($s) and ((sup | not) or owns($s)))
+    | select($m | owns($s))
     | .socket' 2>/dev/null || true
 }
 
@@ -463,8 +465,9 @@ cmd_who() {
 }
 
 cmd_post() {
-  local to='@here' state='fyi' subject='' body='' bodyfile='' touched='[]' re='' close=''
+  local to='' state='fyi' subject='' body='' bodyfile='' touched='[]' re='' close='' allow_claude=0
   while [ $# -gt 0 ]; do
+    if [ "$1" = --allow-claude ]; then allow_claude=1; shift; continue; fi
     [ $# -ge 2 ] || die "post: $1 needs a value"
     case "$1" in
       --to) to="$2" ;;
@@ -487,6 +490,13 @@ cmd_post() {
   done
 
   in_list "$state" "$STATES" || die "post: --state must be one of: $STATES"
+  [ -n "$to" ] || die "post: --to is required — a seat from 'agent-bus who', @pm, a lane, or @here|@repo|@all to broadcast"
+  # Claude sessions talk to each other natively; the bus is for non-Claude seats.
+  case "$to" in claude/*)
+    if [ "$TOOL" = claude ] && ((!allow_claude)); then
+      die "post: $to is a Claude session — use Claude session messaging (SendMessage) instead, or --allow-claude if the bus is intended"
+    fi ;;
+  esac
   case "$to" in
     @here|@repo|@all) ;;
     @pm) [ -n "$(pm_seat)" ] || { [ -n "$LANE" ] && [ -n "$(lane_pm_seat "$LANE")" ]; } \
@@ -577,7 +587,9 @@ cmd_read() {
     case "$1" in
       --peek) peek=1 ;;
       --all) mode=all; peek=1 ;;
-      --digest) digest=1 ;;
+      # The digest is pushed into every prompt, so it carries only what this
+      # seat owns. Broadcasts are context: pull them with `read`.
+      --digest) digest=1; mode=owned ;;
       *) die "read: unknown flag $1" ;;
     esac
     shift
@@ -899,7 +911,9 @@ agent-bus — handoff bus for coding agents sharing repos and worktrees.
   whoami                      this seat's identity
   who                         live seats, the PM, open-work count, claims
   post [flags]                send a packet
-      --to <seat|scope|@lane|@here|@repo|@pm|@all>     default @here
+      --to <seat|scope|@lane|@here|@repo|@pm|@all>     required
+      --allow-claude          let a Claude seat post to another Claude seat
+                              (otherwise refused: use Claude session messaging)
       --state needs-review|blocked|handoff|question|done|fyi   default fyi
       -m <body> | --file <f> | stdin    --subject <s>    --touched a,b | auto
       --re <id>               reply to a packet
@@ -925,7 +939,8 @@ agent-bus — handoff bus for coding agents sharing repos and worktrees.
 
 Work items: needs-review, blocked, handoff and question packets stay open,
 owned by their addressee, until closed with a reason. The PM owns any of them
-sent to a broadcast scope or @pm, and sees all of them repo-wide. A lane PM
+sent to a broadcast scope or @pm, and sees all of them repo-wide. Only owners
+are woken or sent the digest; broadcasts are context, read with `read`. A lane PM
 does the same for its lane: work from its seats, and work sent to @<lane>. Owners are
 woken (Claude: inbox socket + Stop hook; OpenCode: plugin) up to
 AGENT_BUS_WAKE_BUDGET (3) times before they close something.

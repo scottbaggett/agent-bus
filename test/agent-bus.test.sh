@@ -23,7 +23,13 @@ trap 'rm -rf "$BUS_HOME"; [ -n "${SRV:-}" ] && kill "$SRV" 2>/dev/null; true' EX
 export AGENT_BUS_HOME="$BUS_HOME" AGENT_BUS_NO_PUSH=1 AGENT_BUS_NO_AUTO_GC=1
 
 # Fixture seats: seat <name> <tool> <worktree> <cmd...>
-seat() { local s="$1" t="$2" w="$3"; shift 3; AGENT_BUS_SESSION="$s" AGENT_BUS_TOOL="$t" AGENT_BUS_WT="$w" "$BIN" "$@"; }
+# Fixture seats are mostly claude, so their posts pass --allow-claude; the
+# refusal itself is tested with raw_seat.
+raw_seat() { local s="$1" t="$2" w="$3"; shift 3; AGENT_BUS_SESSION="$s" AGENT_BUS_TOOL="$t" AGENT_BUS_WT="$w" "$BIN" "$@"; }
+seat() {
+  local s="$1" t="$2" w="$3"; shift 3
+  if [ "${1:-}" = post ]; then shift; raw_seat "$s" "$t" "$w" post --allow-claude "$@"; else raw_seat "$s" "$t" "$w" "$@"; fi
+}
 pm() { seat pm claude pmwt "$@"; }
 a() { seat a claude wa "$@"; }
 b() { seat b opencode wa "$@"; }
@@ -64,17 +70,28 @@ out=$(a post --to @pm -m x 2>&1 || true)
 assert_has "@pm without a PM is refused" "no PM registered" "$out"
 out=$(a post --to @codex -m x 2>&1 || true)
 assert_has "unknown scope is refused" "unknown scope" "$out"
-out=$(a post --state bogus -m x 2>&1 || true)
+out=$(a post --to @here --state bogus -m x 2>&1 || true)
 assert_has "unknown state is refused" "--state must be one of" "$out"
 
 # --- read marks, peek does not, digest delivers once ---
 b read >/dev/null; c read >/dev/null
-a post --to @here -m $'# once\n\nhi' >/dev/null
+a post --to "$B" -m $'# once\n\nhi' >/dev/null
 assert_has "peek shows" "once" "$(b read --peek)"
 assert_has "peek leaves it unread" "once" "$(b read --peek)"
 assert_has "digest delivers" "once" "$(b digest)"
 assert_eq "digest marks read, then stays silent" "" "$(b digest)"
 assert_has "read --all still lists it" "once" "$(b read --all)"
+a post --to @here -m $'# just context\n\nhi' >/dev/null
+assert_eq "a broadcast is not in the digest" "" "$(b digest)"
+assert_has "a broadcast stays readable" "just context" "$(b read --peek)"
+b read >/dev/null
+out=$(a post -m x 2>&1 || true)
+assert_has "post without --to is refused" "--to is required" "$out"
+out=$(raw_seat a claude wa post --to "$C" -m x 2>&1 || true)
+assert_has "claude to claude is refused" "use Claude session messaging (SendMessage)" "$out"
+assert_has "--allow-claude overrides" "posted" "$(raw_seat a claude wa post --allow-claude --to "$C" -m '# allowed')"
+assert_has "claude may post to an opencode seat" "posted" "$(raw_seat a claude wa post --to "$B" -m '# to oc')"
+c read >/dev/null; b read >/dev/null
 
 # --- PM: role, auto-CC, ownership ---
 pm role pm >/dev/null
@@ -121,11 +138,11 @@ assert_eq "handoff is one ledger row" "$((rows_before + 1))" "$(wc -l <"$BUS_HOM
 out=$(pm triage)
 assert_lacks "parent leaves open work" "$rid" "$out"
 assert_has "child is owned by the destination" "owner $C" "$out"
-out=$(pm post --re "$rid" --close done -m x 2>&1 || true)
+out=$(pm post --to "$A" --re "$rid" --close done -m x 2>&1 || true)
 assert_has "a closed item cannot close again" "already closed" "$out"
-out=$(pm post --close done -m x 2>&1 || true)
+out=$(pm post --to "$A" --close done -m x 2>&1 || true)
 assert_has "--close needs --re" "--close needs --re" "$out"
-out=$(pm post --re "$hid" --close handed-off --state fyi -m x 2>&1 || true)
+out=$(pm post --to "$A" --re "$hid" --close handed-off --state fyi -m x 2>&1 || true)
 assert_has "handed-off must open an item" "--state must be" "$out"
 out=$(c resolve "$hid" --reason done)
 assert_has "owner closes with a reason" "resolved $hid (done)" "$out"
@@ -234,7 +251,7 @@ b post --to "$A" -s $'esc\033[31mape' -m x >/dev/null
 out=$(a read --peek)
 assert_lacks "control bytes are stripped" $'\033' "$out"
 assert_has "the text survives" "esc[31mape" "$out"
-out=$(head -c 70000 /dev/zero | tr '\0' x | a post -m "$(cat)" 2>&1 || true)
+out=$(head -c 70000 /dev/zero | tr '\0' x | a post --to @here -m "$(cat)" 2>&1 || true)
 assert_has "oversized body is refused" "max 65536" "$out"
 
 # --- push: only the owner is woken ---
@@ -266,7 +283,8 @@ PY
   out=$(AGENT_BUS_NO_PUSH=0 seat o3 claude wp post --to @here --state needs-review -m '# broadcast review' 2>/dev/null)
   assert_lacks "broadcast review wakes no bystander" "woke" "$out"
   out=$(AGENT_BUS_NO_PUSH=0 seat o3 claude wp post --to @here -m '# broadcast fyi')
-  assert_has "broadcast fyi wakes every recipient" "woke 2 idle peer" "$out"
+  assert_lacks "a broadcast fyi wakes nobody" "woke" "$out"
+  assert_eq "bystander still got nothing" "" "$(cat "$SOCKD/bystander.log" 2>/dev/null)"
   kill "$SRV" 2>/dev/null || true; wait "$SRV" 2>/dev/null || true; SRV=; rm -rf "$SOCKD"
 else
   printf 'skip push tests (python3/nc missing)\n'

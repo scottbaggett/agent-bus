@@ -117,3 +117,19 @@ claude 2.1.278 · opencode 2.0.8. Claude.app T2 passed in 3s (socket);
 The installed executable may differ from `codex` on PATH. Record its version.
 Do not label an unrun OpenCode live test as a pass; preserve and run its automated
 routing/Stop-hook coverage and note whether a live session was separately tested.
+
+### Codex queue integration — 2026-10-24
+
+T3 passed with real Claude Desktop and an existing idle Codex Desktop chat.
+Codex `0.164.0-alpha.11.1` accepted one fixed inbox notice, started a turn about
+8 seconds after the Claude post, and committed a correct bus reply at about
+15 seconds. Claude read and verified it, then committed a receipt at about
+23 seconds. The original question was closed. The queue text contained no
+challenge data; the agent fetched it through `agent-bus read`. No bus polling
+loop, recurring model task, or native follow-up delivered the challenge.
+
+Both automated suites passed (110 existing checks, 10 Codex cases). The
+OpenCode plugin and installer are unchanged; a fresh live OpenCode session was
+not exercised in this run. Unloaded/archived chats, restart recovery, and busy
+turn ordering remain unqualified. Codex's own external queue scan still has
+an approximately ten-second cadence.

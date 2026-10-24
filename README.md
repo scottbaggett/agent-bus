@@ -5,11 +5,11 @@
 </p>
 
 A handoff bus for coding agents in different windows on the same repo. Claude
-Code and OpenCode sessions hand work to each other, claim files, and wake each
-other when there is work to do. Run Codex models through OpenCode.
+Code, OpenCode, and Codex Desktop sessions hand work to each other, claim files,
+and wake each other when there is work to do.
 
 No daemon, no server. One bash script, `jq`, and an append-only log under
-`~/.agents/bus/`.
+`~/.agents/bus/`. Codex queue delivery additionally uses Python 3.
 
 ## Install
 
@@ -20,6 +20,36 @@ ln -sf "$PWD/bin/agent-bus" ~/.local/bin/agent-bus
 
 Upgrading from v1: `./install-hooks.sh --remove-legacy` strips the Codex and
 Cursor hooks v1 installed. Claude hooks from v1 keep working unchanged.
+
+### Codex Desktop
+
+In each Desktop chat you want to receive messages, run from its working directory:
+
+```sh
+agent-bus codex enable
+agent-bus read
+```
+
+This registers the actual `CODEX_THREAD_ID` and opts that seat into fixed inbox
+notifications. The agent reads peer content with `agent-bus read` and replies
+with the normal `post --re ... --close done --to ... --state done` command.
+Enable does not grant permission to follow arbitrary peer instructions.
+`agent-bus codex disable` stops new queue submissions for that seat. An already
+accepted notice cannot be recalled. A new chat or working directory needs its
+own registration; a plain CLI seat remains pull-only unless explicitly enabled.
+
+Python 3 and a queue-capable Codex executable are required on the sender's
+machine. Enable checks the Desktop-bundled executable before the shell's
+`codex`, which may be older. Set `AGENT_BUS_CODEX_BIN` during enable for a custom
+installation. Use the same bus directory and Codex account/home in both hosts.
+With a custom `AGENT_BUS_HOME`, keep that configuration available to the receiving
+chat's commands as well.
+
+The Desktop app and the registered chat must remain loaded. Queue acceptance
+is not proof of execution: read marks and a reply prove receipt. Agent-bus adds
+no polling loop or recurring model run, but the tested Codex implementation
+checks external queue writes about every ten seconds. Archived/unloaded chats,
+app restart recovery, and busy-turn ordering are not qualified.
 
 ## Use
 
@@ -56,8 +86,13 @@ that lane only, and `--to @<lane>` reaches its seats.
 **Delivery.** Hooks (Claude) and the plugin (OpenCode) inject unread packets
 into the model's context at session start and on every prompt. Owners are woken
 when idle: Claude through its inbox socket and Stop hook, OpenCode through the
-plugin. A seat gets three wakes before it has to close something, which stops
-two agents waking each other forever.
+plugin; opted-in Codex Desktop chats through `codex queue`. Claude/OpenCode
+Stop-hook wakes and Codex queue attempts have a budget of three until that seat
+closes an item. The pre-existing Claude socket path does not spend this budget.
+Codex queue submissions never mark packets read and never include packet bodies.
+Each attempt gets a `delivery` row in the ledger. Failed or uncertain submissions
+leave the packet saved and unread; the CLI reports the result and does not retry.
+A post's success means the packet was saved, not that its recipient executed it.
 
 **Claims** are advisory and expire after 4 hours.
 

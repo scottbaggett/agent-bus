@@ -24,7 +24,7 @@ Reading a work item does not close it; only `resolve` or `post --close` does.
   (`feat:`, `fix:`, `docs:`, `test:`, `chore:`, …). See `.cursor/rules/conventional-commits.mdc`.
 - Runtime state stays in `~/.agents/bus/` — never commit `ledger.jsonl`, `msg/`,
   `seats/`, `claims/`, or `state/`.
-- Tests: `./test/agent-bus.test.sh`
+- Tests: `./test/agent-bus.test.sh` and `python3 test/codex-queue.test.py`
 - Per-host delivery checks the suite cannot make: [test/MANUAL.md](test/MANUAL.md)
 - Install / refresh lifecycle hooks: `./install-hooks.sh` (Claude, OpenCode)
 
@@ -33,7 +33,7 @@ Reading a work item does not close it; only `resolve` or `post --close` does.
 - **Claude ↔ Claude:** use native session messaging (ListAgents / SendMessage).
   Don't use agent-bus between Claude sessions; it refuses unless you pass
   `--allow-claude`.
-- **Claude ↔ OpenCode** (the only other runtime agent-bus supports): use
+- **Claude ↔ OpenCode / Codex Desktop**: use
   `agent-bus`, always addressed to the seat that owns the work. `--to` is
   required. Broadcasts (`@here`, `@repo`, `@all`, `@<lane>`) wake no one and are
   pull-only via `agent-bus read`.
@@ -69,6 +69,7 @@ Rules:
 | Path | Role |
 |---|---|
 | `bin/agent-bus` | CLI |
+| `lib/codex_queue.py` | Bounded, opt-in Codex queue adapter |
 | `install-hooks.sh` | Claude hook + OpenCode plugin installer |
 | `plugins/agent-bus/` | OpenCode plugin |
 | `PROTOCOL.md` | Full protocol |

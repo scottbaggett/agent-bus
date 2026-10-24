@@ -1,0 +1,191 @@
+#!/usr/bin/env python3
+"""Behavior checks for opt-in queue delivery and its failure boundaries."""
+import importlib.util
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import threading
+import unittest
+import uuid
+
+ROOT = Path(__file__).resolve().parents[1]
+BIN = ROOT / 'bin/agent-bus'
+spec = importlib.util.spec_from_file_location('queue_adapter', ROOT / 'lib/codex_queue.py')
+adapter = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(adapter)
+
+
+class QueueTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix='agent-bus-queue-')
+        self.addCleanup(self.tmp.cleanup)
+        self.home = Path(self.tmp.name)
+        self.thread = str(uuid.uuid4())
+        self.fake = self.home / 'codex with spaces'
+        self.calls = self.home / 'calls.jsonl'
+        self.fake.write_text('''#!/usr/bin/env python3
+import json, os, sys
+if sys.argv[1:] == ['queue', '--help']:
+    sys.exit(int(os.environ.get('FAKE_HELP_EXIT', '0')))
+with open(os.environ['FAKE_CALLS'], 'a') as f:
+    f.write(json.dumps(sys.argv[1:]) + '\\n')
+print('accepted')
+sys.exit(int(os.environ.get('FAKE_QUEUE_EXIT', '0')))
+''')
+        self.fake.chmod(0o755)
+        self.env = {k:v for k,v in os.environ.items() if not k.startswith('AGENT_BUS_') and k not in (
+            'CLAUDECODE','CLAUDE_CODE_SESSION_ID','CLAUDE_CODE_MESSAGING_SOCKET',
+            'CODEX_THREAD_ID','OPENCODE','OPENCODE_SESSION_ID')}
+        self.env.update(AGENT_BUS_HOME=str(self.home / 'bus'), AGENT_BUS_NO_AUTO_GC='1',
+                        AGENT_BUS_CODEX_BIN=str(self.fake), FAKE_CALLS=str(self.calls),
+                        AGENT_BUS_REPO_ID='testrepo', AGENT_BUS_WT='testwt')
+
+    def cmd(self, *args, tool='codex', session=None, extra=None, check=True):
+        env = self.env | {'AGENT_BUS_TOOL': tool, 'AGENT_BUS_SESSION': session or self.thread}
+        env.update(extra or {})
+        return subprocess.run([str(BIN), *args], cwd=self.home, env=env, text=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=check)
+
+    def seat(self):
+        rows = list((self.home / 'bus/seats').glob('codex_*.json'))
+        return json.loads(rows[0].read_text())
+
+    def state(self):
+        return self.home / 'bus/state' / (self.seat()['addr'].replace('/', '_') + '.json')
+
+    def enable(self):
+        self.cmd('codex', 'enable')
+        return self.seat()['addr']
+
+    def post(self, target, body='peer-content-should-stay-on-bus', **kw):
+        return self.cmd('post', '--to', target, '--state', 'question', '-m', body,
+                        tool='claude', session='sender', **kw)
+
+    def rows(self, kind):
+        return [r for r in map(json.loads, (self.home / 'bus/ledger.jsonl').read_text().splitlines()) if r['kind']==kind]
+
+    def requests(self):
+        return [json.loads(x) for x in self.calls.read_text().splitlines()] if self.calls.exists() else []
+
+    def test_auto_identity_and_host_precedence(self):
+        env = dict(AGENT_BUS_TOOL='', AGENT_BUS_SESSION='', CODEX_THREAD_ID=self.thread)
+        self.cmd('heartbeat', extra=env)
+        self.assertEqual(self.seat()['session'], self.thread)
+        for tool, marker in [('claude', {'CLAUDECODE':'1','CLAUDE_CODE_SESSION_ID':'cc'}),
+                             ('opencode', {'OPENCODE_SESSION_ID':'oc'})]:
+            self.cmd('heartbeat', extra=env | marker)
+            rows = list((self.home/'bus/seats').glob(tool+'_*.json'))
+            self.assertEqual(len(rows), 1)
+            self.assertNotEqual(json.loads(rows[0].read_text())['session'], self.thread)
+
+    def test_opt_in_fixed_notice_and_no_read_ack(self):
+        self.cmd('heartbeat')
+        self.post(self.seat()['addr'])
+        self.assertEqual(self.requests(), [])
+        target = self.enable()
+        self.post(target, 'arbitrary peer instructions $(touch should-not-exist)')
+        self.assertEqual(self.requests(), [['queue','--thread',self.thread,'--message',adapter.NOTICE]])
+        self.assertEqual(self.rows('delivery')[-1]['status'], 'queued')
+        state = json.loads(self.state().read_text())
+        self.assertEqual(state.get('read', []), [])
+        self.assertEqual(state['wakes'], 1)
+        self.assertEqual(self.rows('delivery')[-1]['msg'], self.rows('msg')[-1]['id'])
+        self.assertFalse((self.home/'should-not-exist').exists())
+
+    def test_routing_broadcast_self_stale_disable_and_no_push(self):
+        target = self.enable()
+        for scope in ['@here','@repo','@all','codex/other.1234']:
+            self.post(scope)
+        self.cmd('post','--to',target,'-m','own')
+        self.post(target, extra={'AGENT_BUS_NO_PUSH':'1'})
+        self.assertEqual(self.requests(), [])
+        self.post('codex/testwt')
+        self.assertEqual(len(self.requests()), 1)
+        seatfile = next((self.home/'bus/seats').glob('codex_*.json'))
+        seat = json.loads(seatfile.read_text()); seat['epoch'] = 0
+        seatfile.write_text(json.dumps(seat))
+        self.post(target)
+        self.assertEqual(len(self.requests()), 1)
+        self.cmd('codex','disable')
+        self.post(target)
+        self.assertEqual(len(self.requests()), 1)
+        self.assertEqual(self.seat()['codex_queue'], '')
+
+    def test_budget_and_close_reset(self):
+        target = self.enable()
+        for _ in range(4): self.post(target)
+        self.assertEqual(len(self.requests()), 3)
+        self.assertEqual(self.rows('delivery')[-1]['status'], 'budget_exhausted')
+        original = self.rows('msg')[0]['id']
+        self.cmd('post','--to','claude/sender','--re',original,'--close','done','--state','done','-m','reply',
+                 extra={'AGENT_BUS_NO_PUSH':'1'})
+        self.assertEqual(json.loads(self.state().read_text())['wakes'], 0)
+        self.post(target)
+        self.assertEqual(len(self.requests()), 4)
+
+    def test_pm_routing_deduplicates_thread_and_read_ack_is_explicit(self):
+        target = self.enable()
+        self.cmd('role','pm')
+        # The same loaded chat may register in two directories; one post must
+        # not enqueue two notices to that same thread.
+        self.cmd('codex','enable', extra={'AGENT_BUS_WT':'second'})
+        self.cmd('role','pm','--lane','testlane',extra={'AGENT_BUS_WT':'second'})
+        self.cmd('lane','testlane',tool='claude',session='sender')
+        self.post('@pm')
+        self.assertEqual(len(self.requests()), 1)
+        packet = self.rows('msg')[0]['id']
+        self.assertEqual(self.rows('delivery')[0]['thread'], self.thread)
+        self.cmd('read')
+        self.assertIn(packet, json.loads(self.state().read_text())['read'])
+        shown = self.cmd('show',packet).stdout
+        rows = [json.loads(line) for line in shown.splitlines() if line.startswith('{')]
+        self.assertEqual(sum(row['kind']=='delivery' for row in rows), 1)
+
+    def test_failure_durable_and_no_retry(self):
+        target = self.enable()
+        self.post(target, extra={'FAKE_QUEUE_EXIT':'7'})
+        self.assertEqual(len(self.rows('msg')), 1)
+        self.assertEqual(self.rows('delivery')[0]['status'], 'failed')
+        self.assertEqual(self.rows('delivery')[0]['exit_code'], 7)
+        self.assertEqual(json.loads(self.state().read_text()).get('read',[]), [])
+        same = adapter.submit(str(self.fake.resolve()), self.thread, str(self.state()), self.rows('msg')[0]['id'], '3')
+        self.assertEqual(same['status'], 'already_attempted')
+        self.assertEqual(len(self.requests()), 1)
+
+    def test_enable_rejects_unsupported_cli_and_invalid_thread(self):
+        failed = self.cmd('codex','enable',extra={'FAKE_HELP_EXIT':'2'},check=False)
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertEqual(self.requests(), [])
+        self.assertNotEqual(self.cmd('codex','enable',session='local',check=False).returncode, 0)
+        self.assertNotEqual(self.cmd('codex','enable',tool='claude',check=False).returncode, 0)
+
+    def test_missing_binary_does_not_lose_packet(self):
+        target = self.enable(); self.fake.unlink()
+        self.post(target)
+        self.assertEqual(len(self.rows('msg')), 1)
+        self.assertEqual(self.rows('delivery')[0]['status'], 'unavailable')
+        self.assertEqual(json.loads(self.state().read_text()).get('read',[]), [])
+
+    def test_inherited_claude_socket_is_not_registered_for_codex(self):
+        self.cmd('heartbeat', extra={'CLAUDE_CODE_MESSAGING_SOCKET':'/tmp/not-codex'})
+        self.assertEqual(self.seat()['socket'], '')
+
+    def test_queue_timeout_and_simultaneous_reservations(self):
+        status, code, _ = adapter.run(['/bin/sleep','10'], 0.05)
+        self.assertEqual((status,code), ('uncertain', None))
+        self.enable()
+        outcomes=[]
+        def reserve(n):
+            outcomes.append(adapter.reserve(self.state(),str(n),3,str(self.fake.resolve())))
+        threads=[threading.Thread(target=reserve,args=(i,)) for i in range(8)]
+        for thread in threads: thread.start()
+        for thread in threads: thread.join()
+        self.assertEqual(outcomes.count(None), 3)
+        self.assertEqual(outcomes.count('budget_exhausted'), 5)
+        self.assertEqual(json.loads(self.state().read_text())['wakes'], 3)
+
+
+if __name__ == '__main__':
+    unittest.main()

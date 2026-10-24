@@ -3,15 +3,15 @@
 A file-backed handoff bus for coding agents sharing repos and worktrees. No
 daemon: `bin/agent-bus`, `jq`, and an append-only ledger under `~/.agents/bus/`.
 
-Hosts: **Claude Code** (hooks and inbox socket) and **OpenCode** (plugin). Run
-Codex models through OpenCode. Any other shell can post, read and claim, but
-nothing wakes it.
+Hosts: **Claude Code** (hooks and inbox socket), **OpenCode** (plugin), and
+opted-in **Codex Desktop** chats (`codex queue`, requires Python 3). Other shells
+can post, read and claim, but remain pull-only.
 
 ## Seats
 
 A seat is one agent session: `<tool>/<worktree>.<inst>`, e.g. `claude/main.b41c`,
-where `<inst>` is a 4-hex hash of the host session id (`CLAUDE_CODE_SESSION_ID`
-or `OPENCODE_SESSION_ID`). A shell with no session id is the bare
+where `<inst>` is a 4-hex hash of the host session id (`CLAUDE_CODE_SESSION_ID`,
+`OPENCODE_SESSION_ID`, or `CODEX_THREAD_ID`). A shell with no session id is the bare
 `<tool>/<worktree>`, which is also every seat's **scope**.
 
 The worktree name is `main` for the primary checkout, otherwise the worktree
@@ -129,9 +129,26 @@ or `pm`.
     that ends with owned items unread.
   - OpenCode: the plugin polls `agent-bus stop-hook` while the session is idle
     and resumes it with the result.
-- **Wake budget.** A seat is woken at most `AGENT_BUS_WAKE_BUDGET` (3) times
-  before it closes something. This bounds ping-pong between agents. Closing an
-  item resets it.
+  - Codex Desktop: run `agent-bus codex enable` once from the receiving chat's
+    directory. The seat retains its thread UUID and a verified queue-capable
+    executable path. Addressed posts queue a fixed inbox-check notice, then the
+    model reads peer data through the bus and posts its reply. No packet text,
+    sender-controlled command, or session credential enters the queue message.
+    `codex disable` stops future submissions. No hooks are installed or changed.
+    Seats expire after the usual two-hour inactivity TTL; a new `read` refreshes
+    them. Loaded idle chats are qualified; archived/unloaded chats and restart
+    recovery are not. The adapter has no polling loop; the tested host checks
+    external queue writes about every ten seconds.
+- **Wake budget.** Stop-hook wakes and Codex queue attempts consume the seat's
+  `AGENT_BUS_WAKE_BUDGET` (3), reset when it closes an item. Claude's existing
+  socket notifications do not consume this budget. Codex reserves an attempt
+  before submission, never marks the packet read, and does not retry the same
+  packet. Concurrent submission and state updates are serialized. A busy
+  submission, exhausted budget, unavailable binary, error, or timeout leaves
+  the packet on the bus; `post` reports this and records a `delivery` ledger row.
+  Queue commands time out after ten seconds; an uncertain result may already
+  have been accepted, so inspect before any manual resend. Success means queue
+  acceptance only. The actual bus read/reply proves the receiving model ran.
 
 Only the first three bodies render inline, each capped at 2KB and 40 lines;
 `agent-bus show <id>` has the full body, its replies and its closes.

@@ -11,3 +11,7 @@ state/
 # plugin local artifacts
 plugins/agent-bus/node_modules/
 plugins/agent-bus/bun.lock
+
+# Python helper/test caches
+__pycache__/
+*.pyc

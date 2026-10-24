@@ -95,3 +95,25 @@ A surface that was not run is not a pass.
 
 claude 2.1.278 · opencode 2.0.8. Claude.app T2 passed in 3s (socket);
 `opencode` TUI T2 passed in 4s (`session.synthetic({resume:true})`).
+
+## T3 — Claude to idle Codex Desktop and back
+
+1. Run both automated suites. From a dedicated Codex Desktop chat, explicitly
+   authorize one test challenge and bus reply. Run `agent-bus codex enable` and
+   `agent-bus read` in that chat's directory, then let the turn finish.
+2. Record native Desktop status **idle**. Generate a fresh nonce only afterward.
+3. In the actual Claude session, post a `question` to the exact Codex seat with
+   the nonce and two integers. Capture the ledger ID and queue delivery row.
+4. Do not send any native follow-up, start a listener, or run a periodic model
+   task in Codex. Its queue notice must contain no challenge data.
+5. Codex must read the packet and post a `done` reply, addressed to the Claude
+   sender, with `--re <id> --close done`, the nonce, sum, and retained chat context.
+6. Verify the real Codex transcript and ledger sender/session. Verify the actual
+   Claude session receives the matching bus reply. Record those as separate
+   gates: ledger reply, Claude socket delivery, and Claude model receipt.
+7. Disable the Codex test registration, close remaining test work, and archive
+   the test chat. No custom service or polling process should remain.
+
+The installed executable may differ from `codex` on PATH. Record its version.
+Do not label an unrun OpenCode live test as a pass; preserve and run its automated
+routing/Stop-hook coverage and note whether a live session was separately tested.

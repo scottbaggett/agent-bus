@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # agent-bus — a file-backed handoff bus for coding agents sharing repos.
 #
-# Hosts: Claude Code (hooks + inbox socket) and OpenCode (plugin). Any shell can
-# post and read; only those two hosts are woken.
+# Hosts: Claude Code (hooks + inbox socket), OpenCode (plugin), and opted-in
+# Codex Desktop chats (queue). Any shell can post and read.
 #
 # A seat is one agent session, addressed <tool>/<worktree>.<inst> where <inst>
 # hashes the host session id. The bare <tool>/<worktree> is its scope.
@@ -74,6 +74,7 @@ resolve_identity() {
   if [ -z "$TOOL" ]; then
     if [ -n "${CLAUDECODE:-}" ]; then TOOL=claude
     elif [ -n "${OPENCODE:-}${OPENCODE_SESSION_ID:-}" ]; then TOOL=opencode
+    elif [ -n "${CODEX_THREAD_ID:-}" ]; then TOOL=codex
     else TOOL=shell; fi
   fi
   TOP=$(git rev-parse --show-toplevel 2>/dev/null || true)
@@ -102,6 +103,7 @@ resolve_identity() {
   # inherits CLAUDE_CODE_SESSION_ID, which must not name its seats.
   case "$TOOL" in
     opencode) SESSION="${AGENT_BUS_SESSION:-${OPENCODE_SESSION_ID:-local}}" ;;
+    codex) SESSION="${AGENT_BUS_SESSION:-${CODEX_THREAD_ID:-local}}" ;;
     claude) SESSION="${AGENT_BUS_SESSION:-${CLAUDE_CODE_SESSION_ID:-local}}" ;;
     *) SESSION="${AGENT_BUS_SESSION:-local}" ;;
   esac
@@ -119,18 +121,20 @@ resolve_identity() {
 }
 
 touch_seat() {
-  local f="$BUS/seats/$SEAT.json" now last_hook=0
+  local f="$BUS/seats/$SEAT.json" now last_hook=0 socket="" codex_queue=""
   now=$(now_epoch)
   [ -f "$f" ] && last_hook=$(jq -r '.last_hook // 0' "$f" 2>/dev/null || echo 0)
   [ "${AGENT_BUS_VIA:-cli}" = hook ] && last_hook="$now"
+  [ "$TOOL" = claude ] && socket="${CLAUDE_CODE_MESSAGING_SOCKET:-}"
+  [ "$TOOL" = codex ] && codex_queue=$(state_get '.codex_queue // ""' | jq -r .)
   # Claude exports its inbox socket to hooks and Bash; recording it lets a post
   # wake this seat while it sits idle.
   jq -nc --arg addr "$ADDR" --arg tool "$TOOL" --arg repo "$REPO" --arg repo_id "$REPO_ID" \
     --arg wt "$WT" --arg branch "$BRANCH" --arg cwd "$TOP" --arg session "$SESSION" \
-    --arg socket "${CLAUDE_CODE_MESSAGING_SOCKET:-}" --argjson epoch "$now" \
+    --arg socket "$socket" --arg codex_queue "$codex_queue" --argjson epoch "$now" \
     --argjson last_hook "${last_hook:-0}" --arg lane "$LANE" \
     '{addr:$addr,tool:$tool,repo:$repo,repo_id:$repo_id,wt:$wt,branch:$branch,cwd:$cwd,
-      session:$session,socket:$socket,epoch:$epoch,last_hook:$last_hook,lane:$lane}' >"$f.tmp"
+      session:$session,socket:$socket,codex_queue:$codex_queue,epoch:$epoch,last_hook:$last_hook,lane:$lane}' >"$f.tmp"
   mv "$f.tmp" "$f"
 }
 
@@ -364,11 +368,78 @@ poke_seat() {
 push_targets() {
   seat_rows | jq -rn --argjson m "$1" --arg pm "$(pm_seat)" --argjson lanepms "$(lane_pms)" \
     --argjson cut "$(( $(now_epoch) - SEAT_TTL ))" "$JQ_LIB"'
-    inputs | select((.epoch // 0) >= $cut and (.socket // "") != "")
+    inputs | select(.tool == "claude" and (.epoch // 0) >= $cut and (.socket // "") != "")
     | seatme as $s
     | select(($m | authored($s)) | not)
     | select($m | owns($s))
     | .socket' 2>/dev/null || true
+}
+
+# Opt in from the actual Desktop chat. A plain CLI session is pull-only.
+# Resolve the helper through the installed CLI symlink, not the caller's cwd.
+codex_helper() {
+  local src="${BASH_SOURCE[0]}" dir
+  while [ -L "$src" ]; do
+    dir=$(cd "$(dirname "$src")" && pwd)
+    src=$(readlink "$src")
+    [[ "$src" = /* ]] || src="$dir/$src"
+  done
+  printf '%s/lib/codex_queue.py' "$(cd "$(dirname "$src")/.." && pwd)"
+}
+
+cmd_codex() {
+  [ "$TOOL" = codex ] || die "codex: run this from the Codex Desktop chat being registered"
+  case "${1:-}" in
+    enable)
+      [[ "$SESSION" =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]] \
+        || die "codex: missing a valid CODEX_THREAD_ID"
+      command -v python3 >/dev/null 2>&1 || die "python3 is required for Codex queue delivery"
+      local binary
+      binary=$(python3 "$(codex_helper)" discover) || return 1
+      state_update '.codex_queue = $binary' --arg binary "$binary"
+      touch_seat
+      printf 'queue enabled for %s (%s)\n' "$ADDR" "$SESSION"
+      ;;
+    disable)
+      state_update 'del(.codex_queue)'
+      touch_seat
+      printf 'queue disabled for %s\n' "$ADDR"
+      ;;
+    *) die "usage: agent-bus codex enable|disable" ;;
+  esac
+}
+
+codex_targets() {
+  seat_rows | jq -nc --argjson m "$1" --arg pm "$(pm_seat)" --argjson lanepms "$(lane_pms)" \
+    --argjson cut "$(( $(now_epoch) - SEAT_TTL ))" "$JQ_LIB"'
+    [inputs | select(.tool == "codex" and (.epoch // 0) >= $cut and (.codex_queue // "") != "")
+    | seatme as $s | select(($m | authored($s)) | not) | select($m | owns($s))]
+    | unique_by(.session) | .[]' 2>/dev/null || true
+}
+
+queue_codex_targets() {
+  local rec="$1" row addr session binary result status
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    addr=$(jq -r .addr <<<"$row"); session=$(jq -r .session <<<"$row")
+    binary=$(jq -r .codex_queue <<<"$row")
+    if command -v python3 >/dev/null 2>&1; then
+      result=$(python3 "$(codex_helper)" "$binary" "$session" \
+        "$BUS/state/$(slugify "$addr").json" "$(jq -r .id <<<"$rec")" "$WAKE_BUDGET") \
+        || result='{"status":"unavailable","detail":"queue helper failed; packet remains unread"}'
+    else result='{"status":"unavailable","detail":"python3 is required for Codex queue delivery"}'; fi
+    # A post is durable even when the host cannot accept its wake notification.
+    # Keep the distinction observable, and never retry an ambiguous submission.
+    status=$(jq -r .status <<<"$result")
+    ledger_append "$(jq -nc --argjson result "$result" --arg msg "$(jq -r .id <<<"$rec")" \
+      --arg to "$addr" --arg thread "$session" --argjson epoch "$(now_epoch)" \
+      '$result + {kind:"delivery",transport:"codex-queue",msg:$msg,to:$to,thread:$thread,epoch:$epoch}')"
+    if [ "$status" = queued ]; then
+      printf 'queued inbox notice for %s\n' "$addr"
+    else
+      printf 'agent-bus: packet saved; Codex notice for %s: %s (see delivery row in ledger)\n' "$addr" "$status" >&2
+    fi
+  done < <(codex_targets "$rec")
 }
 
 # ------------------------------------------------------------------ claims
@@ -560,6 +631,7 @@ cmd_post() {
     poke_seat "$sock" "agent-bus: packet $id from $ADDR [$state] — $src. Run: agent-bus read" && woke=$((woke + 1))
   done < <(push_targets "$rec")
   ((woke > 0)) && printf 'woke %d idle peer(s)\n' "$woke"
+  queue_codex_targets "$rec"
   return 0
 }
 
@@ -615,7 +687,7 @@ cmd_read() {
 
 cmd_show() {
   [ $# -ge 1 ] && valid_id "$1" || die "show: needs a packet id"
-  lq '$L[] | select((.kind == "msg" and .id == $id) or (.kind == "resolve" and .msg == $id)
+  lq '$L[] | select((.kind == "msg" and .id == $id) or ((.kind == "resolve" or .kind == "delivery") and .msg == $id)
                     or (.kind == "msg" and .re == $id))' --arg id "$1" | sanitize
   if [ -f "$BUS/msg/$1.md" ]; then printf -- '---\n'; sanitize <"$BUS/msg/$1.md"; fi
   return 0
@@ -900,7 +972,7 @@ cmd_doctor() {
   seat_rows | jq -r --arg rid "$REPO_ID" --argjson cut "$(( $(now_epoch) - SEAT_TTL ))" \
     'select(.repo_id == $rid and (.epoch // 0) >= $cut)
      | "  \(.addr)  \(if (.last_hook // 0) > 0 then "hooks firing" else "no hook seen (cli only)" end)\(
-         if (.socket // "") != "" then ", wakeable by socket" elif .tool == "opencode" then ", wakeable by plugin" else "" end)"' | sanitize
+         if (.socket // "") != "" then ", wakeable by socket" elif .tool == "opencode" then ", wakeable by plugin" elif (.codex_queue // "") != "" then ", Codex queue enabled" elif .tool == "codex" then ", pull-only (agent-bus codex enable)" else "" end)"' | sanitize
   return 0
 }
 
@@ -908,6 +980,8 @@ usage() {
   cat <<'EOF'
 agent-bus — handoff bus for coding agents sharing repos and worktrees.
 
+  codex enable|disable        opt this Desktop chat into/out of queue notices
+                              enable requires python3 and a queue-capable Codex
   whoami                      this seat's identity
   who                         live seats, the PM, open-work count, claims
   post [flags]                send a packet
@@ -952,6 +1026,7 @@ EOF
 resolve_identity
 cmd="${1:-help}"; shift || true
 case "$cmd" in
+  codex) cmd_codex "$@" ;;
   whoami) cmd_whoami ;;
   who) touch_seat; cmd_who ;;
   post) touch_seat; cmd_post "$@" ;;

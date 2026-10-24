@@ -16,7 +16,7 @@ assert_lacks() { if grep -Fq -- "$2" <<<"$3"; then bad "$1" "  unexpected: $2"; 
 
 # Hermetic: the suite runs inside Claude or OpenCode, whose markers and
 # sockets would otherwise leak into every fixture seat.
-unset CLAUDECODE CLAUDE_CODE_SESSION_ID CLAUDE_CODE_MESSAGING_SOCKET OPENCODE OPENCODE_SESSION_ID
+unset CODEX_THREAD_ID CLAUDECODE CLAUDE_CODE_SESSION_ID CLAUDE_CODE_MESSAGING_SOCKET OPENCODE OPENCODE_SESSION_ID
 for _v in $(env | sed -n 's/^\(AGENT_BUS_[A-Z0-9_]*\)=.*/\1/p'); do unset "$_v"; done
 BUS_HOME=$(mktemp -d)
 trap 'rm -rf "$BUS_HOME"; [ -n "${SRV:-}" ] && kill "$SRV" 2>/dev/null; true' EXIT

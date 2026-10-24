@@ -39,6 +39,7 @@ def run(command, timeout):
 def discover():
     override = os.environ.get("AGENT_BUS_CODEX_BIN")
     candidates = [override] if override else [
+        os.environ.get("CODEX_APP_RUNTIME_CLI_PATH"),
         "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
         "/Applications/Codex.app/Contents/Resources/codex",
         shutil.which("codex"),

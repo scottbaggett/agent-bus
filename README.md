@@ -23,33 +23,52 @@ Cursor hooks v1 installed. Claude hooks from v1 keep working unchanged.
 
 ### Codex Desktop
 
-In each Desktop chat you want to receive messages, run from its working directory:
+Install the Codex lifecycle integration once:
 
 ```sh
-agent-bus codex enable
-agent-bus read
+./install-hooks.sh --codex
 ```
 
-This registers the actual `CODEX_THREAD_ID` and opts that seat into fixed inbox
-notifications. The agent reads peer content with `agent-bus read` and replies
-with the normal `post --re ... --close done --to ... --state done` command.
-Enable does not grant permission to follow arbitrary peer instructions.
-`agent-bus codex disable` stops new queue submissions for that seat. An already
-accepted notice cannot be recalled. A new chat or working directory needs its
-own registration; a plain CLI seat remains pull-only unless explicitly enabled.
+Review and trust the four agent-bus hooks in Codex (`/hooks`). Codex requires
+trust for each new or changed hook definition; the installer never edits trust
+settings. Existing Claude/OpenCode configuration and unrelated Codex hooks are
+preserved. Restart/resume the chat after review so its startup hook can run.
+
+Trusted hooks automatically register each Desktop chat from the host's actual
+session ID and working directory. Prompt/stop events refresh its registration;
+SessionEnd removes that thread's seats, roles, and claims across directories,
+without closing unfinished work. Hook-registered chats remain reachable while
+idle, without heartbeat polling. A crash can leave a stale registration; queue
+acceptance still does not prove the chat ran. Normal CLI sessions stay pull-only.
+
+```sh
+agent-bus codex status       # queue mode, hook activity, budget, last delivery
+agent-bus codex disable      # pause this seat; hooks respect the pause
+agent-bus codex enable       # resume, or manually connect without hooks
+agent-bus doctor             # installation and delivery diagnostics
+```
+
+The agent reads peer content with `agent-bus read` and replies with the normal
+`post --re ... --close done --to ... --state done` command. A queue notice grants
+no permission to follow arbitrary peer instructions. Already accepted notices
+cannot be recalled. `./install-hooks.sh --codex --uninstall` removes only the
+managed Codex hooks and disables existing Codex queue registrations. A normal
+`offboard` also disables and removes that Codex seat.
 
 Python 3 and a queue-capable Codex executable are required on the sender's
-machine. Enable checks the Desktop-bundled executable before the shell's
-`codex`, which may be older. Set `AGENT_BUS_CODEX_BIN` during enable for a custom
+machine. Discovery uses the Desktop runtime executable, then known app bundles,
+then PATH, which may contain an older CLI. Set `AGENT_BUS_CODEX_BIN` for a custom
 installation. Use the same bus directory and Codex account/home in both hosts.
-With a custom `AGENT_BUS_HOME`, keep that configuration available to the receiving
-chat's commands as well.
+With a custom `AGENT_BUS_HOME`, provide that configuration to the receiving
+chat and its hook commands too. `AGENT_BUS_CODEX_SETTINGS` can select a different
+hooks file for installation.
 
-The Desktop app and the registered chat must remain loaded. Queue acceptance
-is not proof of execution: read marks and a reply prove receipt. Agent-bus adds
-no polling loop or recurring model run, but the tested Codex implementation
-checks external queue writes about every ten seconds. Archived/unloaded chats,
-app restart recovery, and busy-turn ordering are not qualified.
+The Desktop app and registered chat must remain loaded for unattended wake.
+Queue acceptance is not proof of execution: read marks and a reply prove receipt.
+Agent-bus adds no polling loop or recurring model run, but the tested Codex
+implementation checks external queue writes about every ten seconds. Archived
+or unloaded chats, app restart recovery, and busy-turn ordering are not qualified.
+
 
 ## Use
 

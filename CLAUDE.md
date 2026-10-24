@@ -26,7 +26,7 @@ Reading a work item does not close it; only `resolve` or `post --close` does.
   `seats/`, `claims/`, or `state/`.
 - Tests: `./test/agent-bus.test.sh` and `python3 test/codex-queue.test.py`
 - Per-host delivery checks the suite cannot make: [test/MANUAL.md](test/MANUAL.md)
-- Install / refresh lifecycle hooks: `./install-hooks.sh` (Claude, OpenCode)
+- Install / refresh lifecycle hooks: `./install-hooks.sh` (Claude, OpenCode); `./install-hooks.sh --codex` (Codex)
 
 ## Coordinating with other seats
 
@@ -70,7 +70,8 @@ Rules:
 |---|---|
 | `bin/agent-bus` | CLI |
 | `lib/codex_queue.py` | Bounded, opt-in Codex queue adapter |
-| `install-hooks.sh` | Claude hook + OpenCode plugin installer |
+| `install-hooks.sh` | Claude/OpenCode installer; `--codex` lifecycle installer |
+| `lib/codex_hook.py` | Codex session registration and cleanup |
 | `plugins/agent-bus/` | OpenCode plugin |
 | `PROTOCOL.md` | Full protocol |
 | `skills/handoff/SKILL.md` | Handoff runbook |

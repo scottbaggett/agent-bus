@@ -4,7 +4,7 @@ A file-backed handoff bus for coding agents sharing repos and worktrees. No
 daemon: `bin/agent-bus`, `jq`, and an append-only ledger under `~/.agents/bus/`.
 
 Hosts: **Claude Code** (hooks and inbox socket), **OpenCode** (plugin), and
-opted-in **Codex Desktop** chats (`codex queue`, requires Python 3). Other shells
+configured **Codex Desktop** chats (`codex queue`, requires Python 3). Other shells
 can post, read and claim, but remain pull-only.
 
 ## Seats
@@ -129,14 +129,21 @@ or `pm`.
     that ends with owned items unread.
   - OpenCode: the plugin polls `agent-bus stop-hook` while the session is idle
     and resumes it with the result.
-  - Codex Desktop: run `agent-bus codex enable` once from the receiving chat's
-    directory. The seat retains its thread UUID and a verified queue-capable
+  - Codex Desktop: install `./install-hooks.sh --codex` and review/trust its
+    hooks. SessionStart automatically registers the host-provided session UUID
+    and cwd; UserPromptSubmit/Stop refresh it. Manual `agent-bus codex enable`
+    also works without hooks. The seat retains its thread UUID and a queue-capable
     executable path. Addressed posts queue a fixed inbox-check notice, then the
     model reads peer data through the bus and posts its reply. No packet text,
     sender-controlled command, or session credential enters the queue message.
-    `codex disable` stops future submissions. No hooks are installed or changed.
-    Seats expire after the usual two-hour inactivity TTL; a new `read` refreshes
-    them. Loaded idle chats are qualified; archived/unloaded chats and restart
+    `codex disable` pauses the seat across later hook events; `enable` resumes.
+    SessionEnd removes every seat, role, and claim belonging to that Codex thread,
+    preserving read history, pauses, and unfinished work. Hook-managed queue
+    registrations survive the normal two-hour seat TTL until SessionEnd, so a
+    long-idle chat needs no heartbeat polling. Manual registrations retain the
+    usual TTL. A host crash may leave a registration until explicitly offboarded.
+    `codex status` reports registration mode and last queue attempt; it does not
+    assert the host is running. Loaded idle chats are qualified; archived/unloaded chats and restart
     recovery are not. The adapter has no polling loop; the tested host checks
     external queue writes about every ten seconds.
 - **Wake budget.** Stop-hook wakes and Codex queue attempts consume the seat's
@@ -229,3 +236,14 @@ Rows written before v2 have no reason and still close their packet.
 gc prunes expired claims, dead seats, old bodies and abandoned roles, and runs
 from hooks at most once a day (`AGENT_BUS_NO_AUTO_GC=1` to opt out). It never
 closes a work item.
+
+## Codex hook installation
+
+`install-hooks.sh --codex` adds only four marked command hooks: SessionStart,
+UserPromptSubmit, Stop, and SessionEnd. The hook adapter validates the host's
+session UUID and absolute cwd, ignores inherited parent identity, and never
+reads credentials or peer payloads. Startup emits a fixed protocol reminder;
+no hook marks packets read. New/changed hooks require the user's normal Codex
+trust review. The installer does not edit `config.toml`, permissions, or trust.
+Uninstall removes these hooks and disables existing Codex queue registrations.
+Other hosts' hooks/plugin and unrelated Codex hooks are retained.

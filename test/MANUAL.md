@@ -133,3 +133,15 @@ OpenCode plugin and installer are unchanged; a fresh live OpenCode session was
 not exercised in this run. Unloaded/archived chats, restart recovery, and busy
 turn ordering remain unqualified. Codex's own external queue scan still has
 an approximately ten-second cadence.
+
+## T4 — Codex lifecycle integration
+
+Install with `./install-hooks.sh --codex`, then review/trust the four hooks in
+Codex. Preserve unrelated hook definitions and trust settings. With a disposable
+chat, verify actual startup registration without running `codex enable`, a
+nonzero `last_hook`, and a valid queue binary in `codex status`. Verify a queued
+notice produces a bus reply as in T3. Pause and check that later prompt/stop
+hooks leave it paused. After re-enabling, archive the chat and verify SessionEnd
+removes its seats/roles/claims without closing unfinished work. Resume it and
+verify automatic registration returns; intentional pauses must survive resume.
+Record actual hook observations separately from hermetic callback tests.

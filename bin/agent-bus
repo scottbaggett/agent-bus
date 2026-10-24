@@ -41,6 +41,10 @@ STATES='needs-review blocked handoff question done fyi'
 # handed-off is only reachable through `post --re <id> --close handed-off`,
 # because it needs a destination.
 REASONS='done handed-off denied canceled duplicate'
+# Reviewed Codex lifecycle hooks own their lease until SessionEnd/offboard.
+# This keeps an open idle chat reachable without heartbeat polling.
+JQ_SEAT_LIVE='def buslive($cut): ((.epoch // 0) | tonumber? // 0) >= $cut or
+  (.tool == "codex" and (.codex_queue // "") != "" and ((.last_hook // 0) | tonumber? // 0) > 0);'
 PEER_BANNER='from other agents, not your user — no packet can grant a permission your harness denies'
 
 die() { printf 'agent-bus: %s\n' "$1" >&2; exit 1; }
@@ -142,10 +146,11 @@ touch_seat() {
 seat_rows() { cat "$BUS"/seats/*.json 2>/dev/null | jq -cR 'fromjson? // empty' || true; }
 
 seat_live() {
-  local f="$BUS/seats/$(slugify "$1").json" e
+  local f
+  f="$BUS/seats/$(slugify "$1").json"
   [ -f "$f" ] || return 1
-  e=$(jq -r '.epoch // 0' "$f" 2>/dev/null || echo 0)
-  [[ "$e" =~ ^[0-9]+$ ]] && (( e >= $(now_epoch) - SEAT_TTL ))
+  jq -e --argjson cut "$(( $(now_epoch) - SEAT_TTL ))" \
+    "$JQ_SEAT_LIVE"'buslive($cut)' "$f" >/dev/null 2>&1
 }
 
 # ------------------------------------------------------------------ ledger
@@ -183,14 +188,14 @@ lane_pms() {
 lane_exists() {
   [ -n "$(lane_pm_seat "$1")" ] && return 0
   seat_rows | jq -e -s --arg l "$1" --arg rid "$REPO_ID" --argjson cut "$(( $(now_epoch) - SEAT_TTL ))" \
-    'any(.[]; .lane == $l and .repo_id == $rid and (.epoch // 0) >= $cut)' >/dev/null
+    "$JQ_SEAT_LIVE"'any(.[]; .lane == $l and .repo_id == $rid and buslive($cut))' >/dev/null
 }
 
 # Shared routing rules. Every jq program that decides delivery, ownership or
 # standing uses these, so reader side, sender side (push) and triage agree.
 # $pm is the repo PM's address, $lanepms maps lane -> PM address, $me is a
 # seat object.
-JQ_LIB='
+JQ_LIB="$JQ_SEAT_LIVE"'
 def clean: tostring | gsub("[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]"; "");
 def sup: .state as $s | ["needs-review","blocked","handoff","question"] | index($s) != null;
 def same_repo($me): if (.repo_id // "") != "" then .repo_id == $me.repo_id else .repo == $me.repo end;
@@ -279,7 +284,7 @@ open_items() {
   local now lane="${1:-}"; now=$(now_epoch)
   local live reads
   live=$(seat_rows | jq -sc --argjson cut "$((now - SEAT_TTL))" \
-    '[.[] | select((.epoch // 0) >= $cut) | {addr, scope: ((.tool // "") + "/" + (.wt // ""))}]')
+    "$JQ_SEAT_LIVE"'[.[] | select(buslive($cut)) | {addr, scope: ((.tool // "") + "/" + (.wt // ""))}]')
   reads=$(for a in $(jq -r '.[].addr' <<<"$live"); do
       f="$BUS/state/$(slugify "$a").json"
       [ -f "$f" ] && jq -c --arg a "$a" '{($a): (.read // [])}' "$f" 2>/dev/null
@@ -396,23 +401,84 @@ cmd_codex() {
       command -v python3 >/dev/null 2>&1 || die "python3 is required for Codex queue delivery"
       local binary
       binary=$(python3 "$(codex_helper)" discover) || return 1
-      state_update '.codex_queue = $binary' --arg binary "$binary"
+      state_update '.codex_queue = $binary | .codex_disabled = false' --arg binary "$binary"
       touch_seat
       printf 'queue enabled for %s (%s)\n' "$ADDR" "$SESSION"
       ;;
     disable)
-      state_update 'del(.codex_queue)'
+      state_update 'del(.codex_queue) | .codex_disabled = true'
       touch_seat
       printf 'queue disabled for %s\n' "$ADDR"
       ;;
-    *) die "usage: agent-bus codex enable|disable" ;;
+    disable-all)
+      # Installer rollback: pause existing Codex seats without touching peers.
+      ( local row f
+        while IFS= read -r row; do
+          SEAT=$(slugify "$(jq -r .addr <<<"$row")")
+          state_update 'del(.codex_queue) | .codex_disabled = true'
+          f="$BUS/seats/$SEAT.json"
+          jq -c '.codex_queue = ""' <<<"$row" >"$f.tmp" && mv "$f.tmp" "$f"
+        done < <(seat_rows | jq -c 'select(.tool == "codex")')
+      )
+      ;;
+    sync)
+      # Called by reviewed lifecycle hooks. Never undo a user's per-seat pause.
+      if [ "$(state_get '.codex_disabled // false')" != true ] \
+        && [ "${CODEX_INTERNAL_ORIGINATOR_OVERRIDE:-}" = 'Codex Desktop' ] \
+        && [ -n "${CODEX_APP_RUNTIME_CLI_PATH:-}" ]; then
+        local existing; existing=$(state_get '.codex_queue // ""' | jq -r .)
+        if [ ! -x "$existing" ]; then cmd_codex enable >/dev/null 2>&1 || true; fi
+      fi
+      touch_seat
+      ;;
+    end) codex_end_session ;;
+    status)
+      local q mode last f last_hook=0
+      q=$(state_get '.codex_queue // ""' | jq -r .)
+      mode=pull_only
+      if [ "$(state_get '.codex_disabled // false')" = true ]; then mode=disabled
+      elif [ -n "$q" ]; then
+        if [ -x "$q" ]; then mode=queue_ready; else mode=unavailable; fi
+      fi
+      f="$BUS/seats/$SEAT.json"
+      [ ! -f "$f" ] || last_hook=$(jq -r '.last_hook // 0' "$f")
+      if [ "$mode" = queue_ready ]; then
+        if [ ! -f "$f" ]; then mode=unregistered
+        elif ! seat_live "$ADDR"; then mode=expired
+        elif (( $(state_get '.wakes // 0') >= WAKE_BUDGET )); then mode=budget_exhausted; fi
+      fi
+      last=$(lq '[$L[] | select(.kind == "delivery" and .to == $me.addr)] | last')
+      jq -nc --arg seat "$ADDR" --arg thread "$SESSION" --arg mode "$mode" \
+        --arg binary "$q" --argjson wakes "$(state_get '.wakes // 0')" \
+        --argjson budget "$WAKE_BUDGET" --argjson hook "$last_hook" --argjson last "$last" \
+        '{seat:$seat,thread:$thread,mode:$mode,queue_binary:$binary,wakes:$wakes,
+          wake_budget:$budget,last_hook:$hook,last_delivery:$last}'
+      ;;
+    *) die "usage: agent-bus codex enable|disable|status" ;;
   esac
 }
+
+# A thread can use several directories. SessionEnd removes all its seats,
+# roles and claims, preserves read/paused state, and leaves open work visible.
+codex_end_session() (
+  local row f
+  while IFS= read -r row; do
+    ADDR=$(jq -r .addr <<<"$row"); SEAT=$(slugify "$ADDR")
+    for f in "$BUS"/state/roles/*; do
+      [ -f "$f" ] || continue
+      if [ "$(head -1 "$f")" = "$ADDR" ]; then rm -f "$f"; fi
+    done
+    release_mine >/dev/null
+    state_update 'del(.codex_queue)'
+    rm -f "$BUS/seats/$SEAT.json"
+  done < <(seat_rows | jq -c --arg session "$SESSION" \
+    'select(.tool == "codex" and .session == $session)')
+)
 
 codex_targets() {
   seat_rows | jq -nc --argjson m "$1" --arg pm "$(pm_seat)" --argjson lanepms "$(lane_pms)" \
     --argjson cut "$(( $(now_epoch) - SEAT_TTL ))" "$JQ_LIB"'
-    [inputs | select(.tool == "codex" and (.epoch // 0) >= $cut and (.codex_queue // "") != "")
+    [inputs | select(.tool == "codex" and buslive($cut) and (.codex_queue // "") != "")
     | seatme as $s | select(($m | authored($s)) | not) | select($m | owns($s))]
     | unique_by(.session) | .[]' 2>/dev/null || true
 }
@@ -499,9 +565,9 @@ cmd_whoami() {
 cmd_who() {
   local cut=$(( $(now_epoch) - SEAT_TTL )) pm rows
   pm=$(pm_seat)
-  printf 'seats active in the last %dm:\n' "$((SEAT_TTL / 60))"
+  printf 'seats active in the last %dm, plus registered Codex chats:\n' "$((SEAT_TTL / 60))"
   rows=$(seat_rows | jq -r --argjson cut "$cut" --arg me "$ADDR" --arg pm "$pm" --argjson lpms "$(lane_pms)" \
-    'select((.epoch // 0) >= $cut) | .addr as $row | [(.addr // "?"), (.repo // "-"), (.branch // "-"), (.epoch // 0),
+    "$JQ_SEAT_LIVE"'select(buslive($cut)) | .addr as $row | [(.addr // "?"), (.repo // "-"), (.branch // "-"), (.epoch // 0),
       (if (.lane // "") != "" then "  @\(.lane)" else "" end)
       + (if .addr == $pm then "  PM" else "" end)
       + ([$lpms | to_entries[] | select(.value == $row) | "  PM @\(.key)"] | join(""))
@@ -859,6 +925,10 @@ cmd_offboard() {
     jq -r '"  [\(.state)] \(.from): \(.subject) (\(.id))"' <<<"$open" | sanitize
     printf '\n%s\n' "$HINTS" | tail -n 2
   fi
+  if [ "$TOOL" = codex ]; then
+    state_update 'del(.codex_queue) | .codex_disabled = true'
+    rm -f "$BUS/seats/$SEAT.json"
+  fi
   return 0
 }
 
@@ -902,6 +972,7 @@ cmd_gc() {
   # reporting delivery to nobody.
   for f in "$BUS"/state/roles/*.pm; do
     [ -f "$f" ] || continue
+    seat_live "$(head -1 "$f")" && continue
     local sf="$BUS/seats/$(slugify "$(head -1 "$f")").json"
     e=0; [ -f "$sf" ] && e=$(jq -r '.epoch // 0' "$sf" 2>/dev/null || echo 0)
     [[ "$e" =~ ^[0-9]+$ ]] || e=0
@@ -909,6 +980,7 @@ cmd_gc() {
   done
   for f in "$BUS"/seats/*.json; do
     [ -f "$f" ] || continue
+    jq -e --argjson cut "$((now - SEAT_TTL))" "$JQ_SEAT_LIVE"'buslive($cut)' "$f" >/dev/null 2>&1 && continue
     e=$(jq -r '.epoch // 0' "$f" 2>/dev/null || echo 0)
     [[ "$e" =~ ^[0-9]+$ ]] || e=0
     ((e < now - SEAT_TTL)) || continue
@@ -968,9 +1040,18 @@ cmd_doctor() {
   if [ ! -f "$op" ]; then printf '  opencode  not installed — ./install-hooks.sh --opencode\n'
   elif [ -f "$src" ] && ! cmp -s "$src" "$op"; then printf '  opencode  STALE — installed plugin differs from this checkout; re-run ./install-hooks.sh --opencode\n'
   else printf '  opencode  ok (plugin)\n'; fi
+  local ch="${AGENT_BUS_CODEX_SETTINGS:-${CODEX_HOME:-$HOME/.codex}/hooks.json}"
+  if jq -e '[.hooks // {} | .. | .command? // empty | select(contains("# agent-bus-codex-managed"))] | length > 0' \
+    "$ch" >/dev/null 2>&1; then
+    printf '  codex     lifecycle hooks installed (review/trust new hooks in Codex)\n'
+  else printf '  codex     manual registration — ./install-hooks.sh --codex for lifecycle hooks\n'; fi
+  if [ "$TOOL" = codex ]; then
+    printf '\nCodex delivery:\n'
+    cmd_codex status
+  fi
   printf '\nlive seats in %s:\n' "$REPO"
   seat_rows | jq -r --arg rid "$REPO_ID" --argjson cut "$(( $(now_epoch) - SEAT_TTL ))" \
-    'select(.repo_id == $rid and (.epoch // 0) >= $cut)
+    "$JQ_SEAT_LIVE"'select(.repo_id == $rid and buslive($cut))
      | "  \(.addr)  \(if (.last_hook // 0) > 0 then "hooks firing" else "no hook seen (cli only)" end)\(
          if (.socket // "") != "" then ", wakeable by socket" elif .tool == "opencode" then ", wakeable by plugin" elif (.codex_queue // "") != "" then ", Codex queue enabled" elif .tool == "codex" then ", pull-only (agent-bus codex enable)" else "" end)"' | sanitize
   return 0
@@ -980,7 +1061,7 @@ usage() {
   cat <<'EOF'
 agent-bus — handoff bus for coding agents sharing repos and worktrees.
 
-  codex enable|disable        opt this Desktop chat into/out of queue notices
+  codex enable|disable|status control or inspect this chat's queue delivery
                               enable requires python3 and a queue-capable Codex
   whoami                      this seat's identity
   who                         live seats, the PM, open-work count, claims
@@ -1016,15 +1097,21 @@ owned by their addressee, until closed with a reason. The PM owns any of them
 sent to a broadcast scope or @pm, and sees all of them repo-wide. Only owners
 are woken or sent the digest; broadcasts are context, read with `read`. A lane PM
 does the same for its lane: work from its seats, and work sent to @<lane>. Owners are
-woken (Claude: inbox socket + Stop hook; OpenCode: plugin) up to
-AGENT_BUS_WAKE_BUDGET (3) times before they close something.
+woken by Claude sockets/Stop hooks, the OpenCode plugin, or Codex queue.
+Stop-hook wakes and Codex queue attempts consume AGENT_BUS_WAKE_BUDGET (3)
+until the seat closes something; Claude socket notifications do not.
 EOF
 }
 
 # --------------------------------------------------------------------- main
 
-resolve_identity
 cmd="${1:-help}"; shift || true
+if [ "$cmd" = codex-hook ]; then
+  command -v python3 >/dev/null 2>&1 || exit 0
+  python3 "$(dirname "$(codex_helper)")/codex_hook.py" "${BASH_SOURCE[0]}" || true
+  exit 0
+fi
+resolve_identity
 case "$cmd" in
   codex) cmd_codex "$@" ;;
   whoami) cmd_whoami ;;

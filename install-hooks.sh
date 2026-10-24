@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
-# Wire agent-bus into Claude Code (hooks) and OpenCode (plugin).
+# Wire agent-bus into Claude Code (hooks), OpenCode (plugin), and Codex (lifecycle + queue).
 #
 # Idempotent: every managed hook command carries the agent-bus-managed marker
 # and is stripped before re-adding. Each config is backed up once, next to
 # itself, before the first write.
 #
-# Usage: install-hooks.sh [--claude] [--opencode] [--uninstall] [--remove-legacy]
+# Usage: install-hooks.sh [--claude] [--opencode] [--codex] [--uninstall] [--remove-legacy]
 #   default: --claude --opencode
 #   --remove-legacy strips hooks a v1 install left in Codex and Cursor configs.
 set -euo pipefail
 
 MARKER='# agent-bus-managed'
+CODEX_MARKER='# agent-bus-codex-managed'
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 if [ -n "${AGENT_BUS_BIN:-}" ]; then BIN="$AGENT_BUS_BIN"
 elif [ -x "$ROOT/bin/agent-bus" ]; then BIN="$ROOT/bin/agent-bus"
@@ -18,18 +19,20 @@ else BIN="$(command -v agent-bus || echo "$HOME/.local/bin/agent-bus")"; fi
 CLAUDE_SETTINGS="$HOME/.claude/settings.json"
 OPENCODE_DIR="$HOME/.config/opencode"
 PLUGIN_SRC="$ROOT/plugins/agent-bus"
+CODEX_SETTINGS="${AGENT_BUS_CODEX_SETTINGS:-${CODEX_HOME:-$HOME/.codex}/hooks.json}"
 
-do_claude=0 do_opencode=0 uninstall=0 legacy=0
+do_claude=0 do_opencode=0 do_codex=0 uninstall=0 legacy=0
 for a in "$@"; do
   case "$a" in
     --claude) do_claude=1 ;;
     --opencode) do_opencode=1 ;;
+    --codex) do_codex=1 ;;
     --uninstall) uninstall=1 ;;
     --remove-legacy) legacy=1 ;;
     *) echo "unknown flag: $a" >&2; exit 1 ;;
   esac
 done
-((do_claude || do_opencode || legacy)) || { do_claude=1; do_opencode=1; }
+((do_claude || do_opencode || do_codex || legacy)) || { do_claude=1; do_opencode=1; }
 
 # Configs are often symlinks into a dotfiles repo; write through the link.
 real() { [ -L "$1" ] && python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$1" || printf '%s' "$1"; }
@@ -86,6 +89,33 @@ install_opencode() {
   echo "opencode: installed ($dest) — restart OpenCode; config is read once at startup"
 }
 
+install_codex() {
+  command -v python3 >/dev/null 2>&1 || { echo 'codex: python3 is required' >&2; return 1; }
+  local f out command event timeout
+  mkdir -p "$(dirname "$CODEX_SETTINGS")"
+  [ -f "$CODEX_SETTINGS" ] || echo '{}' >"$CODEX_SETTINGS"
+  f=$(real "$CODEX_SETTINGS"); backup "$f"
+  out=$(strip_marked <"$f")
+  out=$(MARKER="$CODEX_MARKER" strip_marked <<<"$out")
+  if ((!uninstall)); then
+    printf -v command '%q codex-hook %s' "$BIN" "$CODEX_MARKER"
+    for event in SessionStart UserPromptSubmit Stop SessionEnd; do
+      timeout=20; [ "$event" != SessionEnd ] || timeout=3
+      out=$(jq --arg e "$event" --arg c "$command" --argjson t "$timeout" '
+        .hooks //= {} | .hooks[$e] = ((.hooks[$e] // []) +
+          [{hooks:[{type:"command",command:$c,timeout:$t}]}])' <<<"$out")
+    done
+  fi
+  write_json "$f" <<<"$out"
+  if ((uninstall)); then
+    AGENT_BUS_TOOL=codex "$BIN" codex disable-all
+    echo "codex:    hooks removed and existing Codex queue registrations disabled ($f)"
+  else
+    echo "codex:    installed ($f) — review/trust the four agent-bus hooks in Codex /hooks"
+    echo '          Existing unrelated hooks and Codex trust settings were preserved.'
+  fi
+}
+
 remove_legacy() {
   local f
   for f in "$HOME/.codex/hooks.json" "$HOME/.cursor/hooks.json"; do
@@ -100,5 +130,6 @@ remove_legacy() {
 
 ((do_claude)) && install_claude
 ((do_opencode)) && install_opencode
+((do_codex)) && install_codex
 ((legacy)) && remove_legacy
 exit 0

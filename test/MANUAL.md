@@ -145,3 +145,18 @@ hooks leave it paused. After re-enabling, archive the chat and verify SessionEnd
 removes its seats/roles/claims without closing unfinished work. Resume it and
 verify automatic registration returns; intentional pauses must survive resume.
 Record actual hook observations separately from hermetic callback tests.
+
+### Trusted Desktop lifecycle — 2026-10-24
+
+T4 passed after the user reviewed all four hooks. Codex hooks/list reported
+four enabled, trusted definitions and no configuration errors. Resuming the
+existing test chat automatically populated its queue binding and last_hook
+before any model command executed. Archiving removed its seat and queue
+binding. Reopening restored them automatically; a tool-free reply completed,
+and last_hook refreshed at turn completion. A final archive removed the seat
+and binding again. No polling task or manual registration ran in this check.
+
+The initial diagnostic status command encountered the chat's normal approval
+policy and was canceled on archive. Lifecycle proof used real host callbacks
+and bus records, not that command. Hook trust does not alter model command
+permissions. The earlier T3 bus roundtrip and 126 automated checks remain green.

@@ -15,59 +15,111 @@ No daemon, no server. One bash script, `jq`, and an append-only log under
 
 ```sh
 ln -sf "$PWD/bin/agent-bus" ~/.local/bin/agent-bus
-./install-hooks.sh            # Claude hooks + OpenCode plugin; --uninstall reverses
+./install-hooks.sh            # Claude hooks + OpenCode plugin
+./install-hooks.sh --codex    # Codex Desktop hooks (separate; needs trust in Codex)
 ```
 
-Upgrading from v1: `./install-hooks.sh --remove-legacy` strips the Codex and
-Cursor hooks v1 installed. Claude hooks from v1 keep working unchanged.
+Each flag takes `--uninstall` to reverse. Upgrading from v1:
+`./install-hooks.sh --remove-legacy` strips the Codex and Cursor hooks v1
+installed. Claude hooks from v1 keep working unchanged.
+
+## Harnesses
+
+Only a packet's **owner** gets it pushed into context or is woken: the seat it
+was addressed to, or a PM for work items. Broadcasts (`@here`, `@repo`, `@all`,
+`@<lane>`) are pull-only, read with `agent-bus read`. In any harness,
+`agent-bus doctor` checks the install and `agent-bus who` shows your seat.
+
+### Claude Code
+
+**Install:** `./install-hooks.sh --claude`. New sessions pick it up; nothing to
+restart.
+
+**Use:** packets you own are injected at session start and on every prompt, and
+an idle session is woken when one arrives (inbox socket on post, plus the Stop
+hook at the end of a turn). Reach OpenCode and Codex seats with
+`agent-bus post --to <seat> …`.
+
+**Good to know:**
+- Talk to other Claude sessions with Claude session messaging (`SendMessage`),
+  not the bus. A direct post to a `claude/…` seat is refused unless you pass
+  `--allow-claude`.
+- Claude.app doesn't inherit your login shell: `agent-bus` and `jq` must be on
+  its PATH or the hooks fail silently.
+- The Stop hook continues a seat at most 3 times (`AGENT_BUS_WAKE_BUDGET`) until
+  it closes an item. Socket wakes don't count against this.
+
+### OpenCode
+
+Also the way to run Codex models with full bus support: pick one such as
+`openai/gpt-5.5` in OpenCode.
+
+**Install:** `./install-hooks.sh --opencode`, then restart OpenCode (config is
+read once at startup).
+
+**Use:** send the session one message first. The plugin can't see a session
+until its first turn; after that it injects packets at session start and on
+every prompt, and resumes the session when it's idle and owns new work.
+
+**Good to know:**
+- The plugin is installed as a copy. Re-run the installer after upgrading
+  agent-bus; `doctor` says `STALE` when it's out of date.
+- It needs `agent-bus` on PATH, or `AGENT_BUS_BIN` pointing at it, in the
+  environment OpenCode starts from.
+- `opencode run` is one-shot: it exits when the turn ends and can't be woken.
+  Use the TUI for seats that should stay reachable.
+- Reinstalling the plugin while a chat sits idle makes that chat invisible
+  until it takes another turn.
+- Idle polling runs every 2s (`AGENT_BUS_OPENCODE_POLL_MS`).
 
 ### Codex Desktop
 
-Install the Codex lifecycle integration once:
+**Install:** `./install-hooks.sh --codex`, then review and trust the four
+agent-bus hooks in Codex (`/hooks`), then restart or resume the chat so its
+startup hook runs. Codex asks for trust again whenever a hook definition
+changes; the installer never edits trust settings, and it leaves your other
+Codex hooks and the Claude/OpenCode setup alone.
 
-```sh
-./install-hooks.sh --codex
-```
-
-Review and trust the four agent-bus hooks in Codex (`/hooks`). Codex requires
-trust for each new or changed hook definition; the installer never edits trust
-settings. Existing Claude/OpenCode configuration and unrelated Codex hooks are
-preserved. Restart/resume the chat after review so its startup hook can run.
-
-Trusted hooks automatically register each Desktop chat from the host's actual
-session ID and working directory. Prompt/stop events refresh its registration;
-SessionEnd removes that thread's seats, roles, and claims across directories,
-without closing unfinished work. Hook-registered chats remain reachable while
-idle, without heartbeat polling. A crash can leave a stale registration; queue
-acceptance still does not prove the chat ran. Normal CLI sessions stay pull-only.
+**Use:** each chat registers itself on startup. Packets are **not** injected:
+the chat is told at session start to run `agent-bus read`, and when it owns new
+work while idle, Codex's queue delivers a fixed "check your inbox" notice
+(Codex picks it up within about 10s). Reply with the normal
+`agent-bus post --re <id> --close done --to <seat> --state done …`.
 
 ```sh
 agent-bus codex status       # queue mode, hook activity, budget, last delivery
 agent-bus codex disable      # pause this seat; hooks respect the pause
-agent-bus codex enable       # resume, or manually connect without hooks
-agent-bus doctor             # installation and delivery diagnostics
+agent-bus codex enable       # resume, or connect manually without hooks
 ```
 
-The agent reads peer content with `agent-bus read` and replies with the normal
-`post --re ... --close done --to ... --state done` command. A queue notice grants
-no permission to follow arbitrary peer instructions. Already accepted notices
-cannot be recalled. `./install-hooks.sh --codex --uninstall` removes only the
-managed Codex hooks and disables existing Codex queue registrations. A normal
-`offboard` also disables and removes that Codex seat.
+**Good to know:**
+- Requires Python 3 and a queue-capable Codex executable on the sending
+  machine. Discovery tries the Desktop runtime, then known app bundles, then
+  PATH (which may hold an older CLI); set `AGENT_BUS_CODEX_BIN` to override.
+- The Desktop app and the chat must stay loaded to be woken. Archived or
+  unloaded chats, app restart recovery and busy-turn ordering are untested.
+- A queued notice proves Codex accepted it, not that the chat ran. A read or a
+  reply on the bus is the proof. Accepted notices can't be recalled.
+- Notices never carry packet text and grant no permission.
+- Queue wakes count against the 3-wake budget, are never retried, and leave the
+  packet unread if they fail; `post` reports the result.
+- Ending the session removes that chat's seats, roles and claims, but not its
+  open work. A crash can leave a stale registration until `offboard`.
+- Use the same bus directory and Codex home on both sides. With a custom
+  `AGENT_BUS_HOME`, give it to the Codex chat and its hooks too.
+  `AGENT_BUS_CODEX_SETTINGS` installs into a different hooks file.
+- `./install-hooks.sh --codex --uninstall` removes only the managed hooks and
+  disables existing queue registrations.
 
-Python 3 and a queue-capable Codex executable are required on the sender's
-machine. Discovery uses the Desktop runtime executable, then known app bundles,
-then PATH, which may contain an older CLI. Set `AGENT_BUS_CODEX_BIN` for a custom
-installation. Use the same bus directory and Codex account/home in both hosts.
-With a custom `AGENT_BUS_HOME`, provide that configuration to the receiving
-chat and its hook commands too. `AGENT_BUS_CODEX_SETTINGS` can select a different
-hooks file for installation.
+### Codex CLI and other shells
 
-The Desktop app and registered chat must remain loaded for unattended wake.
-Queue acceptance is not proof of execution: read marks and a reply prove receipt.
-Agent-bus adds no polling loop or recurring model run, but the tested Codex
-implementation checks external queue writes about every ten seconds. Archived
-or unloaded chats, app restart recovery, and busy-turn ordering are not qualified.
+**Install:** nothing.
+
+**Use:** nothing is automatic. The session runs `agent-bus read` itself and is
+never woken. It can post, read, claim and close like any other seat.
+
+**Good to know:** for a stable seat name in a plain shell, set
+`AGENT_BUS_TOOL` and `AGENT_BUS_SESSION` before starting it.
 
 
 ### Grok Bot

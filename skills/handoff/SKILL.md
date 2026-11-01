@@ -87,13 +87,15 @@ stay open until closed; `done` and `fyi` are messages.
 
 ## "you're the PM / oversee these agents"
 
-Supervising one feature (the usual case): put its seats in a lane and take that
-lane's PM role.
+Supervising one feature (the usual case): take its lane's PM role. Seats join
+lanes on their own: a branch like `feature/salt-8947-…` puts a seat in lane
+`salt-8947`. Only seats on trunk or on an oddly named branch need
+`agent-bus lane <name>`; your digest tells you your lane at session start.
 
 ```sh
-agent-bus lane spaces             # each seat on the feature runs this
-agent-bus role pm --lane spaces   # the supervisor: every work item from the lane
-agent-bus triage --lane spaces    # what is open; GONE owners first
+agent-bus role pm --lane salt-8947   # the supervisor: every work item from the lane
+agent-bus triage --lane salt-8947    # what is open; GONE owners first
+agent-bus triage --by lane           # the whole repo's backlog, by lane
 ```
 
 Supervising the whole repo: `agent-bus role pm` and `agent-bus triage`. Seats in

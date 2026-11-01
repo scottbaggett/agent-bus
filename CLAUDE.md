@@ -46,7 +46,7 @@ agent-bus post --re <id> --close handed-off --to <seat> --state handoff -m "..."
 agent-bus resolve <id> --reason done|denied|canceled|duplicate
 agent-bus triage                 # open work by owner: GONE, NOT PICKED UP, STALE
 agent-bus claim path/to/file     # before editing when another seat shares your worktree
-agent-bus lane <feature>         # join the feature's lane; peers reach it as @<feature>
+agent-bus lane [<name>]          # show your lane (auto from the branch's ticket) or set it
 agent-bus role pm --lane <f>     # supervising one feature (plain `role pm`: the whole repo)
 agent-bus offboard               # standing down: PM role + claims released
 ```

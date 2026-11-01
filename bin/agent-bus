@@ -197,7 +197,18 @@ resolve_identity() {
     ADDR="$SCOPE"
   fi
   SEAT=$(slugify "$ADDR")
-  LANE=$(state_get '.lane // ""' | tr -d '"')
+  [ -n "${AGENT_BUS_BRANCH:-}" ] && BRANCH="$AGENT_BUS_BRANCH"
+  # Lane: AGENT_BUS_LANE, then `agent-bus lane X` on this seat, then derived
+  # from the branch or worktree name. LANE_SRC says which, so a wrong guess is
+  # easy to spot and override.
+  local explicit; explicit=$(state_get '.lane // ""' | tr -d '"')
+  if [ -n "${AGENT_BUS_LANE:-}" ] && valid_lane "$AGENT_BUS_LANE"; then LANE="$AGENT_BUS_LANE"; LANE_SRC=env
+  elif [ -n "$explicit" ]; then LANE="$explicit"; LANE_SRC=explicit
+  else
+    local d; d=$(jq -nr --arg b "$BRANCH" --arg w "$WT" "$JQ_LANE"'lane_from($b; $w) | "\(.lane)\t\(.src)"')
+    LANE=${d%%$'\t'*}; LANE_SRC=${d#*$'\t'}
+    valid_lane "$LANE" || { LANE=''; LANE_SRC=unfiled; }
+  fi
   ME=$(jq -nc --arg addr "$ADDR" --arg scope "$SCOPE" --arg session "$SESSION" \
     --arg repo "$REPO" --arg repo_id "$REPO_ID" --arg wt "$WT" --arg lane "$LANE" \
     '{addr:$addr,scope:$scope,session:$session,repo:$repo,repo_id:$repo_id,wt:$wt,lane:$lane}')
@@ -225,10 +236,11 @@ touch_seat() {
   jq -nc --arg addr "$ADDR" --arg tool "$TOOL" --arg repo "$REPO" --arg repo_id "$REPO_ID" \
     --arg wt "$WT" --arg branch "$BRANCH" --arg cwd "$TOP" --arg session "$SESSION" \
     --arg socket "$socket" --arg codex_queue "$codex_queue" --argjson epoch "$now" \
-    --argjson last_hook "${last_hook:-0}" --arg lane "$LANE" \
+    --argjson last_hook "${last_hook:-0}" --arg lane "$LANE" --arg lane_src "${LANE_SRC:-unfiled}" \
     --arg grok_webhook "$grok_webhook" --arg grok_secret_env "$grok_secret_env" \
     '{addr:$addr,tool:$tool,repo:$repo,repo_id:$repo_id,wt:$wt,branch:$branch,cwd:$cwd,
-      session:$session,socket:$socket,codex_queue:$codex_queue,epoch:$epoch,last_hook:$last_hook,lane:$lane}
+      session:$session,socket:$socket,codex_queue:$codex_queue,epoch:$epoch,last_hook:$last_hook,lane:$lane,
+      lane_src:$lane_src}
      + (if $grok_webhook != "" then {grok_webhook:$grok_webhook,grok_secret_env:$grok_secret_env} else {} end)' >"$tmpf" \
     && mv "$tmpf" "$f" || rm -f "$tmpf"
 }
@@ -293,7 +305,42 @@ lane_exists() {
 # standing uses these, so reader side, sender side (push) and triage agree.
 # $pm is the repo PM's address, $lanepms maps lane -> PM address, $me is a
 # seat object.
-JQ_LIB="$JQ_SEAT_LIVE"'
+# Lane derivation, one definition for both the seat's own lane and read-time
+# grouping of old rows. A ticket key (salt-8947) in the branch or worktree name
+# wins; otherwise a non-trunk branch's slug; otherwise unfiled. Prefixes that
+# look like versions or product names never count as tickets.
+# AGENT_BUS_TICKET_PREFIXES ("salt eng"), when set, is the only accepted list.
+JQ_LANE='
+def lane_prefixes: '"$(jq -nc --arg p "${AGENT_BUS_TICKET_PREFIXES:-}" '$p | split(" ") | map(select(length > 0) | ascii_downcase)')"';
+def lane_deny: ["utf","gpt","sha","rfc","iso","sonnet","opus","haiku","claude","codex","gemini","llama",
+                "python","node","ubuntu","macos","ios","win","http","port","step","phase","round","pass","v"];
+def ticket_of($s): ($s // "" | tostring | ascii_downcase) as $t
+  | [$t | scan("(?:^|[^a-z0-9])([a-z][a-z0-9]{1,9})-([0-9]{2,6})(?![0-9])") | .[0] + "-" + .[1]]
+  | map(select((split("-")[0]) as $p
+               | if (lane_prefixes | length) > 0 then (lane_prefixes | index($p)) != null
+                 else (lane_deny | index($p)) == null end))
+  | first // "";
+def slug_of($b): ($b // "" | tostring | ascii_downcase) as $b
+  | if $b == "" or $b == "-" or $b == "head" or ($b | startswith("detached@"))
+       or ((["main","master","develop","dev","trunk","staging","production"] | index($b)) != null) then ""
+    else ($b | sub("^(feat|feature|fix|bugfix|hotfix|chore|docs|refactor|test|wip|release|integration|preview|claude|codex|cursor|opencode|grok|worktree)[/-]"; "")
+             | gsub("[^a-z0-9]+"; "-") | sub("^-+"; "") | .[0:32] | sub("-+$"; "")) end
+  | . as $x | if (["here","repo","all","pm"] | index($x)) != null then "" else $x end;
+def lane_from($branch; $wt):
+  ticket_of($branch) as $t | ticket_of($wt) as $w | slug_of($branch) as $s
+  | if $t != "" then {lane: $t, src: "branch"}
+    elif $w != "" then {lane: $w, src: "worktree"}
+    elif $s != "" then {lane: $s, src: "branch name"}
+    else {lane: "", src: "unfiled"} end;
+# The lane a stored packet belongs to: stamped, else derived from where it was
+# sent, else a ticket named in its subject.
+def lane_of: (.lane // "") as $l
+  | if $l != "" then $l
+    else (lane_from(.branch; .wt).lane) as $d
+    | if $d != "" then $d else (ticket_of(.subject) | if . == "" then "unfiled" else . end) end end;
+'
+
+JQ_LIB="$JQ_LANE$JQ_SEAT_LIVE"'
 def clean: tostring | gsub("[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]"; "");
 def sup: .state as $s | ["needs-review","blocked","handoff","question"] | index($s) != null;
 def same_repo($me): if (.repo_id // "") != "" then .repo_id == $me.repo_id else .repo == $me.repo end;
@@ -395,6 +442,7 @@ open_items() {
     | [$L[] | select(.kind == "msg" and sup and same_repo($me) and ($c[.id] | not)
                      and ((.probe // false) | not))
       | .id as $id
+      | . + {lane: lane_of}
       | select($lane == "" or (lanes_of | index($lane)))
       | (if ((.to // "") | startswith("@")) then
            ([lane_pm_of, $pm, "(no PM)"] | map(select(. != "")) | first)
@@ -915,7 +963,7 @@ cmd_whoami() {
   printf 'seat     %s\nscope    %s\nsession  %s\nrepo     %s\nrepo_id  %s\nworktree %s\nbranch   %s\n' \
     "$ADDR" "$SCOPE" "$SESSION" "$REPO" "$REPO_ID" "$WT" "$BRANCH"
   local lpm=''; [ -n "$LANE" ] && lpm=$(lane_pm_seat "$LANE")
-  printf 'lane     %s\n' "${LANE:-(none)}"
+  if [ -n "$LANE" ]; then printf 'lane     %s (%s)\n' "$LANE" "$LANE_SRC"; else printf 'lane     (none)\n'; fi
   [ -n "$LANE" ] && printf 'lane pm  %s\n' "$([ "$lpm" = "$ADDR" ] && echo yes || echo "${lpm:-(none)}")"
   printf 'pm       %s\nwake     %s/%s\ncwd      %s\nbus      %s\n' \
     "$([ "$pm" = "$ADDR" ] && echo yes || echo "${pm:-(none)}")" \
@@ -1028,6 +1076,9 @@ cmd_post() {
   ((bytes <= 65536)) || die "post: body is $bytes bytes (max 65536) — link or trim it"
   [ -n "$subject" ] || subject=$(printf '%s' "$body" | sed -n '1{s/^#\{1,\} *//;s/\r$//;p;}' | cut -c1-120)
 
+  # A lane taken from a ticket key also travels as an external reference.
+  local ref=''
+  if [ "$LANE_SRC" = branch ] || [ "$LANE_SRC" = worktree ]; then ref=$(printf '%s' "$LANE" | tr a-z A-Z); fi
   local id rec
   id="$(date -u +%Y%m%dT%H%M%SZ)-$(head -c4 /dev/urandom | xxd -p)"
   printf '%s\n' "$body" >"$BUS/msg/$id.md"
@@ -1038,11 +1089,13 @@ cmd_post() {
     --arg repo "$REPO" --arg repo_id "$REPO_ID" --arg wt "$WT" --arg branch "$BRANCH" \
     --arg cwd "$TOP" --arg subject "${subject:0:200}" --argjson touched "$touched" \
     --arg re "$re" --arg close "$close" --arg lane "$LANE" \
+    --arg ref "$ref" \
     '{kind:"msg",id:$id,ts:$ts,epoch:$epoch,from:$from,session:$session,to:$to,state:$state,
       repo:$repo,repo_id:$repo_id,wt:$wt,branch:$branch,cwd:$cwd,subject:$subject,
       touched:$touched,re:(if $re == "" then null else $re end)}
      + (if $close == "" then {} else {close:$close} end)
-     + (if $lane == "" then {} else {lane:$lane} end)')
+     + (if $lane == "" then {} else {lane:$lane} end)
+     + (if $ref == "" then {} else {refs:[$ref]} end)')
   ledger_append "$rec"
   # A reply proves the parent was seen.
   [ -n "$re" ] && mark_read "[\"$re\"]"
@@ -1091,6 +1144,23 @@ check_closable() {
   return 1
 }
 
+orient() {
+  [ "$REPO" = - ] && return 0
+  if [ -z "$LANE" ]; then
+    printf 'agent-bus: you are %s, not in a lane (branch %s names no ticket). If this work has a ticket or feature name, run: agent-bus lane <name>\n' \
+      "$ADDR" "$BRANCH"
+    return 0
+  fi
+  local n peers pm
+  n=$(open_items "$LANE" | grep -c . || true)
+  peers=$(seat_rows | jq -rs --arg l "$LANE" --arg rid "$REPO_ID" --arg me "$ADDR" \
+    --argjson cut "$(( $(now_epoch) - SEAT_TTL ))" --argjson codex_cut "$(codex_idle_cut)" \
+    "$JQ_SEAT_LIVE"'[.[] | select(.lane == $l and .repo_id == $rid and .addr != $me and buslive($cut; $codex_cut)) | .addr] | join(", ")')
+  pm=$(lane_pm_seat "$LANE")
+  printf 'agent-bus: you are %s in lane @%s (from %s) · %s open item(s) in this lane%s%s. Wrong lane? agent-bus lane <name>\n' \
+    "$ADDR" "$LANE" "$LANE_SRC" "${n:-0}" "${peers:+ · peers: $peers}" "${pm:+ · lane PM: $pm}" | sanitize
+}
+
 cmd_read() {
   local mode=unread peek=0 digest=0
   while [ $# -gt 0 ]; do
@@ -1104,6 +1174,13 @@ cmd_read() {
     esac
     shift
   done
+  # First digest of a session orients the seat even with no mail: where it is
+  # filed and who else is on the same work. This replaces telling every new
+  # agent to organize on the bus.
+  if ((digest)) && [ "$(state_get '.oriented // false')" != true ]; then
+    orient
+    state_update '.oriented = true'
+  fi
   local rows; rows=$(select_packets "$mode")
   local claims; claims=$(repo_claims | jq -c --arg me "$ADDR" 'select(.addr != $me)')
   if [ -z "$rows" ]; then
@@ -1157,12 +1234,15 @@ cmd_resolve() {
 }
 
 cmd_triage() {
-  local lane=''
-  case "${1:-}" in
-    --lane) lane="${2:-}"; valid_lane "$lane" || die "triage: --lane needs a lane name" ;;
-    '') ;;
-    *) die "triage: usage — agent-bus triage [--lane <name>]" ;;
-  esac
+  local lane='' by=owner
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --lane) lane="${2:-}"; valid_lane "$lane" || die "triage: --lane needs a lane name"; shift ;;
+      --by) [ "${2:-}" = lane ] || [ "${2:-}" = owner ] || die "triage: --by owner|lane"; by="$2"; shift ;;
+      *) die "triage: usage — agent-bus triage [--lane <name>] [--by owner|lane]" ;;
+    esac
+    shift
+  done
   [ "$REPO" = - ] && die "triage: not in a git repo — cd to a worktree first"
   local items; items=$(open_items "$lane")
   if [ -z "$items" ]; then printf 'agent-bus: no open work in %s%s\n' "$REPO" "${lane:+ lane @$lane}"; return 0; fi
@@ -1171,10 +1251,16 @@ cmd_triage() {
       | if $s < 3600 then "\($s / 60 | floor)m" elif $s < 86400 then "\($s / 3600 | floor)h"
         else "\($s / 86400 | floor)d" end;
     "open work: \(length) item(s), \(map(select(.gone)) | length) with no live owner, \(map(select(.stale)) | length) stale",
+    (if $by == "lane" then
+      (group_by(.lane) | sort_by(-length)[]
+       | "\nlane @\(.[0].lane | clean)  \(length) open, \(map(select(.gone)) | length) with no live owner, oldest \(min_by(.epoch) | age)",
+         (.[] | "  [\(.state)] \(age) ago  \(.from | clean) -> \(.owner | clean)\(if .gone then " (GONE)" else "" end)  \(.subject // "" | clean)  (\(.id | clean))"))
+    else
     (group_by(.owner)[]
      | "\nowner \(.[0].owner | clean)\(if .[0].gone then "  (GONE — hand these on or close them)" else "" end)",
        (.[] | "  [\(.state)] \(age) ago  from \(.from | clean)  \(.subject // "" | clean)  (\(.id | clean))\(
-         if .unread then "  NOT PICKED UP" else "" end)\(if .stale then "  STALE" else "" end)"))' <<<"$items"
+         if .unread then "  NOT PICKED UP" else "" end)\(if .stale then "  STALE" else "" end)"))
+    end)' --arg by "$by" <<<"$items"
   printf '\n%s\n' "$HINTS" | tail -n 2
 }
 
@@ -1274,8 +1360,10 @@ cmd_role() {
 # Join, show or leave a lane: the feature this seat is working on.
 cmd_lane() {
   case "${1:-}" in
-    '') printf '%s\n' "${LANE:-(none)}" ;;
-    --clear) state_update 'del(.lane)'; LANE=''; touch_seat; printf 'left lane\n' ;;
+    '') if [ -n "$LANE" ]; then printf '%s (%s)\n' "$LANE" "$LANE_SRC"; else printf '(none — branch %s carries no ticket)\n' "$BRANCH"; fi ;;
+    --clear) state_update 'del(.lane)'; resolve_identity; touch_seat
+             if [ -n "$LANE" ]; then printf 'explicit lane cleared; now in @%s (%s)\n' "$LANE" "$LANE_SRC"
+             else printf 'left lane\n'; fi ;;
     -*) die "lane: usage — agent-bus lane [<name> | --clear]" ;;
     *) valid_lane "$1" || die "lane: '$1' is not a lane name ([a-z0-9-], max 32, not here|repo|all|pm)"
        state_update '.lane = $l' --arg l "$1"; LANE="$1"; touch_seat
@@ -1315,7 +1403,7 @@ cmd_snapshot() {
   now=$(now_epoch)
   seats=$(seat_rows | jq -sc --argjson cut "$((now - SEAT_TTL))" --argjson codex_cut "$(codex_idle_cut)" \
     "$JQ_SEAT_LIVE"'[.[] | select(buslive($cut; $codex_cut))
-      | {addr, tool, repo, repo_id, wt, branch, lane: (.lane // ""), epoch: ((.epoch // 0) | tonumber? // 0),
+      | {addr, tool, repo, repo_id, wt, branch, lane: (.lane // ""), lane_src: (.lane_src // ""), epoch: ((.epoch // 0) | tonumber? // 0),
          last_hook: ((.last_hook // 0) | tonumber? // 0),
          scope: ((.tool // "") + "/" + (.wt // "")),
          wakeable: (((.socket // "") != "") or ((.codex_queue // "") != "")
@@ -1331,7 +1419,7 @@ cmd_snapshot() {
     esac
   done
   jq -nRc --argjson now "$now" --arg bus "$BUS" --argjson seats "$seats" \
-    --argjson pms "$pms" --argjson lanepms "$lanepms" --argjson stale "$((STALE_HOURS * 3600))" '
+    --argjson pms "$pms" --argjson lanepms "$lanepms" --argjson stale "$((STALE_HOURS * 3600))" "$JQ_LANE"'
     def sup: .state as $s | ["needs-review","blocked","handoff","question"] | index($s) != null;
     def lanes_of: [((.to // "") | select(startswith("@")) | .[1:]), (.lane // "")] | map(select(. != ""));
     [inputs | fromjson? // empty] as $L
@@ -1341,6 +1429,7 @@ cmd_snapshot() {
     | (reduce ($L[] | select(.kind == "msg")) as $m ({}; .[$m.id] = ($m.subject // ""))) as $subj
     | {now: $now, bus: $bus, seats: $seats, pms: $pms, lanepms: $lanepms,
        open: [$L[] | select(.kind == "msg" and sup and ($c[.id] | not) and ((.probe // false) | not))
+         | . + {lane: lane_of}
          | (.repo_id // "") as $rid | ($lanepms[$rid] // {}) as $lp
          | (if ((.to // "") | startswith("@")) then
               ([(lanes_of[] | ($lp[.] // empty)), ($pms[$rid] // empty), "(no PM)"] | first)

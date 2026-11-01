@@ -22,6 +22,9 @@ BUS_HOME=$(mktemp -d)
 trap 'rm -rf "$BUS_HOME"; [ -n "${SRV:-}" ] && kill "$SRV" 2>/dev/null; [ -n "${GROK_SRV:-}" ] && kill "$GROK_SRV" 2>/dev/null; true' EXIT
 GROK_SRV=
 export AGENT_BUS_HOME="$BUS_HOME" AGENT_BUS_NO_PUSH=1 AGENT_BUS_NO_AUTO_GC=1
+# Lanes are derived from the branch; pin a trunk branch so fixtures start
+# unfiled no matter which branch the suite runs on.
+export AGENT_BUS_BRANCH=develop
 
 # Fixture seats: seat <name> <tool> <worktree> <cmd...>
 # Fixture seats are mostly claude, so their posts pass --allow-claude; the
@@ -239,6 +242,40 @@ assert_has "offboard releases the lane PM role" "1 role(s)" "$(lp offboard)"
 assert_has "lane PM is gone" "no PM registered for lane @spaces" "$(lp role --lane spaces)"
 l1 lane --clear >/dev/null
 assert_has "a seat can leave its lane" "lane     (none)" "$(l1 whoami)"
+
+# --- lanes infer themselves from the branch ---
+br() { local b="$1"; shift; AGENT_BUS_BRANCH="$b" AGENT_BUS_SESSION="br-$b" AGENT_BUS_TOOL=opencode AGENT_BUS_WT=wbr "$BIN" "$@"; }
+assert_has "a ticket in the branch names the lane" "lane     salt-8947 (branch)" "$(br feature/salt-8947-skills whoami)"
+assert_has "ticket keys are case-insensitive" "lane     salt-6176 (branch)" "$(br feat/SALT-6176_bulk whoami)"
+assert_has "a version is not a ticket" "lane     sonnet-5-5-orchestrator (branch name)" "$(br claude/sonnet-5-5-orchestrator whoami)"
+assert_has "no ticket: the branch slug is the lane" "lane     login-redirect (branch name)" "$(br fix/login-redirect whoami)"
+assert_has "trunk branches are unfiled" "lane     (none)" "$(br develop whoami)"
+assert_has "a ticket in the worktree name counts" "lane     salt-7281 (worktree)" \
+  "$(AGENT_BUS_BRANCH=develop AGENT_BUS_SESSION=wtk AGENT_BUS_TOOL=opencode AGENT_BUS_WT=salt-7281-fix "$BIN" whoami)"
+assert_has "an explicit lane wins over the branch" "lane     parity (explicit)" \
+  "$(br feature/salt-8947-skills lane parity >/dev/null; br feature/salt-8947-skills whoami)"
+assert_has "clearing it falls back to the branch" "now in @salt-8947 (branch)" "$(br feature/salt-8947-skills lane --clear)"
+assert_has "AGENT_BUS_LANE overrides everything" "lane     forced (env)" "$(AGENT_BUS_LANE=forced br feature/salt-8947-skills whoami)"
+assert_has "AGENT_BUS_TICKET_PREFIXES limits ticket keys" "lane     salt-8947-skills (branch name)" \
+  "$(AGENT_BUS_TICKET_PREFIXES=eng br feature/salt-8947-skills whoami)"
+br fix/salt-8947-other who >/dev/null
+out=$(br feature/salt-8947-skills post --to @salt-8947 --state question -m '# lane q')
+assert_has "a derived lane is addressable" "posted" "$out"
+assert_eq "posts carry the lane and the ticket ref" '"salt-8947" ["SALT-8947"]' \
+  "$(tail -n 1 "$BUS_HOME/ledger.jsonl" | jq -rc '"\(.lane | tojson) \(.refs | tojson)"')"
+assert_has "lane peers get @lane posts" "lane q" "$(br fix/salt-8947-other read --peek)"
+# Orientation: the first digest of a session says where the seat is filed.
+out=$(br fix/salt-8947-other digest)
+assert_has "first digest orients the seat" "in lane @salt-8947 (from branch)" "$out"
+assert_has "orientation names lane peers" "peers: opencode/wbr." "$out"
+assert_lacks "orientation shows once per session" "in lane @" "$(br fix/salt-8947-other digest)"
+assert_has "an unfiled seat is asked to pick a lane" "not in a lane (branch develop" "$(br develop digest)"
+# Old rows with no stamped lane are grouped by where they were sent from.
+printf '{"kind":"msg","id":"20200104T000000Z-0000ccc1","epoch":%s,"from":"x","to":"claude/wgone","state":"blocked","subject":"legacy","repo":"r","repo_id":"%s","branch":"feature/salt-4242-old","wt":"w"}\n' \
+  "$(date -u +%s)" "$(a whoami | awk '/^repo_id/{print $2}')" >>"$BUS_HOME/ledger.jsonl"
+assert_has "old rows get their lane on read" "lane @salt-4242" "$(a triage --by lane)"
+assert_eq "snapshot reports the derived lane" "salt-4242" \
+  "$("$BIN" snapshot | jq -r '.open[] | select(.id == "20200104T000000Z-0000ccc1") | .lane')"
 
 # --- snapshot: one machine-wide JSON view for viewers ---
 snap=$("$BIN" snapshot)

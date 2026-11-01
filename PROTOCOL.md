@@ -106,16 +106,39 @@ a holder gone past `AGENT_BUS_ROLE_TTL` (48h) loses it at gc.
 
 ## Lanes
 
-A lane is the set of seats working on one feature, whatever worktrees they sit
-in. `agent-bus lane spaces` puts this seat in lane `spaces` (`--clear` leaves);
-packets it posts carry the lane.
+A lane is the set of seats working on one ticket or feature, whatever worktrees
+they sit in. Seats file themselves; nobody has to tell them to. On every command
+a seat works out its lane, first match wins:
+
+1. `AGENT_BUS_LANE` in the environment.
+2. `agent-bus lane <name>` run on this seat (`--clear` drops it again).
+3. A ticket key in the branch name: `feature/salt-8947-skills` is lane `salt-8947`.
+4. A ticket key in the worktree directory name.
+5. The branch name itself, minus prefixes like `feat/` or `claude/`:
+   `fix/login-redirect` is lane `login-redirect`.
+6. Otherwise none: trunk branches (`main`, `develop`, …) and detached heads.
+
+A ticket key is letters, a dash and 2–6 digits. Prefixes that are really
+versions or product names (`gpt-5`, `utf-8`, `sonnet-4`) never count. Set
+`AGENT_BUS_TICKET_PREFIXES="salt eng"` to accept only those prefixes. `whoami`
+and `lane` show the lane and which rule picked it.
+
+Packets carry their sender's lane, and a lane taken from a ticket key also
+travels as `refs: ["SALT-8947"]`. Older packets with no lane are grouped on
+read by the same rules, applied to the branch and worktree they were sent from,
+then to a ticket named in their subject. `agent-bus triage --by lane` groups the
+open backlog that way.
+
+The first digest of each session orients the seat, even with no mail: its lane
+and why, the lane's open items, its peers in the lane and its lane PM. A seat
+with no lane is asked to pick one.
 
 `agent-bus role pm --lane spaces` makes a seat that lane's PM. For its lane only,
 a lane PM does what the repo PM does for the whole repo: it gets a copy of every
 work item posted by the lane's seats or sent to `@spaces`, owns the ones sent to
 `@spaces` or to `@pm` from a lane seat, and may close any of them. The repo PM
 still sees everything. `agent-bus triage --lane spaces` lists the lane's open
-work.
+work, and `triage --by lane` groups the whole repo's.
 
 Lane names are `[a-z0-9-]`, up to 32 characters, and not `here`, `repo`, `all`
 or `pm`.

@@ -1307,6 +1307,61 @@ cmd_offboard() {
   return 0
 }
 
+# Machine-wide state as one JSON object, for viewers (the menu bar app). Uses the
+# same liveness, ownership and close rules as who/triage, across every repo, so
+# a viewer never re-implements them. Read-only: never touches a seat.
+cmd_snapshot() {
+  local now f base rid a l seats pms='{}' lanepms='{}'
+  now=$(now_epoch)
+  seats=$(seat_rows | jq -sc --argjson cut "$((now - SEAT_TTL))" --argjson codex_cut "$(codex_idle_cut)" \
+    "$JQ_SEAT_LIVE"'[.[] | select(buslive($cut; $codex_cut))
+      | {addr, tool, repo, repo_id, wt, branch, lane: (.lane // ""), epoch: ((.epoch // 0) | tonumber? // 0),
+         last_hook: ((.last_hook // 0) | tonumber? // 0),
+         scope: ((.tool // "") + "/" + (.wt // "")),
+         wakeable: (((.socket // "") != "") or ((.codex_queue // "") != "")
+                    or ((.grok_webhook // "") != "") or .tool == "opencode")}]
+      | sort_by(-.epoch)')
+  for f in "$BUS"/state/roles/*.pm; do
+    [ -f "$f" ] || continue
+    base=$(basename "$f" .pm); rid=${base%%.*}; a=$(head -1 "$f" | tr -d '\n')
+    case "$base" in
+      *.lane.*) l=${base#*.lane.}
+                lanepms=$(jq -c --arg r "$rid" --arg l "$l" --arg a "$a" '.[$r][$l] = $a' <<<"$lanepms") ;;
+      *) pms=$(jq -c --arg r "$rid" --arg a "$a" '.[$r] = $a' <<<"$pms") ;;
+    esac
+  done
+  jq -nRc --argjson now "$now" --arg bus "$BUS" --argjson seats "$seats" \
+    --argjson pms "$pms" --argjson lanepms "$lanepms" --argjson stale "$((STALE_HOURS * 3600))" '
+    def sup: .state as $s | ["needs-review","blocked","handoff","question"] | index($s) != null;
+    def lanes_of: [((.to // "") | select(startswith("@")) | .[1:]), (.lane // "")] | map(select(. != ""));
+    [inputs | fromjson? // empty] as $L
+    | (reduce ($L[] | if .kind == "resolve" then .msg
+                      elif .kind == "msg" and (.close // null) != null then .re
+                      else empty end) as $i ({}; .[$i] = true)) as $c
+    | (reduce ($L[] | select(.kind == "msg")) as $m ({}; .[$m.id] = ($m.subject // ""))) as $subj
+    | {now: $now, bus: $bus, seats: $seats, pms: $pms, lanepms: $lanepms,
+       open: [$L[] | select(.kind == "msg" and sup and ($c[.id] | not) and ((.probe // false) | not))
+         | (.repo_id // "") as $rid | ($lanepms[$rid] // {}) as $lp
+         | (if ((.to // "") | startswith("@")) then
+              ([(lanes_of[] | ($lp[.] // empty)), ($pms[$rid] // empty), "(no PM)"] | first)
+            else .to end) as $o
+         | {id, epoch: (.epoch // 0), from, to, state, subject: (.subject // ""), repo: (.repo // "-"),
+            repo_id: $rid, lane: (.lane // ""), owner: $o,
+            gone: ($seats | any(.addr == $o or .scope == $o) | not),
+            stale: ((.epoch // 0) <= $now - $stale)}]
+         | sort_by(.epoch),
+       recent: [$L[] | select(.kind == "msg" or .kind == "resolve" or .kind == "delivery")] | .[-100:] | reverse
+         | map(if .kind == "msg" then
+                 {kind, id, epoch: (.epoch // 0), from, to, state, subject: (.subject // ""), repo: (.repo // "-"),
+                  re: (.re // null), close: (.close // null)}
+               elif .kind == "resolve" then
+                 {kind, id: .msg, epoch: (.epoch // 0), from: .by, reason: (.reason // ""), subject: ($subj[.msg] // "")}
+               else
+                 {kind, id: .msg, epoch: (.epoch // 0), to, transport: (.transport // ""), status: (.status // ""),
+                  subject: ($subj[.msg] // "")}
+               end)}' "$LEDGER"
+}
+
 cmd_log() {
   tail -n 400 "$LEDGER" | jq -rR 'fromjson? // empty | select(.kind == "msg" or .kind == "resolve")
     | if .kind == "msg" then "\(.ts)  \(.from) -> \(.to)  [\(.state)]  \(.subject)  (\(.id))\(
@@ -1503,6 +1558,8 @@ agent-bus — handoff bus for coding agents sharing repos and worktrees.
   offboard                    stand down: PM role and claims released, open
                               items listed
   log [n]                     recent packets and closes
+  snapshot                    machine-wide JSON: live seats, open work, recent
+                              activity (read-only; for viewers)
   doctor                      identity, host install, live seats
   gc                          prune expired state (also runs daily from hooks)
 
@@ -1547,6 +1604,7 @@ case "$cmd" in
   role) touch_seat; cmd_role "$@" ;;
   offboard) cmd_offboard "$@" ;;
   log) cmd_log "$@" ;;
+  snapshot) cmd_snapshot ;;
   doctor) cmd_doctor ;;
   gc) cmd_gc ;;
   stop-hook) cmd_stop_hook ;;

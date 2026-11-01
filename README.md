@@ -164,6 +164,23 @@ secrets file (or the env var fallback) at POST time and never touches the ledger
 Three webhook POSTs are allowed per open item (same budget as Codex); closing
 an item resets it.
 
+## Menu bar app
+
+`app/` holds **Agent Bus**, a small read-only macOS menu bar app (macOS 14+).
+Its icon shows how many open work items have a live owner; the panel has three
+tabs: recent **Activity** (posts, closes, wakes), **Open work** grouped by owner
+with GONE and STALE flags, and live **Seats**. Click any row to copy its id or
+seat address. It updates as soon as the ledger or a seat changes.
+
+```sh
+app/build.sh --install --open    # build, copy to ~/Applications, launch
+```
+
+It reads everything through `agent-bus snapshot`, so it needs the CLI at
+`~/.local/bin/agent-bus` (or `AGENT_BUS_BIN`) and `jq` in `/opt/homebrew/bin` or
+`/usr/local/bin`. It never writes to the bus. To start it at login, add it in
+System Settings → General → Login Items.
+
 ## Use
 
 ```sh

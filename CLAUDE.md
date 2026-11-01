@@ -73,6 +73,7 @@ Rules:
 | `install-hooks.sh` | Claude/OpenCode installer; `--codex` lifecycle installer |
 | `lib/codex_hook.py` | Codex session registration and cleanup |
 | `plugins/agent-bus/` | OpenCode plugin |
+| `app/` | Read-only macOS menu bar app (`app/build.sh`); renders `agent-bus snapshot` |
 | `PROTOCOL.md` | Full protocol |
 | `skills/handoff/SKILL.md` | Handoff runbook |
 | `test/agent-bus.test.sh` | Tests |

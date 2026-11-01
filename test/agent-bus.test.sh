@@ -240,6 +240,15 @@ assert_has "lane PM is gone" "no PM registered for lane @spaces" "$(lp role --la
 l1 lane --clear >/dev/null
 assert_has "a seat can leave its lane" "lane     (none)" "$(l1 whoami)"
 
+# --- snapshot: one machine-wide JSON view for viewers ---
+snap=$("$BIN" snapshot)
+assert_eq "snapshot is one JSON object" "object" "$(jq -r type <<<"$snap")"
+assert_has "snapshot lists live seats" "$B" "$(jq -r '.seats[].addr' <<<"$snap")"
+assert_has "snapshot lists open work with its owner" "claude/wgone" "$(jq -r '.open[].owner' <<<"$snap")"
+assert_eq "snapshot flags a gone owner" "true" "$(jq -r '[.open[] | select(.owner == "claude/wgone")][0].gone' <<<"$snap")"
+assert_eq "snapshot leaves closed items out" "" "$(jq -r --arg id "$hid" '.open[] | select(.id == $id) | .id' <<<"$snap")"
+assert_has "snapshot recent activity includes closes" "resolve" "$(jq -r '.recent[].kind' <<<"$snap")"
+
 # --- safety ---
 out=$("$BIN" show ../../etc/passwd 2>&1 || true)
 assert_has "show refuses non-ids" "needs a packet id" "$out"

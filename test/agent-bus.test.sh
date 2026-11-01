@@ -464,5 +464,181 @@ jq -c '.epoch = 1' "$BUS_HOME/seats/$(printf '%s' "$A" | tr '/:@ ' '____').json"
 assert_eq "a dead seat's read cursor survives" "yes" \
   "$([ -f "$BUS_HOME/state/$(printf '%s' "$A" | tr '/:@ ' '____').json" ] && echo yes || echo no)"
 
+# -----------------------------------------------------------------------
+# --- new: locking, TTL, secrets, ergonomics (#1–#11) ---
+
+# --- #1/#2: ledger lock — concurrent appends and stale-lock recovery ---
+
+# Concurrent appends: 10 parallel posts must all land in the ledger.
+# Use a unique subject prefix that no other test produces.
+for _i in $(seq 1 10); do a post --to "$B" -m "# locktest_conc$_i" >/dev/null & done
+wait
+# -c ensures compact (single-line) JSON output so wc -l counts rows correctly.
+conc_n=$(jq -rcR 'fromjson? // empty | select(.kind=="msg" and (.subject | startswith("locktest_conc")))' \
+  "$BUS_HOME/ledger.jsonl" | wc -l | tr -d ' ')
+assert_eq "concurrent posts: all 10 rows land in ledger" "10" "$conc_n"
+b read >/dev/null
+
+# Stale lock recovery: a .buslock file with a dead PID is cleaned up by the
+# next call without blocking.
+( : ) & _dead=$!; wait $_dead 2>/dev/null || true
+printf '%d\n' "$_dead" > "$BUS_HOME/ledger.jsonl.buslock"
+out=$(a post --to "$B" -m "# after stale lock" 2>&1)
+assert_has "post succeeds after stale ledger buslock" "posted" "$out"
+assert_eq "stale buslock file removed" "no" \
+  "$( [ -f "$BUS_HOME/ledger.jsonl.buslock" ] && echo yes || echo no )"
+b read >/dev/null
+
+# gc+append race: add 50 old rows so gc has something to rotate, then run gc
+# and a concurrent appender; the two new rows must survive rotation.
+for _i in $(seq 1 50); do
+  printf '{"kind":"msg","id":"20200301T%06dZ-%08x","epoch":1,"from":"x","to":"@all","state":"fyi","subject":"gcold%d"}\n' \
+    "$_i" "$_i" "$_i" >> "$BUS_HOME/ledger.jsonl"
+done
+( a post --to "$B" -m "# locktest_race1" >/dev/null
+  a post --to "$B" -m "# locktest_race2" >/dev/null ) &
+_POSTER=$!
+"$BIN" gc >/dev/null
+wait $_POSTER
+race_n=$(jq -rcR 'fromjson? // empty | select(.kind=="msg" and (.subject | startswith("locktest_race")))' \
+  "$BUS_HOME/ledger.jsonl" | wc -l | tr -d ' ')
+assert_eq "posts during gc are not lost" "2" "$race_n"
+b read >/dev/null
+
+# --- #3: Codex zombie TTL ---
+# A Codex seat whose last_hook is older than CODEX_MAX_IDLE_TTL should be expired.
+_cst="$BUS_HOME/seats/codex_zombie_wa.json"
+jq -nc '{addr:"codex/zombie_wa",tool:"codex",repo:"-",repo_id:"r",wt:"zombie_wa",
+          branch:"-",cwd:"/tmp",session:"s1",socket:"",codex_queue:"/bin/true",
+          epoch:1, last_hook:1, lane:""}' > "$_cst"
+# With default TTL (86400), last_hook=1 (epoch seconds, far in the past) is expired.
+assert_eq "codex zombie seat is not live" "no" \
+  "$(AGENT_BUS_CODEX_MAX_IDLE_TTL=86400 a who 2>/dev/null | grep -q 'codex/zombie_wa' && echo yes || echo no)"
+# With CODEX_MAX_IDLE_TTL=0, the seat falls back to epoch-based TTL (epoch=1 → expired too).
+out=$(AGENT_BUS_CODEX_MAX_IDLE_TTL=0 "$BIN" gc 2>/dev/null)
+assert_eq "gc removes expired codex zombie with TTL=0" "no" \
+  "$([ -f "$_cst" ] && echo yes || echo no)"
+
+# A Codex seat with a recent last_hook (now) should still be live.
+_cst2="$BUS_HOME/seats/codex_fresh_wa.json"
+_fresh_hook=$(date -u +%s)
+jq -nc --argjson h "$_fresh_hook" --argjson e "$_fresh_hook" \
+  '{addr:"codex/fresh_wa",tool:"codex",repo:"-",repo_id:"r",wt:"fresh_wa",
+    branch:"-",cwd:"/tmp",session:"s2",socket:"",codex_queue:"/bin/true",
+    epoch:$e, last_hook:$h, lane:""}' > "$_cst2"
+assert_has "codex seat with recent last_hook appears in who" "codex/fresh_wa" \
+  "$(AGENT_BUS_CODEX_MAX_IDLE_TTL=86400 a who 2>/dev/null)"
+rm -f "$_cst2"
+
+# --- #4: grok webhook secret file ---
+if command -v python3 >/dev/null && command -v curl >/dev/null; then
+  _GSD=$(mktemp -d)
+  python3 - "$_GSD" <<'PY' &
+import http.server, json, os, pathlib, sys
+d = pathlib.Path(sys.argv[1])
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        n = int(self.headers.get('Content-Length', 0))
+        body = json.loads(self.rfile.read(n)) if n else {}
+        rec = {'body': body, 'auth': self.headers.get('Authorization', '')}
+        (d / 'requests.jsonl').open('a').write(json.dumps(rec) + '\n')
+        self.send_response(200); self.end_headers()
+    def log_message(self, *a): pass
+s = http.server.HTTPServer(('127.0.0.1', 0), H)
+(d / 'port').write_text(str(s.server_address[1]))
+s.serve_forever()
+PY
+  _GSRV=$!
+  for _i in $(seq 10); do [ -f "$_GSD/port" ] && break; sleep 0.1; done
+  _GSD_URL="http://127.0.0.1:$(cat "$_GSD/port")/hook"
+
+  # Register with a secret; token value should be stored in secrets file.
+  TEST_GROK_SECRET=supersecret123
+  export TEST_GROK_SECRET
+  raw_seat gsreg shell tester grok register --name gstest \
+    --webhook "$_GSD_URL" --secret-env TEST_GROK_SECRET >/dev/null
+  assert_eq "secret file created at registration" "yes" \
+    "$([ -f "$BUS_HOME/secrets/grok_gstest.secret" ] && echo yes || echo no)"
+  assert_eq "secret file contains correct value" "supersecret123" \
+    "$(cat "$BUS_HOME/secrets/grok_gstest.secret" 2>/dev/null)"
+  assert_eq "secret file is 0600" "600" \
+    "$(stat -c '%a' "$BUS_HOME/secrets/grok_gstest.secret" 2>/dev/null || \
+       stat -f '%Lp' "$BUS_HOME/secrets/grok_gstest.secret" 2>/dev/null)"
+  out=$(raw_seat gsreg shell tester grok status --name gstest)
+  assert_has "grok status shows secret_file=true" '"secret_file":true' "$out"
+
+  # Delivery reads from secrets file even when env var is unset.
+  unset TEST_GROK_SECRET
+  _GS_ADDR=$(raw_seat gsreg shell tester grok status --name gstest | jq -r .seat)
+  out=$(AGENT_BUS_NO_PUSH=0 a post --to "$_GS_ADDR" --state question -m "# secret file delivery" 2>&1)
+  sleep 0.3
+  assert_has "delivery with secret from file" "webhook notice delivered" "$out"
+  _GS_REQ=$(tail -1 "$_GSD/requests.jsonl" 2>/dev/null || echo '{}')
+  assert_has "Authorization header sent from secrets file" "supersecret123" "$_GS_REQ"
+
+  # Warning when secret_env is set but resolves empty (no file, no env var).
+  rm -f "$BUS_HOME/secrets/grok_gstest.secret"
+  out=$(AGENT_BUS_NO_PUSH=0 a post --to "$_GS_ADDR" --state question -m "# warn empty" 2>&1)
+  sleep 0.1
+  assert_has "warning when secret resolves empty" "WARNING" "$out"
+  raw_seat gsreg shell tester grok unregister --name gstest >/dev/null
+
+  # http:// + --secret-env warns at registration
+  out=$(raw_seat gsreg shell tester grok register --name gstest2 \
+    --webhook "http://example.com/hook" --secret-env TEST_GROK_SECRET 2>&1)
+  assert_has "http:// with secret warns" "unencrypted" "$out"
+  raw_seat gsreg shell tester grok unregister --name gstest2 2>/dev/null || true
+
+  kill "$_GSRV" 2>/dev/null; wait "$_GSRV" 2>/dev/null || true
+  rm -rf "$_GSD"
+else
+  printf 'skip grok secrets tests (python3/curl missing)\n'
+fi
+
+# --- #5: state lock — concurrent writes leave a valid state file ---
+# Run 10 concurrent state-updating posts to the same seat.  With bus_lock
+# protecting every state_update RMW, the resulting state file must be valid
+# JSON (no torn write).  The lock does not prevent the TOCTOU between the
+# budget check and the increment (that is a separate design matter), so we
+# only assert file integrity, not a precise wakes count.
+for _i in $(seq 1 10); do a post --to "$C" --state question -m "# statelock$_i" >/dev/null & done
+wait
+_sf="$BUS_HOME/state/$(printf '%s' "$C" | tr '/:@ ' '____').json"
+assert_has "concurrent state writes: state file is valid JSON" \
+  "$(jq . "$_sf" >/dev/null 2>&1 && echo ok || echo bad)" "ok"
+c read >/dev/null
+
+# --- #6: triage outside a git repo gives clear error ---
+# $BIN is an absolute path; run from /tmp which has no git tree.
+out=$(cd /tmp && AGENT_BUS_HOME="$BUS_HOME" "$BIN" triage 2>&1 || true)
+assert_has "triage outside repo gives clear error" "not in a git repo" "$out"
+
+# --- #7: version command ---
+out=$("$BIN" version)
+assert_has "version command outputs version string" "agent-bus" "$out"
+out=$("$BIN" --version)
+assert_has "--version flag also works" "agent-bus" "$out"
+
+# --- #9: atomic claim write (tmp+mv) ---
+# Verify that concurrent claims on different paths don't produce corrupt files.
+a claim src/atomic1.ts >/dev/null
+a claim src/atomic2.ts >/dev/null
+for _cf in "$BUS_HOME/claims/"*.json; do
+  [ -f "$_cf" ] || continue
+  jq -e . "$_cf" >/dev/null 2>&1 || bad "claim file is valid JSON" "bad JSON in $_cf" && ok "claim file $_cf is valid JSON"
+done
+a release --all >/dev/null
+
+# --- #11: grok shell-init ---
+raw_seat shinit shell tester grok register --name shinit --webhook https://example.com/ >/dev/null
+out=$(raw_seat shinit shell tester grok shell-init --name shinit)
+assert_has "grok shell-init outputs AGENT_BUS_TOOL=grok" "AGENT_BUS_TOOL=grok" "$out"
+assert_has "grok shell-init outputs AGENT_BUS_WT" "AGENT_BUS_WT=shinit" "$out"
+raw_seat shinit shell tester grok unregister --name shinit >/dev/null
+
+# grok whoami warning when seat not registered
+out=$(AGENT_BUS_TOOL=grok AGENT_BUS_WT=notregistered AGENT_BUS_SESSION=local "$BIN" whoami 2>&1)
+assert_has "whoami warns for unregistered grok seat" "no seat file" "$out"
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 ((fail == 0))

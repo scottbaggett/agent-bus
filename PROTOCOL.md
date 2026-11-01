@@ -143,10 +143,12 @@ or `pm`.
     sender-controlled command, or session credential enters the queue message.
     `codex disable` pauses the seat across later hook events; `enable` resumes.
     SessionEnd removes every seat, role, and claim belonging to that Codex thread,
-    preserving read history, pauses, and unfinished work. Hook-managed queue
+    preserving read history, pauses, and unfinished work.     Hook-managed queue
     registrations survive the normal two-hour seat TTL until SessionEnd, so a
     long-idle chat needs no heartbeat polling. Manual registrations retain the
-    usual TTL. A host crash may leave a registration until explicitly offboarded.
+    usual TTL. A host crash may leave a registration live for up to
+    `AGENT_BUS_CODEX_MAX_IDLE_TTL` (default 86400 s = 24 h, measured from the
+    last hook fire); after that the seat expires at gc.
     `codex status` reports registration mode and last queue attempt; it does not
     assert the host is running. Loaded idle chats are qualified; archived/unloaded chats and restart
     recovery are not. The adapter has no polling loop; the tested host checks
@@ -155,13 +157,19 @@ or `pm`.
     file with the webhook URL. When a post addresses that seat, `agent-bus`
     synchronously HTTP POSTs a small JSON notice (no packet body, no secret
     value) to the configured URL. An optional bearer token is read from the env
-    var named by `--secret-env` at POST time and sent as `Authorization: Bearer
-    <token>`; neither the var name nor the value is written to the ledger. Grok
-    Bot then runs `agent-bus read` and replies with normal bus commands using
-    `AGENT_BUS_TOOL=grok AGENT_BUS_WT=<name>`. A registered Grok seat remains
-    live (visible in `who`, owns items, counted in `triage`) until unregistered;
-    it needs no heartbeat. `agent-bus grok unregister --name <n>` removes the
-    seat. `agent-bus grok status` reports the webhook, wakes, and last delivery.
+    var named by `--secret-env` at registration time; the **value** is stored in
+    `secrets/grok_<n>.secret` (0600) so every posting session can deliver
+    authenticated webhooks without the env var set. The env var is re-read as a
+    fallback if the secrets file is absent. `--secret-env` with an http:// webhook
+    warns about cleartext transmission. `agent-bus grok shell-init --name <n>`
+    prints the export lines needed to run as that Grok seat.
+    Grok Bot then runs `agent-bus read` and replies with normal bus commands using
+    `AGENT_BUS_TOOL=grok AGENT_BUS_WT=<name>` (or the output of `shell-init`).
+    A registered Grok seat remains live (visible in `who`, owns items, counted
+    in `triage`) until unregistered; it needs no heartbeat.
+    `agent-bus grok unregister --name <n>` removes the seat and secrets file.
+    `agent-bus grok status` reports the webhook, wakes, last delivery, and
+    whether the secrets file is present.
     The notice payload shape is:
     ```json
     {"packet_id":"<id>","from":"<addr>","to":"<addr>","state":"<state>",
@@ -234,6 +242,16 @@ Packets are still treated as hostile input: bodies are capped at 64KB, control
 characters are stripped from everything rendered, and ids are shape-checked
 before they become paths.
 
+## Locking
+
+The ledger and per-seat state files are protected by cross-platform advisory
+locks (`bus_lock`/`bus_unlock` in the CLI).  On Linux, `flock(1)` is used; on
+macOS and other POSIX systems, a PID-stamped regular file (`*.buslock`) is used
+with liveness checking via `kill -0`.  Stale locks left by crashed processes are
+detected and reclaimed automatically; callers never steal blindly after a
+timeout.  The Python Codex adapter (`lib/codex_queue.py`) uses the same
+`.buslock` convention so bash and Python serialise to the same state files.
+
 ## Storage
 
 ```
@@ -242,6 +260,7 @@ before they become paths.
   ledger.archive.jsonl  rows older than AGENT_BUS_GC_DAYS (14), rotated by gc
   msg/<id>.md           packet bodies
   seats/<seat>.json     seat registry (grok seats include grok_webhook, grok_secret_env)
+  secrets/grok_<n>.secret  0600 webhook bearer token (written at grok register)
   state/<seat>.json     read cursor, wake count, grok_attempts list
   state/roles/<r>.pm    repo PM
   state/roles/<r>.lane.<l>.pm  lane PM

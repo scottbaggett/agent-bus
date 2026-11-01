@@ -55,21 +55,51 @@ def discover():
 
 @contextlib.contextmanager
 def state_lock(path):
-    # Shares the CLI's brief state-write lock; never held across a queue command.
-    lock = Path(str(path) + ".lock")
-    deadline = time.monotonic() + 1
+    """PID-stamped exclusive lock, consistent with bus_lock in bin/agent-bus.
+
+    Uses a .buslock regular file (matching the bash implementation) rather than
+    the old .lock directory.  Stale locks (holder PID gone) are reclaimed; live
+    locks time out after 5 s with ValueError rather than stealing blindly.
+    """
+    import errno as _errno
+    lock = Path(str(path) + ".buslock")
+    deadline = time.monotonic() + 5.0
     while True:
         try:
-            lock.mkdir()
+            # O_CREAT | O_EXCL is atomic on POSIX — fails if the file exists.
+            fd = os.open(str(lock), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            os.write(fd, (str(os.getpid()) + "\n").encode())
+            os.close(fd)
             break
         except FileExistsError:
+            try:
+                content = lock.read_text().strip()
+                pid = int(content)
+                os.kill(pid, 0)  # raises OSError(ESRCH) if the process is gone
+            except (ValueError, FileNotFoundError):
+                try:
+                    lock.unlink()
+                except FileNotFoundError:
+                    pass
+                continue  # retry immediately
+            except OSError as exc:
+                if exc.errno == _errno.ESRCH:  # No such process: stale lock
+                    try:
+                        lock.unlink()
+                    except FileNotFoundError:
+                        pass
+                    continue
+                # EPERM or other: process may be alive, wait and retry
             if time.monotonic() >= deadline:
                 raise ValueError("seat state is busy; packet remains unread")
             time.sleep(0.025)
     try:
         yield
     finally:
-        lock.rmdir()
+        try:
+            lock.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def reserve(path, packet, budget, binary):

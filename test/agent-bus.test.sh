@@ -277,6 +277,82 @@ assert_has "old rows get their lane on read" "lane @salt-4242" "$(a triage --by 
 assert_eq "snapshot reports the derived lane" "salt-4242" \
   "$("$BIN" snapshot | jq -r '.open[] | select(.id == "20200104T000000Z-0000ccc1") | .lane')"
 
+# --- lane lifecycle, re-filing, roles, @lead, attention, projects ---
+lead() { AGENT_BUS_TOOL=lead AGENT_BUS_SESSION=app AGENT_BUS_WT=lead "$BIN" "$@"; }
+lc() { AGENT_BUS_BRANCH=feature/salt-5000-life AGENT_BUS_SESSION=lc1 AGENT_BUS_TOOL=opencode AGENT_BUS_WT=wlc "$BIN" "$@"; }
+lc who >/dev/null
+i1=$(lc post --to claude/wlcgone --state blocked -m '# life one' | idof)
+i2=$(lc post --to claude/wlcgone --state question -m '# life two' | idof)
+out=$(lc lane salt-5000 done --reason merged 2>&1 || true)
+assert_has "only the lead or a PM can close a lane" "only the lead" "$out"
+out=$(lead lane salt-5000 done 2>&1 || true)
+assert_has "lane done needs a reason" "--reason is required" "$out"
+out=$(lead lane salt-5000 done --reason merged)
+assert_has "lane done closes its open items in one row" "closed 2 open item(s)" "$out"
+assert_eq "it is one ledger row" "lane" "$(tail -n 1 "$BUS_HOME/ledger.jsonl" | jq -r .kind)"
+assert_lacks "closed lane items leave open work" "life one" "$(lc triage)"
+out=$(lead resolve "$i1" --reason done 2>&1 || true)
+assert_has "a swept item counts as closed" "already closed" "$out"
+i3=$(lc post --to claude/wlcgone --state blocked -m '# life three' | idof)
+assert_has "new work after done stays open" "life three" "$(lc triage)"
+assert_has "the lead may close anything" "resolved $i3 (done)" "$(lead resolve "$i3" --reason done)"
+# sweep closes only older items
+old=$(( $(date -u +%s) - 10 * 86400 ))
+printf '{"kind":"msg","id":"20200105T000000Z-0000ddd1","epoch":%s,"from":"x","to":"claude/wlcgone","state":"blocked","subject":"swept old","repo":"r","repo_id":"%s","lane":"salt-5000"}\n' \
+  "$old" "$(lc whoami | awk '/^repo_id/{print $2}')" >>"$BUS_HOME/ledger.jsonl"
+i4=$(lc post --to claude/wlcgone --state blocked -m '# fresh one' | idof)
+out=$(lead lane salt-5000 sweep --older 7d --reason canceled)
+assert_has "sweep closes items older than the cutoff" "closed 1 item(s) older than 7d" "$out"
+out=$(lc triage)
+assert_lacks "the old item is swept" "swept old" "$out"
+assert_has "the fresh one stays" "fresh one" "$out"
+# park hides a lane from attention
+lead lane salt-5000 park >/dev/null
+assert_eq "a parked lane reports parked" "parked" \
+  "$("$BIN" snapshot | jq -r '.lanes[] | select(.lane == "salt-5000") | .health')"
+lead lane salt-5000 reopen >/dev/null
+lead lane salt-5000 title --title "Lifecycle demo" >/dev/null
+assert_has "a lane can carry a title" "Lifecycle demo" "$(lc lanes)"
+# file moves an item to another lane
+assert_has "file re-files an item" "filed $i4 in @salt-5001" "$(lc file "$i4" salt-5001)"
+assert_eq "re-filed items report the new lane" "salt-5001" \
+  "$("$BIN" snapshot | jq -r --arg id "$i4" '.open[] | select(.id == $id) | .lane')"
+assert_has "triage --lane follows the re-file" "fresh one" "$(lc triage --lane salt-5001)"
+# named roles
+assert_has "a seat can take a named role" "@release:" "$(lc role release)"
+out=$(lp role release 2>&1 || true)
+assert_has "a live named role needs --force to take" "--force" "$out"
+rid=$(b post --to @release --state needs-review -m '# release review' | idof)
+assert_has "@role reaches the holder" "release review" "$(lc read --peek)"
+assert_eq "the holder owns it" "block" "$(lc stop-hook </dev/null | jq -r .decision)"
+assert_has "role lists named roles" "@release: opencode/wlc" "$(lc role)"
+out=$(b post --to @nobody -m x 2>&1 || true)
+assert_has "an unknown role is refused" "unknown scope" "$out"
+# @lead: the human, through the app
+lid=$(lc post --to @lead --state question -m '# need a call on scope' | idof)
+out=$("$BIN" snapshot)
+assert_eq "@lead items are owned by lead" "lead" "$(jq -r --arg id "$lid" '.open[] | select(.id == $id) | .owner' <<<"$out")"
+assert_has "@lead items lead attention" "needs-you" "$(jq -r '.attention[].kind' <<<"$out")"
+assert_has "the lead sees @lead items" "need a call on scope" "$(lead read --peek)"
+out=$(lc post --re "$rid" --close escalated --to @lead --state question -m '# escalating release review')
+assert_has "escalated hands an item to the lead" "closed $rid (escalated)" "$out"
+out=$(lc resolve "$lid" --reason escalated 2>&1 || true)
+assert_has "resolve cannot escalate" "needs a destination" "$out"
+assert_has "superseded is a close reason" "resolved $lid (superseded)" "$(lead resolve "$lid" --reason superseded)"
+assert_has "attention lists what needs a decision" "needs-you" "$(lead attention)"
+# orphaned lanes show up in attention with the command that clears them
+printf '{"kind":"msg","id":"20200106T000000Z-0000eee1","epoch":%s,"from":"x","to":"claude/wlcgone","state":"blocked","subject":"orphan","repo":"r","repo_id":"%s","lane":"salt-5999"}\n' \
+  "$old" "$(lc whoami | awk '/^repo_id/{print $2}')" >>"$BUS_HOME/ledger.jsonl"
+out=$("$BIN" attention)
+assert_has "an untouched lane is orphaned" "@salt-5999: 1 open item(s), nobody on it" "$out"
+assert_has "with the command that clears it" "agent-bus lane salt-5999 done --reason canceled" "$out"
+# projects group lanes
+printf '{"projects":[{"name":"Lifecycle","lanes":["salt-5*"]}]}\n' >"$BUS_HOME/projects.json"
+assert_eq "projects.json groups lanes by glob" "Lifecycle" \
+  "$("$BIN" snapshot | jq -r '.lanes[] | select(.lane == "salt-5999") | .project')"
+rm -f "$BUS_HOME/projects.json"
+lc role release --clear >/dev/null
+
 # --- snapshot: one machine-wide JSON view for viewers ---
 snap=$("$BIN" snapshot)
 assert_eq "snapshot is one JSON object" "object" "$(jq -r type <<<"$snap")"
@@ -533,6 +609,11 @@ assert_lacks "and gone from the archive" "lost open" "$(cat "$BUS_HOME/ledger.ar
 assert_has "closed items stay archived" "old closed" "$(cat "$BUS_HOME/ledger.archive.jsonl")"
 assert_has "restored items show in snapshot" "lost open" "$("$BIN" snapshot | jq -r '.open[].subject')"
 assert_has "restore is idempotent" "restored 0 open item" "$("$BIN" gc --restore-open)"
+printf '{"kind":"lane","lane":"salt-3000","repo_id":"r","state":"parked","title":"old park","by":"x","epoch":%s}\n' "$old15" >>"$BUS_HOME/ledger.jsonl"
+printf '{"kind":"file","msg":"20200102T000000Z-0000aaa1","lane":"salt-3001","by":"x","epoch":%s}\n' "$old15" >>"$BUS_HOME/ledger.jsonl"
+"$BIN" gc >/dev/null
+assert_has "gc keeps old lane rows (parked state, titles, sweeps)" "old park" "$(cat "$BUS_HOME/ledger.jsonl")"
+assert_has "gc keeps old re-filings" '"lane":"salt-3001"' "$(cat "$BUS_HOME/ledger.jsonl")"
 
 # -----------------------------------------------------------------------
 # --- new: locking, TTL, secrets, ergonomics (#1–#11) ---

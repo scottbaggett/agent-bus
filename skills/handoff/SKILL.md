@@ -104,6 +104,20 @@ a lane reach their lane PM with `--to @pm`, and each other with `--to @spaces`.
 For each item: close it with a reason, or hand it on. Never bulk-close another
 lane's work.
 
+## "this needs a human"
+
+Hand the item to the lead (the user, through the menu bar app) and say what you
+need decided:
+
+```sh
+agent-bus post --re <id> --close escalated --to @lead --state question -m "# decision: ..."
+```
+
+## "you're the release / reviewer / architect seat"
+
+`agent-bus role <name>` makes you `@<name>` in this repo; peers address work to
+that name instead of your seat id.
+
 ## "that's handled / close it out"
 
 ```sh

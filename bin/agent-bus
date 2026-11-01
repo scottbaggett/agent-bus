@@ -47,9 +47,9 @@ WAKE_BUDGET="${AGENT_BUS_WAKE_BUDGET:-3}"
 GROK_CURL="${AGENT_BUS_GROK_CURL:-curl}"
 
 STATES='needs-review blocked handoff question done fyi'
-# handed-off is only reachable through `post --re <id> --close handed-off`,
-# because it needs a destination.
-REASONS='done handed-off denied canceled duplicate'
+# handed-off and escalated are only reachable through `post --re <id> --close`,
+# because they need a destination (escalated: usually --to @lead).
+REASONS='done handed-off escalated denied canceled duplicate superseded'
 # Reviewed Codex lifecycle hooks own their lease until SessionEnd/offboard.
 # This keeps an open idle chat reachable without heartbeat polling.
 JQ_SEAT_LIVE='def buslive($cut; $codex_cut): ((.epoch // 0) | tonumber? // 0) >= $cut or
@@ -211,7 +211,8 @@ resolve_identity() {
   fi
   ME=$(jq -nc --arg addr "$ADDR" --arg scope "$SCOPE" --arg session "$SESSION" \
     --arg repo "$REPO" --arg repo_id "$REPO_ID" --arg wt "$WT" --arg lane "$LANE" \
-    '{addr:$addr,scope:$scope,session:$session,repo:$repo,repo_id:$repo_id,wt:$wt,lane:$lane}')
+    --arg tool "$TOOL" \
+    '{addr:$addr,tool:$tool,scope:$scope,session:$session,repo:$repo,repo_id:$repo_id,wt:$wt,lane:$lane}')
 }
 
 touch_seat() {
@@ -275,7 +276,7 @@ pm_seat() { local f; f=$(pm_file); if [ -f "$f" ]; then head -1 "$f" | tr -d '\n
 # A lane may have its own PM, who supervises that lane only.
 valid_lane() {
   [[ "$1" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] || return 1
-  case "$1" in here|repo|all|pm) return 1 ;; esac
+  case "$1" in here|repo|all|pm|lead|unfiled) return 1 ;; esac
   return 0
 }
 # Grok Bot seat names share the same alphabet as lanes, also used as the wt component.
@@ -291,6 +292,25 @@ lane_pms() {
     jq -nc --arg l "$l" --arg a "$(head -1 "$f" | tr -d '\n')" '{($l): $a}'
   done | jq -sc 'add // {}'
 }
+# Named roles: what a seat does (@release, @lead-architect), separate from the
+# lane it works in. One holder per name per repo; files hold the address (or,
+# from v1, {addr,name} JSON).
+role_file() { printf '%s/state/roles/%s.name.%s' "$BUS" "$(slugify "$REPO_ID")" "$1"; }
+role_seat() {
+  local f; f=$(role_file "$1")
+  [ -f "$f" ] || return 0
+  jq -r '.addr // empty' "$f" 2>/dev/null || head -1 "$f" | tr -d '\n'
+}
+# {name: holder} for this repo; always an object.
+role_map() {
+  local f n
+  for f in "$BUS/state/roles/$(slugify "$REPO_ID")".name.*; do
+    [ -f "$f" ] || continue
+    n=${f##*.name.}
+    jq -nc --arg n "$n" --arg a "$( (jq -r '.addr // empty' "$f" 2>/dev/null || head -1 "$f") | tr -d '\n')" '{($n): $a}'
+  done | jq -sc 'add // {}'
+}
+
 # Whether any live seat in this repo carries lane $1.
 lane_exists() {
   [ -n "$(lane_pm_seat "$1")" ] && return 0
@@ -325,7 +345,7 @@ def slug_of($b): ($b // "" | tostring | ascii_downcase) as $b
        or ((["main","master","develop","dev","trunk","staging","production"] | index($b)) != null) then ""
     else ($b | sub("^(feat|feature|fix|bugfix|hotfix|chore|docs|refactor|test|wip|release|integration|preview|claude|codex|cursor|opencode|grok|worktree)[/-]"; "")
              | gsub("[^a-z0-9]+"; "-") | sub("^-+"; "") | .[0:32] | sub("-+$"; "")) end
-  | . as $x | if (["here","repo","all","pm"] | index($x)) != null then "" else $x end;
+  | . as $x | if (["here","repo","all","pm","lead","unfiled"] | index($x)) != null then "" else $x end;
 def lane_from($branch; $wt):
   ticket_of($branch) as $t | ticket_of($wt) as $w | slug_of($branch) as $s
   | if $t != "" then {lane: $t, src: "branch"}
@@ -340,12 +360,47 @@ def lane_of: (.lane // "") as $l
     | if $d != "" then $d else (ticket_of(.subject) | if . == "" then "unfiled" else . end) end end;
 '
 
-JQ_LIB="$JQ_LANE$JQ_SEAT_LIVE"'
-def clean: tostring | gsub("[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]"; "");
+# What closes a work item, for every reader (routing, triage, gc, snapshot):
+# a resolve row, a reply carrying close, or a lane row whose close_before
+# sweeps the item's lane. An item's lane is its latest `file` row, else
+# lane_of. Needs JQ_LANE.
+JQ_CLOSE='
 def sup: .state as $s | ["needs-review","blocked","handoff","question"] | index($s) != null;
+def file_map($L): reduce ($L[] | select(.kind == "file")) as $f ({}; .[$f.msg] = $f.lane);
+def item_lane($fm): $fm[.id] // lane_of;
+# Per "<repo_id>:<lane>": latest state, title and reason, and every sweep as
+# {before, pos}. A sweep closes items of that lane that sit earlier in the ledger
+# than its own row and are no newer than `before` (done: its own time). Ledger
+# position, not the clock, decides what was there when the lane was closed.
+def lane_rows($L): reduce ($L | to_entries[] | select(.value.kind == "lane")) as $e ({};
+  $e.value as $r | (($r.repo_id // "") + ":" + $r.lane) as $k
+  | .[$k] = ((.[$k] // {state: "open", sweeps: []})
+      + (if $r.state then {state: $r.state, reason: ($r.reason // null), by: $r.by, at: $r.epoch} else {} end)
+      + (if $r.title then {title: $r.title} else {} end)
+      | if ($r.close_before // 0) > 0 then .sweeps += [{before: $r.close_before, pos: $e.key}] else . end));
+def closed($L): file_map($L) as $fm | lane_rows($L) as $lr
+  | reduce ($L[] | if .kind == "resolve" then .msg
+                   elif .kind == "msg" and (.close // null) != null then .re
+                   else empty end) as $i ({}; .[$i] = true)
+  | if ([$lr[] | .sweeps[]] | length) == 0 then .
+    else reduce ($L | to_entries[] | select(.value.kind == "msg" and (.value | sup)) | .key as $pos | .value as $m
+           # The item belongs to its own lane and to a lane it was sent to.
+           | select([($m | item_lane($fm)), (($m.to // "") | select(startswith("@")) | .[1:])]
+                    | any(.[]; . as $ln | ($lr[($m.repo_id // "") + ":" + $ln].sweeps // [])
+                          | any(.[]; .pos > $pos and ($m.epoch // 0) <= .before)))
+           | $m.id) as $i (.; .[$i] = true) end;
+'
+
+JQ_LIB="$JQ_LANE$JQ_SEAT_LIVE$JQ_CLOSE"'
+def clean: tostring | gsub("[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]"; "");
 def same_repo($me): if (.repo_id // "") != "" then .repo_id == $me.repo_id else .repo == $me.repo end;
 def authored($me): .from == $me.addr or ($me.session != "local" and (.session // "") == $me.session);
 def is_pm($me): $pm != "" and $pm == $me.addr;
+# The human in charge, through the menu bar app (tool "lead"): owns @lead and
+# may close anything.
+def is_lead($me): ($me.tool // "") == "lead";
+# The seat holding the named role a packet is addressed to (@release), or "".
+def role_holder: (.to // "") as $t | if ($t | startswith("@")) then ($roles[$t[1:]] // "") else "" end;
 # The lanes a packet belongs to: the lane it was sent to, then the sender'"'"'s.
 def lanes_of: [((.to // "") | select(startswith("@")) | .[1:]), (.lane // "")] | map(select(. != ""));
 def lane_pm_of: first(lanes_of[] | ($lanepms[.] // empty)) // "";
@@ -358,7 +413,8 @@ def seatme: {addr, scope: ((.tool // "") + "/" + (.wt // "")), session: (.sessio
 # in the worker'"'"'s worktree).
 def owns($me):
   .to == $me.addr
-  or (same_repo($me) and (.to == $me.scope
+  or (.to == "@lead" and is_lead($me))
+  or (same_repo($me) and (.to == $me.scope or (role_holder != "" and role_holder == $me.addr)
       or (pm_for($me) and (.to == "@pm" or (sup and ((.probe // false) | not))))));
 # Broadcasts deliver context, never ownership.
 def gets($me):
@@ -366,10 +422,6 @@ def gets($me):
   or (same_repo($me) and (.to == "@repo" or (.to == "@here" and .wt == $me.wt)
       or ((.to // "") | startswith("@") and (.[1:] == $me.lane or ($lanepms[.[1:]] // "") == $me.addr))));
 def from_pm($me): .from == $pm or ($me.lane != "" and .from == ($lanepms[$me.lane] // ""));
-def closed($L):
-  reduce ($L[] | if .kind == "resolve" then .msg
-                 elif .kind == "msg" and (.close // null) != null then .re
-                 else empty end) as $i ({}; .[$i] = true);
 '
 
 # Run a jq program over the parsed ledger, bound to $L. Unparseable rows drop.
@@ -377,7 +429,7 @@ lq() {
   local prog="$1" now; shift
   now=$(now_epoch)
   jq -nRrc --arg pm "$(pm_seat)" --argjson lanepms "$(lane_pms)" --argjson me "$ME" \
-    --argjson codex_cut "$(( now - CODEX_MAX_IDLE_TTL ))" "$@" \
+    --argjson codex_cut "$(( now - CODEX_MAX_IDLE_TTL ))" --argjson roles "$(role_map)" "$@" \
     "$JQ_LIB [inputs | fromjson? // empty] as \$L | $prog" "$LEDGER"
 }
 
@@ -438,11 +490,11 @@ open_items() {
       [ -f "$f" ] && jq -c --arg a "$a" '{($a): (.read // [])}' "$f" 2>/dev/null
     done | jq -sc 'add // {}')
   lq '
-    closed($L) as $c
+    closed($L) as $c | file_map($L) as $fm
     | [$L[] | select(.kind == "msg" and sup and same_repo($me) and ($c[.id] | not)
                      and ((.probe // false) | not))
       | .id as $id
-      | . + {lane: lane_of}
+      | . + {lane: item_lane($fm)}
       | select($lane == "" or (lanes_of | index($lane)))
       | (if ((.to // "") | startswith("@")) then
            ([lane_pm_of, $pm, "(no PM)"] | map(select(. != "")) | first)
@@ -521,7 +573,7 @@ poke_seat() {
 # interrupted all of them.
 push_targets() {
   local now; now=$(now_epoch)
-  seat_rows | jq -rn --argjson m "$1" --arg pm "$(pm_seat)" --argjson lanepms "$(lane_pms)" \
+  seat_rows | jq -rn --argjson m "$1" --arg pm "$(pm_seat)" --argjson lanepms "$(lane_pms)" --argjson roles "$(role_map)" \
     --argjson cut "$(( now - SEAT_TTL ))" \
     --argjson codex_cut "$(( now - CODEX_MAX_IDLE_TTL ))" "$JQ_LIB"'
     inputs | select(.tool == "claude" and (.epoch // 0) >= $cut and (.socket // "") != "")
@@ -631,7 +683,7 @@ codex_end_session() (
 # Registered Grok Bot seats that own the given packet record.
 grok_targets() {
   local now; now=$(now_epoch)
-  seat_rows | jq -nc --argjson m "$1" --arg pm "$(pm_seat)" --argjson lanepms "$(lane_pms)" \
+  seat_rows | jq -nc --argjson m "$1" --arg pm "$(pm_seat)" --argjson lanepms "$(lane_pms)" --argjson roles "$(role_map)" \
     --argjson cut "$(( now - SEAT_TTL ))" \
     --argjson codex_cut "$(( now - CODEX_MAX_IDLE_TTL ))" "$JQ_LIB"'
     [inputs | select(.tool == "grok" and buslive($cut; $codex_cut) and (.grok_webhook // "") != "")
@@ -881,7 +933,7 @@ cmd_grok() {
 
 codex_targets() {
   local now; now=$(now_epoch)
-  seat_rows | jq -nc --argjson m "$1" --arg pm "$(pm_seat)" --argjson lanepms "$(lane_pms)" \
+  seat_rows | jq -nc --argjson m "$1" --arg pm "$(pm_seat)" --argjson lanepms "$(lane_pms)" --argjson roles "$(role_map)" \
     --argjson cut "$(( now - SEAT_TTL ))" \
     --argjson codex_cut "$(( now - CODEX_MAX_IDLE_TTL ))" "$JQ_LIB"'
     [inputs | select(.tool == "codex" and buslive($cut; $codex_cut) and (.codex_queue // "") != "")
@@ -964,6 +1016,8 @@ cmd_whoami() {
     "$ADDR" "$SCOPE" "$SESSION" "$REPO" "$REPO_ID" "$WT" "$BRANCH"
   local lpm=''; [ -n "$LANE" ] && lpm=$(lane_pm_seat "$LANE")
   if [ -n "$LANE" ]; then printf 'lane     %s (%s)\n' "$LANE" "$LANE_SRC"; else printf 'lane     (none)\n'; fi
+  local held; held=$(role_map | jq -r --arg me "$ADDR" '[to_entries[] | select(.value == $me) | "@" + .key] | join(" ")')
+  [ -n "$held" ] && printf 'roles    %s\n' "$held"
   [ -n "$LANE" ] && printf 'lane pm  %s\n' "$([ "$lpm" = "$ADDR" ] && echo yes || echo "${lpm:-(none)}")"
   printf 'pm       %s\nwake     %s/%s\ncwd      %s\nbus      %s\n' \
     "$([ "$pm" = "$ADDR" ] && echo yes || echo "${pm:-(none)}")" \
@@ -999,6 +1053,11 @@ cmd_who() {
   done <<<"$rows"
   if [ -n "$pm" ]; then
     printf '\nPM for %s: %s%s\n' "$REPO" "$pm" "$(seat_live "$pm" || echo '  (not live)')"
+  fi
+  local rm; rm=$(role_map)
+  if [ "$rm" != '{}' ]; then
+    printf '\nroles in %s:\n' "$REPO"
+    jq -r 'to_entries[] | "  @\(.key): \(.value)"' <<<"$rm" | sanitize
   fi
   local l a
   while IFS=$'\t' read -r l a; do
@@ -1054,17 +1113,17 @@ cmd_post() {
     fi ;;
   esac
   case "$to" in
-    @here|@repo|@all) ;;
+    @here|@repo|@all|@lead) ;;
     @pm) [ -n "$(pm_seat)" ] || { [ -n "$LANE" ] && [ -n "$(lane_pm_seat "$LANE")" ]; } \
            || die "post: no PM registered for ${LANE:+lane @$LANE or }$REPO — that seat should run 'agent-bus role pm${LANE:+ --lane $LANE}'" ;;
-    @*) { valid_lane "${to#@}" && lane_exists "${to#@}"; } \
-          || die "post: unknown scope $to (use a seat from 'agent-bus who', a lane, @here, @repo, @pm, or @all)" ;;
+    @*) [ -n "$(role_seat "${to#@}")" ] || { valid_lane "${to#@}" && lane_exists "${to#@}"; } \
+          || die "post: unknown scope $to (use a seat from 'agent-bus who', a role, a lane, @here, @repo, @pm, @lead, or @all)" ;;
   esac
   if [ -n "$close" ]; then
     [ -n "$re" ] || die "post: --close needs --re <id> (the item being closed)"
     in_list "$close" "$REASONS" || die "post: --close must be one of: $REASONS"
-    if [ "$close" = handed-off ] && ! in_list "$state" 'needs-review blocked handoff question'; then
-      die "post: --close handed-off opens the next item, so --state must be needs-review|blocked|handoff|question"
+    if { [ "$close" = handed-off ] || [ "$close" = escalated ]; } && ! in_list "$state" 'needs-review blocked handoff question'; then
+      die "post: --close $close opens the next item, so --state must be needs-review|blocked|handoff|question"
     fi
     check_closable "$re" || exit 1
   fi
@@ -1133,13 +1192,13 @@ check_closable() {
   v=$(lq '
     closed($L) as $c | ([$L[] | select(.kind == "msg" and .id == $id)] | first) as $m
     | if $m == null then "missing" elif $c[$id] then "closed"
-      elif ($m | authored($me) or gets($me) or (same_repo($me) and pm_for($me))) then "ok"
+      elif is_lead($me) or ($m | authored($me) or gets($me) or (same_repo($me) and pm_for($me))) then "ok"
       else "no" end' --arg id "$1")
   case "$v" in
     ok) return 0 ;;
     missing) printf 'agent-bus: %s — no such packet\n' "$1" >&2 ;;
     closed) printf 'agent-bus: %s is already closed\n' "$1" >&2 ;;
-    *) printf 'agent-bus: %s — %s is not its sender, a recipient, or the PM\n' "$1" "$ADDR" >&2 ;;
+    *) printf 'agent-bus: %s — %s is not its sender, a recipient, the PM or the lead\n' "$1" "$ADDR" >&2 ;;
   esac
   return 1
 }
@@ -1218,9 +1277,10 @@ cmd_resolve() {
     esac
   done
   [ -n "$ids" ] || die "resolve: needs a packet id"
-  [ -n "$reason" ] || die "resolve: --reason is required (done|denied|canceled|duplicate) — a close must say where the work went"
+  [ -n "$reason" ] || die "resolve: --reason is required (done|denied|canceled|duplicate|superseded) — a close must say where the work went"
   [ "$reason" = handed-off ] && die "resolve: handing off needs a destination — agent-bus post --re <id> --close handed-off --to <seat> --state handoff -m '...'"
-  in_list "$reason" "$REASONS" || die "resolve: --reason must be one of: done denied canceled duplicate"
+  [ "$reason" = escalated ] && die "resolve: escalating needs a destination — agent-bus post --re <id> --close escalated --to @lead --state question -m '...'"
+  in_list "$reason" "$REASONS" || die "resolve: --reason must be one of: done denied canceled duplicate superseded"
   for id in $ids; do
     if ! valid_id "$id"; then printf 'agent-bus: %s — not a packet id\n' "$id" >&2; continue; fi
     check_closable "$id" || continue
@@ -1320,18 +1380,37 @@ cmd_claims() {
 }
 
 cmd_role() {
-  local take=0 clear=0 force=0 lane='' cur f label
+  local take=0 clear=0 force=0 lane='' cur f label name=''
   while [ $# -gt 0 ]; do
     case "$1" in
       pm) take=1 ;;
+      [a-z0-9]*) valid_lane "$1" || die "role: '$1' is not a role name ([a-z0-9-], max 32, not here|repo|all|pm|lead)"
+                 name="$1" ;;
       --clear) clear=1 ;;
       --force) force=1 ;;
       --lane) [ $# -ge 2 ] && valid_lane "$2" || die "role: --lane needs a lane name ([a-z0-9-], not here|repo|all|pm)"
               lane="$2"; shift ;;
-      *) die "role: usage — agent-bus role [pm [--lane <name>] [--force] | [--lane <name>] --clear]" ;;
+      *) die "role: usage — agent-bus role [pm [--lane <name>] | <name>] [--force | --clear]" ;;
     esac
     shift
   done
+  # A named role (@release, @lead-architect): what this seat does. Pure
+  # addressing — the holder owns packets sent to @<name>; no copies.
+  if [ -n "$name" ]; then
+    f=$(role_file "$name"); cur=$(role_seat "$name")
+    if ((clear)); then
+      [ -n "$cur" ] || { printf 'nobody holds @%s\n' "$name"; return 0; }
+      [ "$cur" = "$ADDR" ] || printf 'agent-bus: releasing @%s held by another seat (%s)\n' "$name" "$cur" >&2
+      rm -f "$f"; printf 'role @%s cleared\n' "$name"; return 0
+    fi
+    if [ -n "$cur" ] && [ "$cur" != "$ADDR" ] && ((!force)) && seat_live "$cur"; then
+      die "role: @$name is held by $cur (still live) — retry with --force to take over"
+    fi
+    printf '%s' "$ADDR" >"$f"
+    printf '@%s: %s%s — peers reach this seat with --to @%s\n' "$name" "$ADDR" \
+      "$([ -n "$cur" ] && [ "$cur" != "$ADDR" ] && echo " (took over from $cur)")" "$name"
+    return 0
+  fi
   if [ -n "$lane" ]; then f=$(lane_pm_file "$lane"); cur=$(lane_pm_seat "$lane"); label="lane @$lane"
   else f=$(pm_file); cur=$(pm_seat); label="$REPO"; fi
   if ((clear)); then
@@ -1342,6 +1421,7 @@ cmd_role() {
   if ((!take)); then
     if [ -n "$cur" ]; then printf 'PM for %s: %s\n' "$label" "$cur"; else printf 'no PM registered for %s\n' "$label"; fi
     [ -n "$lane" ] || lane_pms | jq -r 'to_entries[] | "PM for lane @\(.key): \(.value)"' | sanitize
+    [ -n "$lane" ] || role_map | jq -r 'to_entries[] | "@\(.key): \(.value)"' | sanitize
     return 0
   fi
   # A takeover redirects every supervisory packet in that scope.
@@ -1358,7 +1438,72 @@ cmd_role() {
 }
 
 # Join, show or leave a lane: the feature this seat is working on.
+# Who may change a lane's lifecycle: the lead, the repo PM, or that lane's PM.
+lane_standing() {
+  [ "$TOOL" = lead ] || [ "$ADDR" = "$(pm_seat)" ] || [ "$ADDR" = "$(lane_pm_seat "$1")" ]
+}
+
+# Days, as "7d" or "7", to seconds.
+days_secs() { local d="${1%d}"; [[ "$d" =~ ^[0-9]+$ ]] || die "expected a number of days like 7d, got '$1'"; printf '%s' $((d * 86400)); }
+
+# `lane <name> done|park|reopen|sweep|title`: one ledger row per change. done and
+# sweep close the lane's open items in that one row (done: all of them; sweep:
+# those older than --older). Nothing is rewritten; closes stay auditable.
+lane_lifecycle() {
+  local name="$1" verb="$2" reason='' older='' older_raw='' title='' state='' before=0 n
+  shift 2
+  while [ $# -gt 0 ]; do
+    [ $# -ge 2 ] || die "lane: $1 needs a value"
+    case "$1" in
+      --reason) reason="$2" ;;
+      --older) older=$(days_secs "$2"); older_raw="$2" ;;
+      --title) title="$2" ;;
+      *) die "lane: unknown flag $1" ;;
+    esac
+    shift 2
+  done
+  [ "$name" = unfiled ] || valid_lane "$name" || die "lane: '$name' is not a lane name"
+  lane_standing "$name" || die "lane: only the lead, the repo PM or the PM of @$name may change its lifecycle"
+  case "$verb" in
+    done) [ -n "$reason" ] || die "lane done: --reason is required (merged|done|canceled|superseded)"
+          state=done; before=$(( $(now_epoch) - ${older:-0} )) ;;
+    park) state=parked ;;
+    reopen) state=open ;;
+    sweep) [ -n "$older" ] && [ -n "$reason" ] || die "lane sweep: needs --older <days> and --reason"
+           before=$(( $(now_epoch) - older )) ;;
+    title) [ -n "$title" ] || die "lane title: needs --title" ;;
+    *) die "lane: usage — agent-bus lane <name> done|park|reopen|sweep|title [--reason r] [--older Nd] [--title t]" ;;
+  esac
+  n=$(open_items "$name" | jq -s --argjson b "$before" '[.[] | select((.epoch // 0) <= $b)] | length')
+  ledger_append "$(jq -nc --arg lane "$name" --arg repo_id "$REPO_ID" --arg repo "$REPO" --arg state "$state" \
+    --arg reason "$reason" --arg title "$title" --arg by "$ADDR" --argjson before "$before" --argjson epoch "$(now_epoch)" \
+    '{kind:"lane",lane:$lane,repo_id:$repo_id,repo:$repo,by:$by,epoch:$epoch}
+     + (if $state != "" then {state:$state} else {} end)
+     + (if $reason != "" then {reason:$reason} else {} end)
+     + (if $title != "" then {title:$title} else {} end)
+     + (if $before > 0 then {close_before:$before} else {} end)')"
+  case "$verb" in
+    done) printf 'lane @%s done (%s): closed %s open item(s)\n' "$name" "$reason" "$n" ;;
+    sweep) printf 'lane @%s: closed %s item(s) older than %s (%s)\n' "$name" "$n" "$older_raw" "$reason" ;;
+    park) printf 'lane @%s parked — hidden from attention until reopened\n' "$name" ;;
+    reopen) printf 'lane @%s reopened\n' "$name" ;;
+    title) printf 'lane @%s: %s\n' "$name" "$title" ;;
+  esac
+}
+
+# Re-file a work item into another lane, without editing it.
+cmd_file() {
+  [ $# -eq 2 ] || die "file: usage — agent-bus file <id> <lane>"
+  valid_id "$1" || die "file: not a packet id: $1"
+  valid_lane "$2" || die "file: '$2' is not a lane name"
+  check_closable "$1" || exit 1
+  ledger_append "$(jq -nc --arg msg "$1" --arg lane "$2" --arg by "$ADDR" --argjson epoch "$(now_epoch)" \
+    '{kind:"file",msg:$msg,lane:$lane,by:$by,epoch:$epoch}')"
+  printf 'filed %s in @%s\n' "$1" "$2"
+}
+
 cmd_lane() {
+  if [ $# -ge 2 ] && [ "${2#-}" = "$2" ]; then lane_lifecycle "$@"; return; fi
   case "${1:-}" in
     '') if [ -n "$LANE" ]; then printf '%s (%s)\n' "$LANE" "$LANE_SRC"; else printf '(none — branch %s carries no ticket)\n' "$BRANCH"; fi ;;
     --clear) state_update 'del(.lane)'; resolve_identity; touch_seat
@@ -1380,6 +1525,10 @@ cmd_offboard() {
   for l in $(lane_pms | jq -r --arg me "$ADDR" 'to_entries[] | select(.value == $me) | .key'); do
     rm -f "$(lane_pm_file "$l")"; roles=$((roles + 1))
   done
+  local rn
+  for rn in $(role_map | jq -r --arg me "$ADDR" 'to_entries[] | select(.value == $me) | .key'); do
+    rm -f "$(role_file "$rn")"; roles=$((roles + 1))
+  done
   claims=$(release_mine)
   printf 'offboarded %s — %s role(s), %s claim(s) released\n' "$ADDR" "$roles" "$claims"
   open=$(open_items | jq -c --arg me "$ADDR" 'select(.owner == $me)')
@@ -1395,60 +1544,224 @@ cmd_offboard() {
   return 0
 }
 
-# Machine-wide state as one JSON object, for viewers (the menu bar app). Uses the
-# same liveness, ownership and close rules as who/triage, across every repo, so
-# a viewer never re-implements them. Read-only: never touches a seat.
-cmd_snapshot() {
-  local now f base rid a l seats pms='{}' lanepms='{}'
+# Machine-wide state as one JSON object, for viewers (the menu bar app) and for
+# `lanes` / `attention`. Uses the same liveness, ownership, lane and close rules
+# as everything else, across every repo, so a viewer never re-implements them.
+# Read-only: never touches a seat.
+#
+#   seats      live seats, with wake count
+#   open       open work items: lane, owner, gone/stale/unread
+#   lanes      one row per lane with open work or live seats: health, project
+#   attention  what needs a decision, each with the command that clears it
+#   recent     the last 100 posts, closes and wakes
+snapshot_json() {
+  local now f base rid a l n seats pms='{}' lanepms='{}' roles='{}' projects='[]' merged='{}'
   now=$(now_epoch)
   seats=$(seat_rows | jq -sc --argjson cut "$((now - SEAT_TTL))" --argjson codex_cut "$(codex_idle_cut)" \
     "$JQ_SEAT_LIVE"'[.[] | select(buslive($cut; $codex_cut))
-      | {addr, tool, repo, repo_id, wt, branch, lane: (.lane // ""), lane_src: (.lane_src // ""), epoch: ((.epoch // 0) | tonumber? // 0),
-         last_hook: ((.last_hook // 0) | tonumber? // 0),
+      | {addr, tool, repo, repo_id, wt, branch, lane: (.lane // ""), lane_src: (.lane_src // ""),
+         epoch: ((.epoch // 0) | tonumber? // 0), last_hook: ((.last_hook // 0) | tonumber? // 0),
          scope: ((.tool // "") + "/" + (.wt // "")),
          wakeable: (((.socket // "") != "") or ((.codex_queue // "") != "")
                     or ((.grok_webhook // "") != "") or .tool == "opencode")}]
       | sort_by(-.epoch)')
-  for f in "$BUS"/state/roles/*.pm; do
+  # Each live seat's read cursor and wake count, for NOT PICKED UP and spent budgets.
+  seats=$(jq -c '.[]' <<<"$seats" | while IFS= read -r row; do
+      f="$BUS/state/$(slugify "$(jq -r .addr <<<"$row")").json"
+      if [ -f "$f" ]; then jq -c --slurpfile st "$f" '. + {read: ($st[0].read // []), wakes: ($st[0].wakes // 0)}' <<<"$row"
+      else jq -c '. + {read: [], wakes: 0}' <<<"$row"; fi
+    done | jq -sc '.')
+  for f in "$BUS"/state/roles/*; do
     [ -f "$f" ] || continue
-    base=$(basename "$f" .pm); rid=${base%%.*}; a=$(head -1 "$f" | tr -d '\n')
+    base=$(basename "$f"); rid=${base%%.*}
+    a=$( (jq -r '.addr // empty' "$f" 2>/dev/null || head -1 "$f") | tr -d '\n')
     case "$base" in
-      *.lane.*) l=${base#*.lane.}
-                lanepms=$(jq -c --arg r "$rid" --arg l "$l" --arg a "$a" '.[$r][$l] = $a' <<<"$lanepms") ;;
-      *) pms=$(jq -c --arg r "$rid" --arg a "$a" '.[$r] = $a' <<<"$pms") ;;
+      *.lane.*.pm) l=${base#*.lane.}; l=${l%.pm}
+                   lanepms=$(jq -c --arg r "$rid" --arg l "$l" --arg a "$a" '.[$r][$l] = $a' <<<"$lanepms") ;;
+      *.name.*) n=${base#*.name.}
+                roles=$(jq -c --arg r "$rid" --arg n "$n" --arg a "$a" '.[$r][$n] = $a' <<<"$roles") ;;
+      *.pm) pms=$(jq -c --arg r "$rid" --arg a "$a" '.[$r] = $a' <<<"$pms") ;;
     esac
   done
+  [ -f "$BUS/projects.json" ] && projects=$(jq -c '.projects // []' "$BUS/projects.json" 2>/dev/null || echo '[]')
+  [ -f "$BUS/state/merged.json" ] && merged=$(jq -c . "$BUS/state/merged.json" 2>/dev/null || echo '{}')
   jq -nRc --argjson now "$now" --arg bus "$BUS" --argjson seats "$seats" \
-    --argjson pms "$pms" --argjson lanepms "$lanepms" --argjson stale "$((STALE_HOURS * 3600))" "$JQ_LANE"'
-    def sup: .state as $s | ["needs-review","blocked","handoff","question"] | index($s) != null;
-    def lanes_of: [((.to // "") | select(startswith("@")) | .[1:]), (.lane // "")] | map(select(. != ""));
+    --argjson pms "$pms" --argjson lanepms "$lanepms" --argjson roles "$roles" \
+    --argjson projects "$projects" --argjson merged "$merged" \
+    --argjson stale "$((STALE_HOURS * 3600))" --argjson pickup "$PICKUP_SECS" --argjson budget "$WAKE_BUDGET" \
+    "$JQ_LANE$JQ_CLOSE"'
+    def glob($g): "^" + ($g | gsub("[.+?^${}()|\\[\\]\\\\]"; "\\\\\(.)") | gsub("\\*"; ".*")) + "$";
+    # A project groups lanes: the first projects.json rule whose repo and lane
+    # globs match, else the repo itself.
+    def project_of($repo; $lane): first($projects[] | select(((.repo // "*") as $r | $repo | test(glob($r)))
+        and (((.lanes // ["*"]) | any(. as $g | $lane | test(glob($g)))))) | .name) // $repo;
+    def age($e): ($now - $e) as $s | if $s < 3600 then "\($s / 60 | floor)m" elif $s < 86400 then "\($s / 3600 | floor)h" else "\($s / 86400 | floor)d" end;
+    def live($a): $seats | any(.addr == $a or .scope == $a);
     [inputs | fromjson? // empty] as $L
-    | (reduce ($L[] | if .kind == "resolve" then .msg
-                      elif .kind == "msg" and (.close // null) != null then .re
-                      else empty end) as $i ({}; .[$i] = true)) as $c
+    | closed($L) as $c | file_map($L) as $fm | lane_rows($L) as $lr
+    | ($seats | map({(.addr): .}) | add // {}) as $by
     | (reduce ($L[] | select(.kind == "msg")) as $m ({}; .[$m.id] = ($m.subject // ""))) as $subj
-    | {now: $now, bus: $bus, seats: $seats, pms: $pms, lanepms: $lanepms,
-       open: [$L[] | select(.kind == "msg" and sup and ($c[.id] | not) and ((.probe // false) | not))
-         | . + {lane: lane_of}
-         | (.repo_id // "") as $rid | ($lanepms[$rid] // {}) as $lp
-         | (if ((.to // "") | startswith("@")) then
-              ([(lanes_of[] | ($lp[.] // empty)), ($pms[$rid] // empty), "(no PM)"] | first)
-            else .to end) as $o
-         | {id, epoch: (.epoch // 0), from, to, state, subject: (.subject // ""), repo: (.repo // "-"),
-            repo_id: $rid, lane: (.lane // ""), owner: $o,
-            gone: ($seats | any(.addr == $o or .scope == $o) | not),
-            stale: ((.epoch // 0) <= $now - $stale)}]
-         | sort_by(.epoch),
-       recent: [$L[] | select(.kind == "msg" or .kind == "resolve" or .kind == "delivery")] | .[-100:] | reverse
+    | [$L[] | select(.kind == "msg" and sup and ($c[.id] | not) and ((.probe // false) | not))
+        | . + {lane: item_lane($fm)}
+        | (.repo_id // "") as $rid | ($lanepms[$rid] // {}) as $lp | .id as $id
+        | (if .to == "@lead" then "lead"
+           elif ((.to // "") | startswith("@")) then
+             ([(($roles[$rid] // {})[.to[1:]] // empty), (.to[1:] | $lp[.] // empty), ($lp[.lane] // empty),
+               ($pms[$rid] // empty), "(no PM)"] | first)
+           else .to end) as $o
+        | {id, epoch: (.epoch // 0), from, to, state, subject: (.subject // ""), repo: (.repo // "-"),
+           repo_id: $rid, lane, owner: $o, branch: (.branch // ""),
+           gone: ($o != "lead" and (live($o) | not)),
+           stale: ((.epoch // 0) <= $now - $stale),
+           unread: ((($by[$o].read // null) != null) and (($by[$o].read | index($id)) == null)
+                    and (.epoch // 0) <= $now - $pickup)}]
+      | sort_by(.epoch) as $open
+    # Lane activity: every packet in the last 30 days, plus the open backlog.
+    | ([$L[] | select(.kind == "msg" and (.epoch // 0) > $now - 2592000)
+        | {key: ((.repo_id // "") + ":" + item_lane($fm)), epoch: (.epoch // 0), repo: (.repo // "-"),
+           branch: (.branch // ""), cwd: (.cwd // "")}]
+       | group_by(.key) | map({key: .[0].key, value: {last: (map(.epoch) | max),
+           branch: ([.[] | select(.branch != "" and (.branch | test("^(develop|main|master|detached@)") | not))]
+                    | max_by(.epoch) | .branch // ""),
+           cwd: (max_by(.epoch).cwd)}}) | from_entries) as $act
+    | ($open | group_by((.repo_id) + ":" + .lane) | map({key: ((.[0].repo_id) + ":" + .[0].lane), value: .}) | from_entries) as $byLane
+    | ($seats | map(select(.lane != "")) | group_by((.repo_id // "") + ":" + .lane)
+       | map({key: (((.[0].repo_id) // "") + ":" + .[0].lane), value: .}) | from_entries) as $seatsByLane
+    | ([$byLane, $seatsByLane] | map(keys) | add | unique) as $keys
+    | [$keys[] | . as $k | ($byLane[$k] // []) as $items | ($seatsByLane[$k] // []) as $ls
+        | ($k | split(":")) as $kp | $kp[0] as $rid | ($kp[1:] | join(":")) as $lane
+        | ($lr[$k] // {state: "open"}) as $row
+        | ([$items[].repo, $ls[].repo] | map(select(. != null)) | first // "-") as $repo
+        | ([($act[$k].last // 0), ($items | map(.epoch) | max // 0), ($ls | map(.epoch) | max // 0)] | max) as $last
+        | ($merged[$k].merged // false) as $isMerged
+        | {key: $k, repo: $repo, repo_id: $rid, lane: $lane, project: project_of($repo; $lane),
+           title: ($row.title // null), state: $row.state, open: ($items | length),
+           gone: ($items | map(select(.gone)) | length),
+           oldest: ($items | map(.epoch) | min // null), last: $last,
+           seats: ($ls | map(.addr)), pm: (($lanepms[$rid] // {})[$lane] // null),
+           branch: ($act[$k].branch // ""), cwd: ($act[$k].cwd // ""), merged: $isMerged,
+           health: (if $row.state == "parked" then "parked"
+                    elif $lane == "unfiled" then "unfiled"
+                    elif ($items | length) > 0 and $isMerged then "merged"
+                    elif ($ls | length) > 0 or $now - $last < 3600 then "active"
+                    elif ($items | length) > 0 and $now - $last > $stale then "orphaned"
+                    elif ($items | length) > 0 then "idle"
+                    else "quiet" end)}]
+      | sort_by(-.last) as $lanes
+    | {now: $now, bus: $bus, seats: ($seats | map(del(.read))), pms: $pms, lanepms: $lanepms, roles: $roles,
+       open: $open, lanes: $lanes,
+       attention: (
+         [$open[] | select(.owner == "lead")
+           | {kind: "needs-you", repo, lane, id, epoch, text: "\(.from) asks you: \(.subject)",
+              fix: "agent-bus resolve \(.id) --reason done"}]
+         + [$open[] | select(.unread and (.gone | not) and .owner != "lead")
+           | {kind: "not-picked-up", repo, lane, id, epoch,
+              text: "\(.owner) has not read \(.state) from \(.from): \(.subject)",
+              fix: "agent-bus post --re \(.id) --close handed-off --to <other-seat> --state handoff -m \"...\""}]
+         + [$open[] | select(.state == "blocked" and (.gone | not) and .owner != "lead" and .epoch < $now - 3600)
+           | {kind: "blocked", repo, lane, id, epoch, text: "\(.from) blocked \(age(.epoch)): \(.subject)",
+              fix: "agent-bus show \(.id)"}]
+         + [$lanes[] | select(.health == "merged")
+           | {kind: "merged", repo, lane, epoch: .last,
+              text: "@\(.lane): branch \(.branch) is merged but \(.open) item(s) are still open",
+              fix: "agent-bus lane \(.lane) done --reason merged"}]
+         + [$lanes[] | select(.health == "orphaned")
+           | {kind: "orphaned", repo, lane, epoch: .last,
+              text: "@\(.lane): \(.open) open item(s), nobody on it for \(age(.last))",
+              fix: "agent-bus lane \(.lane) done --reason canceled   (or: lane \(.lane) park)"}]
+         + [$lanes[] | select(.health == "unfiled" and .open > 0)
+           | {kind: "unfiled", repo, lane, epoch: .oldest,
+              text: "\(.open) open item(s) in \(.repo) belong to no lane",
+              fix: "agent-bus triage --lane unfiled   (then: file <id> <lane>, or lane unfiled sweep --older 7d --reason canceled)"}]
+         + [$seats[] | select((.wakes // 0) >= $budget)
+           | {kind: "budget", repo, lane, seat: .addr, epoch,
+              text: "\(.addr) has used its \($budget) wakes; it will not be woken again until it closes an item",
+              fix: "close or hand on its items: agent-bus triage"}]
+         + [$L[] | select(.kind == "delivery" and (.epoch // 0) > $now - 86400
+                          and ((.status // "") | IN("delivered", "queued", "accepted", "ok") | not))
+           | {kind: "wake-failed", id: .msg, seat: .to, epoch, text: "wake to \(.to) failed: \(.status)",
+              fix: "agent-bus show \(.msg)"}]
+         + ([($pms | to_entries[]), ($lanepms | to_entries[] | .key as $r | .value | to_entries[] | {key: $r, value: .value, lane: .key})]
+           | map(select(live(.value) | not)
+             | {kind: "pm-gone", repo_id: .key, lane: (.lane // null), seat: .value, epoch: $now,
+                text: "PM \(if .lane then "for @" + .lane else "for the repo" end) is \(.value), which is no longer running",
+                fix: "agent-bus role pm\(if .lane then " --lane " + .lane else "" end) --force   (from the new supervisor)"}))
+         ),
+       recent: [$L[] | select(.kind == "msg" or .kind == "resolve" or .kind == "delivery" or .kind == "lane" or .kind == "file")]
+         | .[-100:] | reverse
          | map(if .kind == "msg" then
                  {kind, id, epoch: (.epoch // 0), from, to, state, subject: (.subject // ""), repo: (.repo // "-"),
-                  re: (.re // null), close: (.close // null)}
+                  lane: item_lane($fm), re: (.re // null), close: (.close // null)}
                elif .kind == "resolve" then
                  {kind, id: .msg, epoch: (.epoch // 0), from: .by, reason: (.reason // ""), subject: ($subj[.msg] // "")}
+               elif .kind == "lane" then
+                 {kind, id: (.lane + "@" + (.epoch | tostring)), epoch: (.epoch // 0), from: .by, lane,
+                  state: (.state // null), reason: (.reason // ""), subject: (.title // "")}
+               elif .kind == "file" then
+                 {kind, id: .msg, epoch: (.epoch // 0), from: .by, lane, subject: ($subj[.msg] // "")}
                else
                  {kind, id: .msg, epoch: (.epoch // 0), to, transport: (.transport // ""), status: (.status // ""),
                   subject: ($subj[.msg] // "")}
                end)}' "$LEDGER"
+}
+
+cmd_snapshot() { snapshot_json; }
+
+# Which lanes' branches are already merged into their repo's trunk. Results go
+# to state/merged.json for snapshot to read, so hooks never pay for git.
+lanes_check_merged() {
+  local snap out='{}' key branch cwd trunk ref t
+  snap=$(snapshot_json)
+  while IFS=$'\t' read -r key branch cwd; do
+    [ -n "$branch" ] && [ -d "$cwd" ] || continue
+    trunk=''
+    for t in origin/develop origin/main origin/master develop main master; do
+      git -C "$cwd" rev-parse --verify --quiet "$t" >/dev/null 2>&1 && { trunk="$t"; break; }
+    done
+    [ -n "$trunk" ] || continue
+    ref=''
+    for t in "refs/heads/$branch" "refs/remotes/origin/$branch"; do
+      git -C "$cwd" rev-parse --verify --quiet "$t" >/dev/null 2>&1 && { ref="$t"; break; }
+    done
+    [ -n "$ref" ] || continue
+    local m=false
+    git -C "$cwd" merge-base --is-ancestor "$ref" "$trunk" 2>/dev/null && m=true
+    out=$(jq -c --arg k "$key" --arg b "$branch" --arg t "$trunk" --argjson m "$m" --argjson at "$(now_epoch)" \
+      '.[$k] = {branch: $b, trunk: $t, merged: $m, checked: $at}' <<<"$out")
+  done < <(jq -r '.lanes[] | select(.open > 0 and .branch != "" and .cwd != "") | [.key, .branch, .cwd] | @tsv' <<<"$snap")
+  printf '%s\n' "$out" >"$BUS/state/merged.json.tmp" && mv "$BUS/state/merged.json.tmp" "$BUS/state/merged.json"
+  jq -r 'to_entries | "checked \(length) lane branch(es); \(map(select(.value.merged)) | length) merged"' <<<"$out"
+}
+
+cmd_lanes() {
+  local json=0 all=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --json) json=1 ;;
+      --all) all=1 ;;
+      --check-merged) lanes_check_merged; return ;;
+      *) die "lanes: usage — agent-bus lanes [--all] [--json] | --check-merged" ;;
+    esac
+    shift
+  done
+  local snap; snap=$(snapshot_json)
+  if ((json)); then jq -c '.lanes' <<<"$snap"; return; fi
+  jq -r --arg rid "$REPO_ID" --argjson all "$all" --argjson now "$(now_epoch)" '
+    def age($e): if $e == null then "-" else ($now - $e) as $s | if $s < 3600 then "\($s / 60 | floor)m" elif $s < 86400 then "\($s / 3600 | floor)h" else "\($s / 86400 | floor)d" end end;
+    [.lanes[] | select($all == 1 or .repo_id == $rid) | select(.health != "quiet")]
+    | if length == 0 then "no lanes with open work or live seats" else
+      (group_by(.project)[] | "\n\(.[0].project)",
+        (sort_by(-.open)[] | "  @\(.lane)\(if .title then " — " + .title else "" end)  [\(.health)]  \(.open) open\(
+           if .gone > 0 then " (\(.gone) ownerless)" else "" end), \(.seats | length) seat(s), last \(age(.last))\(
+           if .pm then ", PM " + .pm else "" end)"))
+      end' <<<"$snap" | sanitize
+}
+
+cmd_attention() {
+  local snap; snap=$(snapshot_json)
+  if [ "${1:-}" = --json ]; then jq -c '.attention' <<<"$snap"; return; fi
+  jq -r '.attention | if length == 0 then "nothing needs attention" else
+    (group_by(.kind)[] | "\n\(.[0].kind) (\(length))", (.[] | "  \(.text)\n    fix: \(.fix)")) end' <<<"$snap" | sanitize
 }
 
 cmd_log() {
@@ -1482,13 +1795,9 @@ cmd_stop_hook() {
 # Open work items (supervisory, not closed, not probes) as {id: true}, read from
 # the given ledger files. Closes always postdate their item, but are looked up
 # across every file given so an item and its close may sit apart.
-JQ_OPEN_IDS='[inputs | fromjson? // empty] as $L
-  | (reduce ($L[] | if .kind == "resolve" then .msg
-                    elif .kind == "msg" and (.close // null) != null then .re
-                    else empty end) as $i ({}; .[$i] = true)) as $c
-  | reduce ($L[] | select(.kind == "msg" and ((.probe // false) | not)
-                          and (.state as $s | ["needs-review","blocked","handoff","question"] | index($s) != null)
-                          and ($c[.id] | not)) | .id) as $i ({}; .[$i] = true)'
+JQ_OPEN_IDS="$JQ_LANE$JQ_CLOSE"'[inputs | fromjson? // empty] as $L
+  | closed($L) as $c
+  | reduce ($L[] | select(.kind == "msg" and ((.probe // false) | not) and sup and ($c[.id] | not)) | .id) as $i ({}; .[$i] = true)'
 
 # Bring open items that an older gc archived back into the ledger. Their bodies
 # were already deleted by that gc and cannot be recovered.
@@ -1524,10 +1833,11 @@ cmd_gc() {
   done
   # A PM whose seat has been gone past ROLE_TTL loses the role, so @pm stops
   # reporting delivery to nobody.
-  for f in "$BUS"/state/roles/*.pm; do
+  for f in "$BUS"/state/roles/*.pm "$BUS"/state/roles/*.name.*; do
     [ -f "$f" ] || continue
-    seat_live "$(head -1 "$f")" && continue
-    local sf="$BUS/seats/$(slugify "$(head -1 "$f")").json"
+    local holder; holder=$( (jq -r '.addr // empty' "$f" 2>/dev/null || head -1 "$f") | tr -d '\n')
+    seat_live "$holder" && continue
+    local sf="$BUS/seats/$(slugify "$holder").json"
     e=0; [ -f "$sf" ] && e=$(jq -r '.epoch // 0' "$sf" 2>/dev/null || echo 0)
     [[ "$e" =~ ^[0-9]+$ ]] || e=0
     if ((e < now - ROLE_TTL)); then rm -f "$f"; n_role=$((n_role + 1)); fi
@@ -1564,8 +1874,11 @@ cmd_gc() {
   bus_lock "$LEDGER" 30
   # Recompute under the lock: an item may have been posted or closed since.
   open=$(jq -nRc "$JQ_OPEN_IDS" "$LEDGER")
+  # Lane and file rows stay too: they are few, and they carry lane state
+  # (parked, titles, sweeps) that must outlive the 14-day window.
   local old='(fromjson? // {}) as $j | ($j.epoch | type) == "number" and $j.epoch < $cut
-             and (($j.kind == "msg" and $open[$j.id // ""]) | not)'
+             and (($j.kind == "msg" and $open[$j.id // ""]) | not)
+             and ($j.kind != "lane" and $j.kind != "file")'
   jq -rR --argjson cut "$cut" --argjson open "$open" ". as \$raw | select($old) | \$raw" \
     "$LEDGER" >"$LEDGER.drop" 2>/dev/null || : >"$LEDGER.drop"
   n_rot=$(grep -c . "$LEDGER.drop" 2>/dev/null || true)
@@ -1667,31 +1980,44 @@ agent-bus — handoff bus for coding agents sharing repos and worktrees.
   whoami                      this seat's identity
   who                         live seats, the PM, open-work count, claims
   post [flags]                send a packet
-      --to <seat|scope|@lane|@here|@repo|@pm|@all>     required
+      --to <seat|scope|@role|@lane|@pm|@lead|@here|@repo|@all>     required
       --allow-claude          let a Claude seat post to another Claude seat
                               (otherwise refused: use Claude session messaging)
       --state needs-review|blocked|handoff|question|done|fyi   default fyi
       -m <body> | --file <f> | stdin    --subject <s>    --touched a,b | auto
       --re <id>               reply to a packet
       --close <reason>        with --re: close that item in the same row
-                              (done|handed-off|denied|canceled|duplicate;
-                              handed-off needs a supervisory --state)
+                              (done|handed-off|escalated|denied|canceled|
+                              duplicate|superseded; handed-off and escalated
+                              need a supervisory --state)
   read [--peek] [--all]       show packets for this seat (marks read unless --peek)
   show <id>                   a packet, its replies and closes, and its body
-  resolve <id>... --reason r  close items (done|denied|canceled|duplicate)
-  triage [--lane <name>]      open work in this repo by owner: GONE owners,
-                              NOT PICKED UP, STALE
-  lane [<name> | --clear]     join, show or leave a lane (a feature's seats)
+  resolve <id>... --reason r  close items (done|denied|canceled|duplicate|superseded)
+  triage [--lane <name>] [--by owner|lane]
+                              open work in this repo: GONE owners, NOT PICKED UP,
+                              STALE
+  lane [<name> | --clear]     show or set this seat's lane (default: from the
+                              branch's ticket key, e.g. salt-8947)
+  lane <name> done|park|reopen|sweep|title [--reason r] [--older Nd] [--title t]
+                              lane lifecycle (lead, repo PM or lane PM): done
+                              closes its open items, sweep those older than
+                              --older, park hides it from attention
+  lanes [--all] [--json] | --check-merged
+                              lanes by project: health, open work, seats;
+                              --check-merged asks git which branches merged
+  attention [--json]          what needs a decision, each with its fix
+  file <id> <lane>            move a work item to another lane
   claim <path>...             advisory claim (CONTESTED if another seat holds it)
   release <path>... | --all | --force <path>...
   claims                      active claims in this repo
-  role [pm] [--lane <name>] [--force | --clear]
-                              show, take or drop the repo PM, or a lane's PM
+  role [pm [--lane <name>] | <name>] [--force | --clear]
+                              show, take or drop the repo PM, a lane's PM, or
+                              a named role peers reach as @<name>
   offboard                    stand down: PM role and claims released, open
                               items listed
   log [n]                     recent packets and closes
-  snapshot                    machine-wide JSON: live seats, open work, recent
-                              activity (read-only; for viewers)
+  snapshot                    machine-wide JSON: seats, open work, lanes,
+                              attention, recent activity (read-only; for viewers)
   doctor                      identity, host install, live seats
   gc [--restore-open]         prune expired state (also runs daily from hooks); open
                               work is never archived. --restore-open brings back
@@ -1706,6 +2032,12 @@ woken by Claude sockets/Stop hooks, the OpenCode plugin, Codex queue, or Grok
 webhook POST. Stop-hook wakes, Codex queue attempts, and Grok webhook POSTs
 consume AGENT_BUS_WAKE_BUDGET (3) until the seat closes something; Claude
 socket notifications do not.
+
+@lead is the human in charge, through the menu bar app (a seat with tool
+"lead"): it owns packets sent to @lead and may close anything. Escalate with
+post --re <id> --close escalated --to @lead. projects.json in the bus directory
+groups lanes into projects: {"projects":[{"name":"Spaces","repo":"salt-*",
+"lanes":["salt-5575","spaces*"]}]}.
 EOF
 }
 
@@ -1732,6 +2064,7 @@ case "$cmd" in
   resolve) touch_seat; cmd_resolve "$@" ;;
   triage) touch_seat; cmd_triage "$@" ;;
   lane) cmd_lane "$@" ;;
+  file) touch_seat; cmd_file "$@" ;;
   claim) touch_seat; cmd_claim "$@" ;;
   release) cmd_release "$@" ;;
   claims) cmd_claims ;;
@@ -1739,6 +2072,8 @@ case "$cmd" in
   offboard) cmd_offboard "$@" ;;
   log) cmd_log "$@" ;;
   snapshot) cmd_snapshot ;;
+  lanes) cmd_lanes "$@" ;;
+  attention) cmd_attention "$@" ;;
   doctor) cmd_doctor ;;
   gc) cmd_gc "$@" ;;
   stop-hook) cmd_stop_hook ;;

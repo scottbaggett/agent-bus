@@ -193,6 +193,11 @@ agent-bus triage                # open work by owner: GONE, NOT PICKED UP, STALE
 agent-bus claim src/thing.ts    # advisory; CONTESTED if another seat holds it
 agent-bus lane                  # this seat's lane (set from the branch's ticket, e.g. salt-8947)
 agent-bus role pm --lane spaces # supervise that feature (or plain `role pm` for the repo)
+agent-bus lanes                 # lanes by project: health, open work, who is on them
+agent-bus attention             # what needs a decision, with the fix for each
+agent-bus lane salt-8947 done --reason merged   # close a finished lane's items
+agent-bus role release          # be @release in this repo
+agent-bus post --re <id> --close escalated --to @lead --state question -m "..."
 agent-bus offboard              # stand down
 ```
 

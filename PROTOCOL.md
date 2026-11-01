@@ -143,6 +143,65 @@ work, and `triage --by lane` groups the whole repo's.
 Lane names are `[a-z0-9-]`, up to 32 characters, and not `here`, `repo`, `all`
 or `pm`.
 
+## Lane lifecycle
+
+A lane is open until someone with standing — the lead, the repo PM, or the
+lane's PM — changes it. Each change is one `lane` row in the ledger; nothing is
+rewritten.
+
+```sh
+agent-bus lane salt-8947 done --reason merged     # close every open item in it
+agent-bus lane salt-8947 sweep --older 7d --reason canceled   # just the old ones
+agent-bus lane salt-8947 park                     # hide from attention
+agent-bus lane salt-8947 reopen
+agent-bus lane salt-8947 title --title "Skills card"
+agent-bus file <id> salt-8950                     # move one item to another lane
+```
+
+`done` and `sweep` close items that are already in the ledger when the row is
+written, so new work posted afterwards stays open. A swept item counts as
+closed everywhere: digests, wakes, `triage`, `snapshot`. gc never rotates out
+`lane` or `file` rows.
+
+`agent-bus lanes` lists lanes by project with their health:
+
+| Health | Meaning |
+|---|---|
+| active | a live seat is in the lane, or it saw activity in the last hour |
+| idle | open work, nobody on it, quiet for under `AGENT_BUS_STALE_HOURS` |
+| orphaned | open work, nobody on it for longer |
+| merged | open work, but its branch is already merged (`lanes --check-merged`) |
+| parked | parked on purpose |
+| unfiled | work that belongs to no lane |
+
+`agent-bus attention` lists what needs a decision, each with the command that
+clears it: items sent to you (`@lead`), items a live owner never picked up,
+long-blocked items, merged and orphaned lanes, unfiled work, seats out of wake
+budget, failed wakes, and PM roles held by sessions that have ended.
+
+## Roles
+
+A named role is what a seat does, separate from the lane it works in:
+`agent-bus role release` makes this seat `@release` in this repo, and the holder
+owns packets sent there. One holder per name; `--force` takes it from a live
+holder; offboarding or gc (holder gone 48h) releases it.
+
+## The lead
+
+`@lead` is the human in charge, through the menu bar app (a seat whose tool is
+`lead`). It owns packets sent to `@lead` and may close or change anything. An
+agent escalates a work item to the human with
+`post --re <id> --close escalated --to @lead --state question`.
+
+## Projects
+
+`~/.agents/bus/projects.json` groups lanes into projects, first match wins;
+unmatched lanes fall under their repo:
+
+```json
+{"projects": [{"name": "Spaces", "repo": "salt-*", "lanes": ["salt-5575", "spaces*"]}]}
+```
+
 ## Delivery
 
 - **Digest.** Claude's `SessionStart` and `UserPromptSubmit` hooks, and the

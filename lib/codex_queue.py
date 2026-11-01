@@ -76,12 +76,19 @@ def state_lock(path):
                 content = lock.read_text().strip()
                 pid = int(content)
                 os.kill(pid, 0)  # raises OSError(ESRCH) if the process is gone
-            except (ValueError, FileNotFoundError):
+            except FileNotFoundError:
+                continue  # released meanwhile; retry immediately
+            except ValueError:
+                # Empty or garbled: the holder may have created the file and
+                # not yet written its PID. Reclaiming that at once let two
+                # threads hold the lock together and overspend the wake budget.
+                # Only a lock that has stayed unreadable for 2 s is abandoned.
                 try:
-                    lock.unlink()
+                    if time.time() - lock.stat().st_mtime > 2.0:
+                        lock.unlink()
+                        continue
                 except FileNotFoundError:
-                    pass
-                continue  # retry immediately
+                    continue
             except OSError as exc:
                 if exc.errno == _errno.ESRCH:  # No such process: stale lock
                     try:

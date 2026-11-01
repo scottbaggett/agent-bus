@@ -10,8 +10,8 @@ struct AgentBusBarApp: App {
         MenuBarExtra {
             BusPanel(store: store)
         } label: {
-            // The badge counts work whose owner is still live: what's in flight.
-            let n = store.liveOpen.count
+            // The badge counts what waits on the user: asks, plus stuck work.
+            let n = store.badgeCount
             Image(systemName: store.error == nil ? "bus" : "exclamationmark.triangle")
             if n > 0 { Text("\(n)") }
         }
@@ -28,12 +28,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // image and exits: a way to check the UI without opening the menu.
         let args = CommandLine.arguments
         if let i = args.firstIndex(of: "--render"), i + 1 < args.count {
-            let want = args.count > i + 2 ? args[i + 2] : "activity"
+            let want = args.count > i + 2 ? args[i + 2] : "attention"
             let tab = Tab.allCases.first { $0.rawValue.lowercased().contains(want) }
             Task { @MainActor in
                 let store = BusStore()
                 try? await Task.sleep(for: .seconds(3))
-                let renderer = ImageRenderer(content: BusPanel(store: store, tab: tab ?? .activity, forImage: true)
+                let renderer = ImageRenderer(content: BusPanel(store: store, tab: tab ?? .attention, forImage: true)
                     .background(Color(nsColor: .windowBackgroundColor)))
                 renderer.scale = 2
                 if let tiff = renderer.nsImage?.tiffRepresentation,

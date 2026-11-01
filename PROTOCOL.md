@@ -273,7 +273,10 @@ Rows written before v2 have no reason and still close their packet.
 
 gc prunes expired claims, dead seats, old bodies and abandoned roles, and runs
 from hooks at most once a day (`AGENT_BUS_NO_AUTO_GC=1` to opt out). It never
-closes a work item.
+closes a work item, and never archives an open one: open items and their bodies
+stay in `ledger.jsonl` however old they are, so `triage` always sees them.
+Before this rule, gc archived open items with everything else after 14 days;
+`agent-bus gc --restore-open` moves those back (their bodies are already gone).
 
 ## Codex hook installation
 

@@ -1390,8 +1390,43 @@ cmd_stop_hook() {
 }
 
 # Mechanical pruning only; gc never closes a work item.
+# Open work items (supervisory, not closed, not probes) as {id: true}, read from
+# the given ledger files. Closes always postdate their item, but are looked up
+# across every file given so an item and its close may sit apart.
+JQ_OPEN_IDS='[inputs | fromjson? // empty] as $L
+  | (reduce ($L[] | if .kind == "resolve" then .msg
+                    elif .kind == "msg" and (.close // null) != null then .re
+                    else empty end) as $i ({}; .[$i] = true)) as $c
+  | reduce ($L[] | select(.kind == "msg" and ((.probe // false) | not)
+                          and (.state as $s | ["needs-review","blocked","handoff","question"] | index($s) != null)
+                          and ($c[.id] | not)) | .id) as $i ({}; .[$i] = true)'
+
+# Bring open items that an older gc archived back into the ledger. Their bodies
+# were already deleted by that gc and cannot be recovered.
+gc_restore_open() {
+  local arch="$BUS/ledger.archive.jsonl" open n
+  [ -f "$arch" ] || { printf 'gc: no archive, nothing to restore\n'; return 0; }
+  bus_lock "$LEDGER" 30
+  open=$(cat "$arch" "$LEDGER" | jq -nRc "$JQ_OPEN_IDS")
+  jq -cR --argjson open "$open" 'fromjson? // empty | select(.kind == "msg" and $open[.id])' "$arch" >"$arch.restore"
+  n=$(grep -c . "$arch.restore" 2>/dev/null || true)
+  if ((n > 0)); then
+    # Archive keeps every other line byte-for-byte; unparseable lines stay too.
+    jq -rR --argjson open "$open" '. as $raw | (fromjson? // {}) | select(.kind != "msg" or ($open[.id // ""] | not)) | $raw' \
+      "$arch" >"$arch.keep" && cat "$arch.restore" >>"$LEDGER" && mv "$arch.keep" "$arch"
+  fi
+  rm -f "$arch.restore" "$arch.keep"
+  bus_unlock "$LEDGER"
+  printf 'gc: restored %s open item(s) from the archive (bodies were already pruned)\n' "${n:-0}"
+}
+
 cmd_gc() {
-  local now f e n_claim=0 n_seat=0 n_msg=0 n_rot=0 n_role=0 id
+  case "${1:-}" in
+    --restore-open) gc_restore_open; return ;;
+    '') ;;
+    *) die "gc: usage — agent-bus gc [--restore-open]" ;;
+  esac
+  local now f e n_claim=0 n_seat=0 n_msg=0 n_rot=0 n_role=0 id open
   now=$(now_epoch)
   for f in "$BUS"/claims/*.json; do
     [ -f "$f" ] || continue
@@ -1427,18 +1462,26 @@ cmd_gc() {
     if [ -n "$(find "$f" -mtime +"$GC_DAYS" 2>/dev/null)" ]; then rm -f "$f"; fi
   done
   local cut=$((now - GC_DAYS * 86400))
+  # Open work items stay in the ledger with their bodies however old they are:
+  # gc prunes history, it never hides unfinished work from triage.
+  open=$(jq -nRc "$JQ_OPEN_IDS" "$LEDGER")
   while IFS= read -r id; do
     if valid_id "$id" && [ -f "$BUS/msg/$id.md" ]; then rm -f "$BUS/msg/$id.md"; n_msg=$((n_msg + 1)); fi
-  done < <(jq -rR --argjson cut "$cut" 'fromjson? // empty | select(.kind == "msg" and (.epoch // 0) < $cut) | .id' "$LEDGER")
+  done < <(jq -rR --argjson cut "$cut" --argjson open "$open" \
+    'fromjson? // empty | select(.kind == "msg" and (.epoch // 0) < $cut and ($open[.id] | not)) | .id' "$LEDGER")
   # Rotate old rows out under an exclusive lock so concurrent ledger_append
   # calls are not lost.  bus_lock is released even on crash (flock via OS;
   # PID-stamped file via the holder-liveness check on the next acquire).
   bus_lock "$LEDGER" 30
-  jq -rR --argjson cut "$cut" '. as $raw | (fromjson? // {}) | select((.epoch | type) == "number" and .epoch < $cut) | $raw' \
+  # Recompute under the lock: an item may have been posted or closed since.
+  open=$(jq -nRc "$JQ_OPEN_IDS" "$LEDGER")
+  local old='(fromjson? // {}) as $j | ($j.epoch | type) == "number" and $j.epoch < $cut
+             and (($j.kind == "msg" and $open[$j.id // ""]) | not)'
+  jq -rR --argjson cut "$cut" --argjson open "$open" ". as \$raw | select($old) | \$raw" \
     "$LEDGER" >"$LEDGER.drop" 2>/dev/null || : >"$LEDGER.drop"
   n_rot=$(grep -c . "$LEDGER.drop" 2>/dev/null || true)
   if ((n_rot > 0)); then
-    jq -rR --argjson cut "$cut" '. as $raw | (fromjson? // {}) | select((.epoch | type) != "number" or .epoch >= $cut) | $raw' \
+    jq -rR --argjson cut "$cut" --argjson open "$open" ". as \$raw | select(($old) | not) | \$raw" \
       "$LEDGER" >"$LEDGER.keep" && cat "$LEDGER.drop" >>"$BUS/ledger.archive.jsonl" && mv "$LEDGER.keep" "$LEDGER"
   fi
   rm -f "$LEDGER.drop" "$LEDGER.keep"
@@ -1561,7 +1604,9 @@ agent-bus — handoff bus for coding agents sharing repos and worktrees.
   snapshot                    machine-wide JSON: live seats, open work, recent
                               activity (read-only; for viewers)
   doctor                      identity, host install, live seats
-  gc                          prune expired state (also runs daily from hooks)
+  gc [--restore-open]         prune expired state (also runs daily from hooks); open
+                              work is never archived. --restore-open brings back
+                              open items an older gc archived
 
 Work items: needs-review, blocked, handoff and question packets stay open,
 owned by their addressee, until closed with a reason. The PM owns any of them
@@ -1606,7 +1651,7 @@ case "$cmd" in
   log) cmd_log "$@" ;;
   snapshot) cmd_snapshot ;;
   doctor) cmd_doctor ;;
-  gc) cmd_gc ;;
+  gc) cmd_gc "$@" ;;
   stop-hook) cmd_stop_hook ;;
   help|-h|--help) usage ;;
   *) usage; exit 1 ;;

@@ -473,6 +473,30 @@ jq -c '.epoch = 1' "$BUS_HOME/seats/$(printf '%s' "$A" | tr '/:@ ' '____').json"
 assert_eq "a dead seat's read cursor survives" "yes" \
   "$([ -f "$BUS_HOME/state/$(printf '%s' "$A" | tr '/:@ ' '____').json" ] && echo yes || echo no)"
 
+# Open work is never archived: gc prunes history, not unfinished work.
+old15=$(( $(date -u +%s) - 15 * 86400 ))
+for x in open:20200102T000000Z-0000aaa1 closed:20200102T000000Z-0000aaa2; do
+  printf '{"kind":"msg","id":"%s","epoch":%s,"from":"x","to":"claude/wgone","state":"blocked","subject":"old %s","repo":"r","repo_id":"r"}\n' \
+    "${x#*:}" "$old15" "${x%%:*}" >>"$BUS_HOME/ledger.jsonl"
+  printf 'body\n' >"$BUS_HOME/msg/${x#*:}.md"
+done
+printf '{"kind":"resolve","msg":"20200102T000000Z-0000aaa2","by":"x","reason":"done","epoch":%s}\n' "$old15" >>"$BUS_HOME/ledger.jsonl"
+"$BIN" gc >/dev/null
+assert_has "a 15-day-old open item stays in the ledger" "old open" "$(cat "$BUS_HOME/ledger.jsonl")"
+assert_eq "its body survives too" "yes" "$([ -f "$BUS_HOME/msg/20200102T000000Z-0000aaa1.md" ] && echo yes || echo no)"
+assert_has "a closed old item is archived" "old closed" "$(cat "$BUS_HOME/ledger.archive.jsonl")"
+assert_lacks "a closed old item leaves the ledger" "old closed" "$(cat "$BUS_HOME/ledger.jsonl")"
+# An older gc archived open work; --restore-open brings it back, closed work stays.
+printf '{"kind":"msg","id":"20200103T000000Z-0000bbb1","epoch":%s,"from":"x","to":"claude/wgone","state":"question","subject":"lost open","repo":"r","repo_id":"r"}\n' \
+  "$old15" >>"$BUS_HOME/ledger.archive.jsonl"
+out=$("$BIN" gc --restore-open)
+assert_has "restore reports what came back" "restored 1 open item" "$out"
+assert_has "the archived open item is back in the ledger" "lost open" "$(cat "$BUS_HOME/ledger.jsonl")"
+assert_lacks "and gone from the archive" "lost open" "$(cat "$BUS_HOME/ledger.archive.jsonl")"
+assert_has "closed items stay archived" "old closed" "$(cat "$BUS_HOME/ledger.archive.jsonl")"
+assert_has "restored items show in snapshot" "lost open" "$("$BIN" snapshot | jq -r '.open[].subject')"
+assert_has "restore is idempotent" "restored 0 open item" "$("$BIN" gc --restore-open)"
+
 # -----------------------------------------------------------------------
 # --- new: locking, TTL, secrets, ergonomics (#1–#11) ---
 

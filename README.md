@@ -76,31 +76,41 @@ Grok Bot runs on a separate machine and is woken by an HTTP POST to a webhook
 URL.  Register the seat once from inside the repo:
 
 ```sh
+GROK_WEBHOOK_SECRET=<token> \
 agent-bus grok register --name mybot --webhook https://example.com/hook \
-  [--secret-env GROK_WEBHOOK_SECRET]   # name of env var holding bearer token
+    [--secret-env GROK_WEBHOOK_SECRET]   # value is stored in bus/secrets/grok_mybot.secret (0600)
 ```
+
+The token value is stored in `~/.agents/bus/secrets/grok_mybot.secret` (0600)
+so every posting session can deliver authenticated wakes without the env var
+exported.  The env var is re-read as a fallback if the file is absent.
+**Migration:** existing registrations that used `--secret-env` without the file
+should be re-run (with the var set) to store the value; until then, every
+posting session needs the var exported.
 
 The webhook receives a small JSON notice (routing info only, no packet body)
 and the bot then reads and replies with normal bus commands on the user's Mac:
 
 ```sh
 # On the Mac, run by Grok Bot via remote shell:
-agent-bus read      # AGENT_BUS_TOOL=grok AGENT_BUS_WT=mybot set automatically
-                    # by the same env that identifies the seat
+eval "$(agent-bus grok shell-init --name mybot)"   # sets AGENT_BUS_TOOL/WT
+agent-bus read
 agent-bus post --re <id> --close done --to <sender> --state done -m "..."
 ```
 
 ```sh
-agent-bus grok status             # registration, webhook, wakes, last delivery
+agent-bus grok status             # registration, webhook, secrets file, wakes, last delivery
+agent-bus grok shell-init --name mybot   # print export lines for the Grok seat env
 agent-bus grok unregister --name mybot
-agent-bus doctor                  # shows Grok Bot seat count
+agent-bus doctor                  # shows Grok Bot seat count and any missing secrets file
 ```
 
 A registered Grok seat stays live (visible in `who`, owns work items, counts
 toward triage) until unregistered — no heartbeat needed.  The wake payload
 carries no packet body and no credentials; the bearer token is read from the
-named env var at POST time and never touches the ledger.  Three webhook POSTs
-are allowed per open item (same budget as Codex); closing an item resets it.
+secrets file (or the env var fallback) at POST time and never touches the ledger.
+Three webhook POSTs are allowed per open item (same budget as Codex); closing
+an item resets it.
 
 ## Use
 
@@ -148,6 +158,15 @@ does not retry. A post's success means the packet was saved, not that its
 recipient executed it.
 
 **Claims** are advisory and expire after 4 hours.
+
+**Locking.** The ledger and per-seat state files are protected by cross-platform
+advisory locks (`bus_lock`/`bus_unlock`).  On Linux, `flock(1)` is used; on
+macOS, a PID-stamped regular file is used.  Stale locks left by crashed processes
+are reclaimed automatically; callers never steal blindly after a timeout.
+
+**Stale-install detection.** `agent-bus version` prints the version string.
+`agent-bus doctor` compares the binary on PATH against the running version and
+warns if they differ.
 
 Full protocol: [PROTOCOL.md](PROTOCOL.md). Agent runbook:
 [skills/handoff/SKILL.md](skills/handoff/SKILL.md).

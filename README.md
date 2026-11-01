@@ -70,6 +70,38 @@ implementation checks external queue writes about every ten seconds. Archived
 or unloaded chats, app restart recovery, and busy-turn ordering are not qualified.
 
 
+### Grok Bot
+
+Grok Bot runs on a separate machine and is woken by an HTTP POST to a webhook
+URL.  Register the seat once from inside the repo:
+
+```sh
+agent-bus grok register --name mybot --webhook https://example.com/hook \
+  [--secret-env GROK_WEBHOOK_SECRET]   # name of env var holding bearer token
+```
+
+The webhook receives a small JSON notice (routing info only, no packet body)
+and the bot then reads and replies with normal bus commands on the user's Mac:
+
+```sh
+# On the Mac, run by Grok Bot via remote shell:
+agent-bus read      # AGENT_BUS_TOOL=grok AGENT_BUS_WT=mybot set automatically
+                    # by the same env that identifies the seat
+agent-bus post --re <id> --close done --to <sender> --state done -m "..."
+```
+
+```sh
+agent-bus grok status             # registration, webhook, wakes, last delivery
+agent-bus grok unregister --name mybot
+agent-bus doctor                  # shows Grok Bot seat count
+```
+
+A registered Grok seat stays live (visible in `who`, owns work items, counts
+toward triage) until unregistered — no heartbeat needed.  The wake payload
+carries no packet body and no credentials; the bearer token is read from the
+named env var at POST time and never touches the ledger.  Three webhook POSTs
+are allowed per open item (same budget as Codex); closing an item resets it.
+
 ## Use
 
 ```sh
@@ -105,13 +137,15 @@ that lane only, and `--to @<lane>` reaches its seats.
 **Delivery.** Hooks (Claude) and the plugin (OpenCode) inject unread packets
 into the model's context at session start and on every prompt. Owners are woken
 when idle: Claude through its inbox socket and Stop hook, OpenCode through the
-plugin; opted-in Codex Desktop chats through `codex queue`. Claude/OpenCode
-Stop-hook wakes and Codex queue attempts have a budget of three until that seat
+plugin; opted-in Codex Desktop chats through `codex queue`; Grok Bot through an
+HTTP POST to its registered webhook URL. Claude/OpenCode Stop-hook wakes, Codex
+queue attempts, and Grok webhook POSTs have a budget of three until that seat
 closes an item. The pre-existing Claude socket path does not spend this budget.
-Codex queue submissions never mark packets read and never include packet bodies.
-Each attempt gets a `delivery` row in the ledger. Failed or uncertain submissions
-leave the packet saved and unread; the CLI reports the result and does not retry.
-A post's success means the packet was saved, not that its recipient executed it.
+Codex and Grok wake notices never mark packets read and never include packet
+bodies. Each attempt gets a `delivery` row in the ledger. Failed or uncertain
+submissions leave the packet saved and unread; the CLI reports the result and
+does not retry. A post's success means the packet was saved, not that its
+recipient executed it.
 
 **Claims** are advisory and expire after 4 hours.
 

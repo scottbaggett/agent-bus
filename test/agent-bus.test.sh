@@ -19,7 +19,8 @@ assert_lacks() { if grep -Fq -- "$2" <<<"$3"; then bad "$1" "  unexpected: $2"; 
 unset CODEX_THREAD_ID CLAUDECODE CLAUDE_CODE_SESSION_ID CLAUDE_CODE_MESSAGING_SOCKET OPENCODE OPENCODE_SESSION_ID
 for _v in $(env | sed -n 's/^\(AGENT_BUS_[A-Z0-9_]*\)=.*/\1/p'); do unset "$_v"; done
 BUS_HOME=$(mktemp -d)
-trap 'rm -rf "$BUS_HOME"; [ -n "${SRV:-}" ] && kill "$SRV" 2>/dev/null; true' EXIT
+trap 'rm -rf "$BUS_HOME"; [ -n "${SRV:-}" ] && kill "$SRV" 2>/dev/null; [ -n "${GROK_SRV:-}" ] && kill "$GROK_SRV" 2>/dev/null; true' EXIT
+GROK_SRV=
 export AGENT_BUS_HOME="$BUS_HOME" AGENT_BUS_NO_PUSH=1 AGENT_BUS_NO_AUTO_GC=1
 
 # Fixture seats: seat <name> <tool> <worktree> <cmd...>
@@ -288,6 +289,163 @@ PY
   kill "$SRV" 2>/dev/null || true; wait "$SRV" 2>/dev/null || true; SRV=; rm -rf "$SOCKD"
 else
   printf 'skip push tests (python3/nc missing)\n'
+fi
+
+# --- grok: webhook delivery ---
+# Helper: invoke agent-bus as a generic shell (registration caller)
+greg() { AGENT_BUS_TOOL=shell AGENT_BUS_WT=tester AGENT_BUS_SESSION=grtest "$BIN" "$@"; }
+# Helper: invoke agent-bus as the registered Grok Bot seat
+gbot() { AGENT_BUS_TOOL=grok  AGENT_BUS_WT=bot1   AGENT_BUS_SESSION=local  "$BIN" "$@"; }
+
+# Registration validation
+out=$(greg grok register --name 'BAD NAME' --webhook http://x/ 2>&1 || true)
+assert_has "grok register rejects invalid name" "must be lowercase" "$out"
+out=$(greg grok register --name bot1 --webhook 'ftp://no' 2>&1 || true)
+assert_has "grok register rejects non-http webhook" "must start with http" "$out"
+out=$(greg grok register --name bot1 --webhook http://ok/ --secret-env '1BADVAR' 2>&1 || true)
+assert_has "grok register rejects bad secret-env name" "valid environment variable" "$out"
+out=$(greg grok register --name bot1 --webhook http://ok/)
+assert_has "grok register succeeds" "registered grok/bot1" "$out"
+
+# Seat visibility
+out=$(greg who)
+assert_has "registered grok seat shows in who" "grok/bot1" "$out"
+GADDR=$(gbot whoami | awk '/^seat/{print $2}')
+assert_has "grok seat has correct address" "grok/bot1" "$GADDR"
+
+# Triage: seat is reachable, so open items owned by it are not GONE
+tid=$(a post --to "$GADDR" --state needs-review -m $'# for grok bot\n\nhello' | idof)
+out=$(pm triage)
+assert_lacks "registered grok seat is not GONE" "GONE" "$(grep "$GADDR" <<<"$out")"
+assert_has "grok work shows in triage" "$GADDR" "$out"
+
+# Budget reset via grok seat resolving
+gbot resolve "$tid" --reason done >/dev/null
+assert_has "grok bot can resolve its own item" "0" \
+  "$(jq -r '.wakes // 0' "$BUS_HOME/state/$(printf '%s' "$GADDR" | tr '/:@ ' '____').json" 2>/dev/null || echo 0)"
+
+if command -v python3 >/dev/null && command -v curl >/dev/null; then
+  GROOKD=$(mktemp -d /tmp/abus-grok.XXXX)
+  python3 - "$GROOKD" <<'PY' &
+import http.server, json, os, pathlib, sys
+d = pathlib.Path(sys.argv[1])
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        n = int(self.headers.get('Content-Length', 0))
+        body = json.loads(self.rfile.read(n)) if n else {}
+        rec = {'body': body, 'auth': self.headers.get('Authorization', '')}
+        (d / 'requests.jsonl').open('a').write(json.dumps(rec) + '\n')
+        self.send_response(int(os.environ.get('FAKE_HTTP_STATUS', '200')))
+        self.end_headers()
+    def log_message(self, *a): pass
+s = http.server.HTTPServer(('127.0.0.1', 0), H)
+(d / 'port').write_text(str(s.server_address[1]))
+s.serve_forever()
+PY
+  GROK_SRV=$!
+  for _i in 1 2 3 4 5 6 7 8 9 10; do [ -f "$GROOKD/port" ] && break; sleep 0.1; done
+  GROK_PORT=$(cat "$GROOKD/port")
+  GROK_URL="http://127.0.0.1:$GROK_PORT/hook"
+
+  # Re-register with a real webhook URL (replaces the placeholder from above)
+  greg grok register --name bot1 --webhook "$GROK_URL" >/dev/null
+
+  # Delivery: post to grok seat triggers webhook
+  out=$(AGENT_BUS_NO_PUSH=0 a post --to "$GADDR" --state needs-review \
+    -m $'# needs-review for grok\n\nplease check' 2>&1)
+  sleep 0.3
+  assert_has "webhook delivery reported" "webhook notice delivered" "$out"
+
+  # Payload shape: routing info only, no packet body
+  req=$(tail -1 "$GROOKD/requests.jsonl" 2>/dev/null || echo '{}')
+  assert_has "payload has packet_id"  '"packet_id"'  "$req"
+  assert_has "payload has from"       '"from"'        "$req"
+  assert_has "payload has to"         '"to"'          "$req"
+  assert_has "payload has state"      '"needs-review"' "$req"
+  assert_has "payload has repo"       '"repo"'        "$req"
+  assert_has "payload has repo_id"    '"repo_id"'     "$req"
+  assert_lacks "payload omits packet body" "please check" "$req"
+
+  # Delivery row in ledger
+  assert_has "delivery row uses grok-webhook transport" \
+    '"transport":"grok-webhook"' "$(cat "$BUS_HOME/ledger.jsonl")"
+  assert_has "delivery row status is delivered" '"status":"delivered"' \
+    "$(cat "$BUS_HOME/ledger.jsonl")"
+
+  # Budget exhaustion (budget=3; first post above used one slot after the resolve reset)
+  w2=$(AGENT_BUS_NO_PUSH=0 a post --to "$GADDR" --state question -m '# q2' | idof)
+  AGENT_BUS_NO_PUSH=0 a post --to "$GADDR" --state question -m '# q3' >/dev/null
+  out=$(AGENT_BUS_NO_PUSH=0 a post --to "$GADDR" --state question -m '# q4' 2>&1)
+  assert_has "budget exhausted: delivery skipped" "budget_exhausted" "$out"
+  assert_has "delivery row for exhausted attempt" '"status":"budget_exhausted"' \
+    "$(cat "$BUS_HOME/ledger.jsonl")"
+
+  # Closing an item resets the budget
+  gbot resolve "$w2" --reason done >/dev/null
+  out=$(AGENT_BUS_NO_PUSH=0 a post --to "$GADDR" --state question -m '# after-reset' 2>&1)
+  assert_has "closing resets grok wake budget" "webhook notice delivered" "$out"
+
+  # Packet stays unread after successful delivery (only cmd_read marks packets read)
+  latest_id=$(a post --to "$GADDR" --state question -m '# unread-check' | idof)
+  sleep 0.1
+  state_file="$BUS_HOME/state/$(printf '%s' "$GADDR" | tr '/:@ ' '____').json"
+  read_list=$(jq -r '.read // [] | length' "$state_file" 2>/dev/null || echo 0)
+  assert_eq "webhook delivery does not mark packet read" "0" \
+    "$(jq -r --arg i "$latest_id" '(.read // []) | index($i) != null | if . then 1 else 0 end' \
+       "$state_file" 2>/dev/null || echo 0)"
+
+  # Failure leaves packet unread: register a second seat with an unreachable URL
+  greg grok register --name bot2 --webhook "http://127.0.0.1:1/unreachable" >/dev/null
+  GADDR2=$(AGENT_BUS_TOOL=grok AGENT_BUS_WT=bot2 AGENT_BUS_SESSION=local "$BIN" whoami \
+    | awk '/^seat/{print $2}')
+  out=$(AGENT_BUS_NO_PUSH=0 a post --to "$GADDR2" --state question -m '# unreachable' 2>&1)
+  assert_has "failure: packet saved message" "packet saved" "$out"
+  state2="$BUS_HOME/state/$(printf '%s' "$GADDR2" | tr '/:@ ' '____').json"
+  assert_eq "failure: packet remains unread" "0" \
+    "$(jq -r '.read // [] | length' "$state2" 2>/dev/null || echo 0)"
+  assert_has "failure: delivery row recorded" '"transport":"grok-webhook"' \
+    "$(cat "$BUS_HOME/ledger.jsonl")"
+  greg grok unregister --name bot2 >/dev/null
+
+  # grok status
+  out=$(greg grok status)
+  assert_has "grok status shows webhook" "$GROK_URL" "$out"
+  assert_has "grok status shows wakes" '"wakes"' "$out"
+
+  # grok status --name filter
+  out=$(greg grok status --name bot1)
+  assert_has "grok status --name filters to named seat" "grok/bot1" "$out"
+
+  # Secret: register with --secret-env, verify Authorization header is sent
+  GROK_TEST_TOKEN=tok123
+  export GROK_TEST_TOKEN
+  greg grok register --name bot1 --webhook "$GROK_URL" --secret-env GROK_TEST_TOKEN >/dev/null
+  AGENT_BUS_NO_PUSH=0 a post --to "$GADDR" --state question \
+    -m '# secret-test' >/dev/null
+  sleep 0.1
+  auth_req=$(grep 'tok123' "$GROOKD/requests.jsonl" || true)
+  assert_has "bearer token sent as Authorization header" "tok123" \
+    "$(tail -1 "$GROOKD/requests.jsonl")"
+  unset GROK_TEST_TOKEN
+  # Reset back to no-secret for cleanliness
+  greg grok register --name bot1 --webhook "$GROK_URL" >/dev/null
+
+  # Grok seat in who after registration
+  assert_has "grok status shows in doctor" "grok" "$(greg doctor)"
+
+  # grok unregister
+  out=$(greg grok unregister --name bot1)
+  assert_has "grok unregister reports" "unregistered grok/bot1" "$out"
+  out=$(greg who)
+  assert_lacks "unregistered grok seat gone from who" "grok/bot1" "$out"
+  out=$(greg grok unregister --name bot1 2>&1 || true)
+  assert_has "double unregister is an error" "not registered" "$out"
+
+  kill "$GROK_SRV" 2>/dev/null || true
+  wait "$GROK_SRV" 2>/dev/null || true
+  GROK_SRV=; rm -rf "$GROOKD"
+else
+  printf 'skip grok webhook tests (python3/curl missing)\n'
 fi
 
 # --- gc ---

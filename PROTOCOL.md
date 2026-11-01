@@ -3,9 +3,10 @@
 A file-backed handoff bus for coding agents sharing repos and worktrees. No
 daemon: `bin/agent-bus`, `jq`, and an append-only ledger under `~/.agents/bus/`.
 
-Hosts: **Claude Code** (hooks and inbox socket), **OpenCode** (plugin), and
-configured **Codex Desktop** chats (`codex queue`, requires Python 3). Other shells
-can post, read and claim, but remain pull-only.
+Hosts: **Claude Code** (hooks and inbox socket), **OpenCode** (plugin),
+configured **Codex Desktop** chats (`codex queue`, requires Python 3), and
+registered **Grok Bot** seats (webhook HTTP POST). Other shells can post, read
+and claim, but remain pull-only.
 
 ## Seats
 
@@ -13,6 +14,10 @@ A seat is one agent session: `<tool>/<worktree>.<inst>`, e.g. `claude/main.b41c`
 where `<inst>` is a 4-hex hash of the host session id (`CLAUDE_CODE_SESSION_ID`,
 `OPENCODE_SESSION_ID`, or `CODEX_THREAD_ID`). A shell with no session id is the bare
 `<tool>/<worktree>`, which is also every seat's **scope**.
+
+A **Grok Bot** seat is `grok/<name>` (no instance suffix; registered once by the
+user, not self-identified by a running session). It uses `AGENT_BUS_TOOL=grok` and
+`AGENT_BUS_WT=<name>` when running bus commands on the user's Mac.
 
 The worktree name is `main` for the primary checkout, otherwise the worktree
 directory name. Repos are matched by `repo_id`, a hash of the git common dir, so
@@ -146,16 +151,30 @@ or `pm`.
     assert the host is running. Loaded idle chats are qualified; archived/unloaded chats and restart
     recovery are not. The adapter has no polling loop; the tested host checks
     external queue writes about every ten seconds.
-- **Wake budget.** Stop-hook wakes and Codex queue attempts consume the seat's
-  `AGENT_BUS_WAKE_BUDGET` (3), reset when it closes an item. Claude's existing
-  socket notifications do not consume this budget. Codex reserves an attempt
-  before submission, never marks the packet read, and does not retry the same
-  packet. Concurrent submission and state updates are serialized. A busy
-  submission, exhausted budget, unavailable binary, error, or timeout leaves
-  the packet on the bus; `post` reports this and records a `delivery` ledger row.
-  Queue commands time out after ten seconds; an uncertain result may already
-  have been accepted, so inspect before any manual resend. Success means queue
-  acceptance only. The actual bus read/reply proves the receiving model ran.
+  - Grok Bot: `agent-bus grok register --name <n> --webhook <url>` writes a seat
+    file with the webhook URL. When a post addresses that seat, `agent-bus`
+    synchronously HTTP POSTs a small JSON notice (no packet body, no secret
+    value) to the configured URL. An optional bearer token is read from the env
+    var named by `--secret-env` at POST time and sent as `Authorization: Bearer
+    <token>`; neither the var name nor the value is written to the ledger. Grok
+    Bot then runs `agent-bus read` and replies with normal bus commands using
+    `AGENT_BUS_TOOL=grok AGENT_BUS_WT=<name>`. A registered Grok seat remains
+    live (visible in `who`, owns items, counted in `triage`) until unregistered;
+    it needs no heartbeat. `agent-bus grok unregister --name <n>` removes the
+    seat. `agent-bus grok status` reports the webhook, wakes, and last delivery.
+    The notice payload shape is:
+    ```json
+    {"packet_id":"<id>","from":"<addr>","to":"<addr>","state":"<state>",
+     "repo":"<name>","repo_id":"<hash>","lane":"<lane or empty>"}
+    ```
+- **Wake budget.** Stop-hook wakes, Codex queue attempts, and Grok webhook POSTs
+  consume the seat's `AGENT_BUS_WAKE_BUDGET` (3), reset when it closes an item.
+  Claude's existing socket notifications do not consume this budget. Codex and
+  Grok reserve a slot before attempting, never mark the packet read, and do not
+  retry the same packet. A busy submission, exhausted budget, unavailable
+  binary/curl, HTTP error, or timeout leaves the packet on the bus; `post`
+  reports this and records a `delivery` ledger row. Success means the notice
+  was sent; the actual bus read/reply proves the receiving model ran.
 
 Only the first three bodies render inline, each capped at 2KB and 40 lines;
 `agent-bus show <id>` has the full body, its replies and its closes.
@@ -219,11 +238,11 @@ before they become paths.
 
 ```
 ~/.agents/bus/
-  ledger.jsonl          append-only: msg | resolve | claim | claim-break
+  ledger.jsonl          append-only: msg | resolve | claim | claim-break | delivery
   ledger.archive.jsonl  rows older than AGENT_BUS_GC_DAYS (14), rotated by gc
   msg/<id>.md           packet bodies
-  seats/<seat>.json     seat registry
-  state/<seat>.json     read cursor, wake count
+  seats/<seat>.json     seat registry (grok seats include grok_webhook, grok_secret_env)
+  state/<seat>.json     read cursor, wake count, grok_attempts list
   state/roles/<r>.pm    repo PM
   state/roles/<r>.lane.<l>.pm  lane PM
   claims/<hash>.json    claims

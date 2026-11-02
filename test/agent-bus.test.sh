@@ -152,14 +152,29 @@ out=$(c resolve "$hid" --reason done)
 assert_has "owner closes with a reason" "resolved $hid (done)" "$out"
 assert_has "log records the reason" "closed $hid (done)" "$(pm log)"
 
-# --- wake budget ---
-for i in 1 2 3 4; do a post --to "$C" --state question -m "# q$i" >/dev/null; c stop-hook </dev/null >/dev/null; done
-a post --to "$C" --state question -m '# q5' >/dev/null
-assert_eq "budget exhausted: no wake" "{}" "$(c stop-hook </dev/null)"
-assert_has "whoami shows the spent budget" "wake     3/3" "$(c whoami)"
-q=$(a post --to "$C" --state question -m '# q6' | idof)
-c resolve "$q" --reason done >/dev/null
-assert_eq "closing resets the budget" "block" "$(c stop-hook </dev/null | jq -r .decision)"
+# --- wake: unlimited by default, opt-in rate-limit ---
+# Default (AGENT_BUS_WAKE_BUDGET unset or 0) is unlimited: every stop-hook delivers.
+for _i in 1 2 3 4; do
+  a post --to "$C" --state question -m "# unl$_i" >/dev/null
+  assert_eq "unlimited default: wake $_i delivers" "block" "$(c stop-hook </dev/null | jq -r .decision)"
+done
+assert_has "whoami shows wakes/unlimited" "wake     4/unlimited" "$(c whoami)"
+# Reset the wakes counter so the opt-in tests start clean.
+_unlq=$(a post --to "$C" --state question -m '# wake-reset' | idof)
+c resolve "$_unlq" --reason done >/dev/null
+c read >/dev/null
+
+# Opt-in: AGENT_BUS_WAKE_BUDGET=3 re-enables the hard stop (resets on close).
+for _i in 1 2 3 4; do
+  a post --to "$C" --state question -m "# limq$_i" >/dev/null
+  AGENT_BUS_WAKE_BUDGET=3 c stop-hook </dev/null >/dev/null
+done
+a post --to "$C" --state question -m '# limq5' >/dev/null
+assert_eq "opt-in budget exhausted: no wake" "{}" "$(AGENT_BUS_WAKE_BUDGET=3 c stop-hook </dev/null)"
+assert_has "whoami shows the spent budget" "wake     3/3" "$(AGENT_BUS_WAKE_BUDGET=3 c whoami)"
+_limq=$(a post --to "$C" --state question -m '# limq6' | idof)
+AGENT_BUS_WAKE_BUDGET=3 c resolve "$_limq" --reason done >/dev/null
+assert_eq "closing resets the opt-in budget" "block" "$(AGENT_BUS_WAKE_BUDGET=3 c stop-hook </dev/null | jq -r .decision)"
 assert_eq "stop-hook is JSON on junk stdin" "{}" "$(printf 'garbage' | c stop-hook)"
 
 # --- triage: gone, not picked up, stale ---
@@ -494,17 +509,17 @@ PY
   assert_has "delivery row status is delivered" '"status":"delivered"' \
     "$(cat "$BUS_HOME/ledger.jsonl")"
 
-  # Budget exhaustion (budget=3; first post above used one slot after the resolve reset)
-  w2=$(AGENT_BUS_NO_PUSH=0 a post --to "$GADDR" --state question -m '# q2' | idof)
-  AGENT_BUS_NO_PUSH=0 a post --to "$GADDR" --state question -m '# q3' >/dev/null
-  out=$(AGENT_BUS_NO_PUSH=0 a post --to "$GADDR" --state question -m '# q4' 2>&1)
-  assert_has "budget exhausted: delivery skipped" "budget_exhausted" "$out"
+  # Opt-in budget exhaustion (AGENT_BUS_WAKE_BUDGET=3; first post above used slot 1)
+  w2=$(AGENT_BUS_WAKE_BUDGET=3 AGENT_BUS_NO_PUSH=0 a post --to "$GADDR" --state question -m '# q2' | idof)
+  AGENT_BUS_WAKE_BUDGET=3 AGENT_BUS_NO_PUSH=0 a post --to "$GADDR" --state question -m '# q3' >/dev/null
+  out=$(AGENT_BUS_WAKE_BUDGET=3 AGENT_BUS_NO_PUSH=0 a post --to "$GADDR" --state question -m '# q4' 2>&1)
+  assert_has "opt-in budget exhausted: delivery skipped" "budget_exhausted" "$out"
   assert_has "delivery row for exhausted attempt" '"status":"budget_exhausted"' \
     "$(cat "$BUS_HOME/ledger.jsonl")"
 
-  # Closing an item resets the budget
+  # Closing an item resets the opt-in budget
   gbot resolve "$w2" --reason done >/dev/null
-  out=$(AGENT_BUS_NO_PUSH=0 a post --to "$GADDR" --state question -m '# after-reset' 2>&1)
+  out=$(AGENT_BUS_WAKE_BUDGET=3 AGENT_BUS_NO_PUSH=0 a post --to "$GADDR" --state question -m '# after-reset' 2>&1)
   assert_has "closing resets grok wake budget" "webhook notice delivered" "$out"
 
   # Packet stays unread after successful delivery (only cmd_read marks packets read)

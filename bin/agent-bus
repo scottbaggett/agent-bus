@@ -16,7 +16,7 @@
 #   ledger.jsonl        append-only rows: msg | resolve | claim | claim-break
 #   msg/<id>.md         packet bodies
 #   seats/<seat>.json   seat registry (last seen, repo, branch, inbox socket)
-#   state/<seat>.json   read cursor + wake budget
+#   state/<seat>.json   read cursor, wake count (observable; hard stop only with AGENT_BUS_WAKE_BUDGET>0)
 #   state/roles/<r>.pm  the repo PM's seat address
 #   claims/<hash>.json  advisory file claims
 set -euo pipefail
@@ -40,9 +40,11 @@ CODEX_MAX_IDLE_TTL="${AGENT_BUS_CODEX_MAX_IDLE_TTL:-86400}"
 # An owner that is live yet has not read its item after this long probably
 # never got it: triage flags it NOT PICKED UP.
 PICKUP_SECS="${AGENT_BUS_PICKUP_SECS:-600}"
-# Distinct Stop-hook wakes per seat before it must close something. Bounds
-# ping-pong between agents; resets when this seat closes an item.
-WAKE_BUDGET="${AGENT_BUS_WAKE_BUDGET:-3}"
+# Wake budget: 0 (the default) means unlimited — every post always attempts
+# wake delivery. Set AGENT_BUS_WAKE_BUDGET=N (N>0) to opt in to a per-seat
+# hard stop at N stop-hook wakes / Codex queue attempts / Grok webhook POSTs;
+# the counter resets when the seat closes an item.
+WAKE_BUDGET="${AGENT_BUS_WAKE_BUDGET:-0}"
 # Override the curl binary for testing Grok webhook delivery.
 GROK_CURL="${AGENT_BUS_GROK_CURL:-curl}"
 
@@ -548,7 +550,7 @@ cmd_codex() {
       if [ "$mode" = queue_ready ]; then
         if [ ! -f "$f" ]; then mode=unregistered
         elif ! seat_live "$ADDR"; then mode=expired
-        elif (( $(state_get '.wakes // 0') >= WAKE_BUDGET )); then mode=budget_exhausted; fi
+        elif (( WAKE_BUDGET > 0 )) && (( $(state_get '.wakes // 0') >= WAKE_BUDGET )); then mode=budget_exhausted; fi
       fi
       last=$(lq '[$L[] | select(.kind == "delivery" and .to == $me.addr)] | last')
       jq -nc --arg seat "$ADDR" --arg thread "$SESSION" --arg mode "$mode" \
@@ -604,7 +606,7 @@ grok_reserve() {
   if jq -e --arg p "$packet_id" \
       '(.grok_attempts // []) | index($p) != null' <<<"$prev" >/dev/null 2>&1; then
     result=already_attempted
-  elif (( $(jq -r '.wakes // 0' <<<"$prev") >= WAKE_BUDGET )); then
+  elif (( WAKE_BUDGET > 0 )) && (( $(jq -r '.wakes // 0' <<<"$prev") >= WAKE_BUDGET )); then
     result=budget_exhausted
   else
     jq -c --arg p "$packet_id" \
@@ -917,9 +919,10 @@ cmd_whoami() {
   local lpm=''; [ -n "$LANE" ] && lpm=$(lane_pm_seat "$LANE")
   printf 'lane     %s\n' "${LANE:-(none)}"
   [ -n "$LANE" ] && printf 'lane pm  %s\n' "$([ "$lpm" = "$ADDR" ] && echo yes || echo "${lpm:-(none)}")"
+  local wake_limit; ((WAKE_BUDGET > 0)) && wake_limit="$WAKE_BUDGET" || wake_limit="unlimited"
   printf 'pm       %s\nwake     %s/%s\ncwd      %s\nbus      %s\n' \
     "$([ "$pm" = "$ADDR" ] && echo yes || echo "${pm:-(none)}")" \
-    "$(state_get '.wakes // 0')" "$WAKE_BUDGET" "$TOP" "$BUS"
+    "$(state_get '.wakes // 0')" "$wake_limit" "$TOP" "$BUS"
   # Warn if running as a Grok seat but no seat file exists for this address.
   if [ "$TOOL" = grok ]; then
     local gf="$BUS/seats/$SEAT.json"
@@ -1320,8 +1323,8 @@ cmd_log() {
 cmd_stop_hook() {
   cat >/dev/null 2>&1 || true
   touch_seat; maybe_gc
-  local rows n text
-  if (( $(state_get '.wakes // 0') >= WAKE_BUDGET )); then printf '{}\n'; return 0; fi
+  local rows n text wake_limit
+  if (( WAKE_BUDGET > 0 )) && (( $(state_get '.wakes // 0') >= WAKE_BUDGET )); then printf '{}\n'; return 0; fi
   rows=$(select_packets wake)
   if [ -z "$rows" ]; then printf '{}\n'; return 0; fi
   n=$(grep -c . <<<"$rows")
@@ -1330,7 +1333,8 @@ cmd_stop_hook() {
   # render_packets ran in a subshell above; recompute the ids here.
   mark_read "$(jq -sc 'map(.id)' <<<"$rows")"
   state_update '.wakes = ((.wakes // 0) + 1) | .last_wake = $now' --argjson now "$(now_epoch)"
-  jq -nc --arg r "$text" --arg m "agent-bus: continuing on $n owned item(s) (wake $(state_get '.wakes') of $WAKE_BUDGET)" \
+  ((WAKE_BUDGET > 0)) && wake_limit="$WAKE_BUDGET" || wake_limit="unlimited"
+  jq -nc --arg r "$text" --arg m "agent-bus: continuing on $n owned item(s) (wake $(state_get '.wakes') of $wake_limit)" \
     '{decision:"block",reason:$r,systemMessage:$m}'
 }
 
@@ -1507,14 +1511,15 @@ agent-bus — handoff bus for coding agents sharing repos and worktrees.
   gc                          prune expired state (also runs daily from hooks)
 
 Work items: needs-review, blocked, handoff and question packets stay open,
-owned by their addressee, until closed with a reason. The PM owns any of them
+  owned by their addressee, until closed with a reason. The PM owns any of them
 sent to a broadcast scope or @pm, and sees all of them repo-wide. Only owners
 are woken or sent the digest; broadcasts are context, read with `read`. A lane PM
 does the same for its lane: work from its seats, and work sent to @<lane>. Owners are
 woken by Claude sockets/Stop hooks, the OpenCode plugin, Codex queue, or Grok
-webhook POST. Stop-hook wakes, Codex queue attempts, and Grok webhook POSTs
-consume AGENT_BUS_WAKE_BUDGET (3) until the seat closes something; Claude
-socket notifications do not.
+webhook POST. By default every post always attempts wake delivery (no hard stop).
+Set AGENT_BUS_WAKE_BUDGET=N (N>0) to opt in to a per-seat limit of N stop-hook
+wakes / Codex queue attempts / Grok webhook POSTs; the counter resets when the
+seat closes an item. Claude socket notifications are never counted.
 EOF
 }
 

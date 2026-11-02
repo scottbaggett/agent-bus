@@ -110,7 +110,7 @@ def reserve(path, packet, budget, binary):
         attempts = state.get("codex_attempts", [])
         if packet in attempts:
             return "already_attempted"
-        if state.get("wakes", 0) >= budget:
+        if budget > 0 and state.get("wakes", 0) >= budget:
             return "budget_exhausted"
         # Reserve before submitting. An interrupted/ambiguous submission is never
         # automatically retried; queue acceptance does not mark anything read.

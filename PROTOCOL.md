@@ -175,14 +175,16 @@ or `pm`.
     {"packet_id":"<id>","from":"<addr>","to":"<addr>","state":"<state>",
      "repo":"<name>","repo_id":"<hash>","lane":"<lane or empty>"}
     ```
-- **Wake budget.** Stop-hook wakes, Codex queue attempts, and Grok webhook POSTs
-  consume the seat's `AGENT_BUS_WAKE_BUDGET` (3), reset when it closes an item.
-  Claude's existing socket notifications do not consume this budget. Codex and
-  Grok reserve a slot before attempting, never mark the packet read, and do not
-  retry the same packet. A busy submission, exhausted budget, unavailable
-  binary/curl, HTTP error, or timeout leaves the packet on the bus; `post`
-  reports this and records a `delivery` ledger row. Success means the notice
-  was sent; the actual bus read/reply proves the receiving model ran.
+- **Wake delivery.** By default every post always attempts wake delivery — there
+  is no hard stop. Set `AGENT_BUS_WAKE_BUDGET=N` (N > 0) on the posting seat to
+  opt in to a per-seat limit of N stop-hook wakes / Codex queue attempts / Grok
+  webhook POSTs; the counter resets when the seat closes an item. Claude's
+  existing socket notifications are never counted. Codex and Grok reserve a slot
+  before attempting (when a budget is active), never mark the packet read, and do
+  not retry the same packet. A busy submission, exhausted budget (when opt-in),
+  unavailable binary/curl, HTTP error, or timeout leaves the packet on the bus;
+  `post` reports this and records a `delivery` ledger row. Success means the
+  notice was sent; the actual bus read/reply proves the receiving model ran.
 
 Only the first three bodies render inline, each capped at 2KB and 40 lines;
 `agent-bus show <id>` has the full body, its replies and its closes.

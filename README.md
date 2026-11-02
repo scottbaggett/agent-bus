@@ -109,8 +109,8 @@ A registered Grok seat stays live (visible in `who`, owns work items, counts
 toward triage) until unregistered — no heartbeat needed.  The wake payload
 carries no packet body and no credentials; the bearer token is read from the
 secrets file (or the env var fallback) at POST time and never touches the ledger.
-Three webhook POSTs are allowed per open item (same budget as Codex); closing
-an item resets it.
+By default every post delivers a webhook (no hard stop); set
+`AGENT_BUS_WAKE_BUDGET=N` to opt in to a per-seat limit; closing an item resets it.
 
 ## Use
 
@@ -148,14 +148,15 @@ that lane only, and `--to @<lane>` reaches its seats.
 into the model's context at session start and on every prompt. Owners are woken
 when idle: Claude through its inbox socket and Stop hook, OpenCode through the
 plugin; opted-in Codex Desktop chats through `codex queue`; Grok Bot through an
-HTTP POST to its registered webhook URL. Claude/OpenCode Stop-hook wakes, Codex
-queue attempts, and Grok webhook POSTs have a budget of three until that seat
-closes an item. The pre-existing Claude socket path does not spend this budget.
-Codex and Grok wake notices never mark packets read and never include packet
-bodies. Each attempt gets a `delivery` row in the ledger. Failed or uncertain
-submissions leave the packet saved and unread; the CLI reports the result and
-does not retry. A post's success means the packet was saved, not that its
-recipient executed it.
+HTTP POST to its registered webhook URL. By default every post always attempts wake delivery — there is no hard stop.
+Set `AGENT_BUS_WAKE_BUDGET=N` (N > 0) to opt in to a per-seat limit of N
+stop-hook wakes / Codex queue attempts / Grok webhook POSTs; the counter resets
+when the seat closes an item. The pre-existing Claude socket path is never
+counted. Codex and Grok wake notices never mark packets read and never include
+packet bodies. Each attempt gets a `delivery` row in the ledger. Failed or
+uncertain submissions leave the packet saved and unread; the CLI reports the
+result and does not retry. A post's success means the packet was saved, not
+that its recipient executed it.
 
 **Claims** are advisory and expire after 4 hours.
 

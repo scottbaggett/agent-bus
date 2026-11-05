@@ -26,6 +26,13 @@ two clones sharing a basename never share a PM, claims or `@repo`.
 Identity follows the current directory. Run bus commands from the repo you are
 working in, or you post as a different seat.
 
+Each seat records its worktree path (`cwd`) and the pid of the agent process it
+runs in, and `agent-bus snapshot` reports both, so a viewer can tie a seat to
+its CPU, memory, child processes and containers. Claude's pid comes from its
+inbox socket; other hosts are found by walking up from the CLI to the first
+process named after the tool. `pid` is null when none is found (shell seats);
+`AGENT_BUS_PID` overrides it.
+
 ## Addressing
 
 | `--to` | Reaches |

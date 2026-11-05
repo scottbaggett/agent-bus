@@ -217,13 +217,44 @@ resolve_identity() {
     '{addr:$addr,tool:$tool,scope:$scope,session:$session,repo:$repo,repo_id:$repo_id,wt:$wt,lane:$lane}')
 }
 
+# The agent process a seat runs in, so viewers can tie the seat to its CPU,
+# memory and child processes. Claude's inbox socket is named for its pid; other
+# hosts are found by walking up from the CLI to the first process named after
+# the tool. Empty when there is none (shell seats, or no match).
+agent_pid() {
+  local p i c
+  if [ -n "${AGENT_BUS_PID:-}" ]; then
+    case "$AGENT_BUS_PID" in *[!0-9]*) ;; *) echo "$AGENT_BUS_PID" ;; esac; return 0
+  fi
+  case "$TOOL" in claude|opencode|codex) ;; *) return 0 ;; esac
+  if [ "$TOOL" = claude ]; then
+    p=${CLAUDE_CODE_MESSAGING_SOCKET##*/}; p=${p%.sock}
+    case "$p" in ''|*[!0-9]*) ;; *) kill -0 "$p" 2>/dev/null && { echo "$p"; return 0; } ;; esac
+  fi
+  p=$PPID
+  for i in 1 2 3 4 5 6 7 8; do
+    case "$p" in ''|*[!0-9]*|0|1) return 0 ;; esac
+    c=$(ps -o comm= -p "$p" 2>/dev/null) || return 0
+    c=$(printf '%s' "${c##*/}" | tr '[:upper:]' '[:lower:]')
+    case "$c" in "$TOOL"|"$TOOL "*|"$TOOL-"*|"$TOOL."*) echo "$p"; return 0 ;; esac
+    p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
+  done
+}
+
 touch_seat() {
   local f="$BUS/seats/$SEAT.json" now last_hook=0 socket="" codex_queue=""
-  local grok_webhook="" grok_secret_env=""
+  local grok_webhook="" grok_secret_env="" pid="" old_pid="" old_session=""
   now=$(now_epoch)
-  [ -f "$f" ] && last_hook=$(jq -r '.last_hook // 0' "$f" 2>/dev/null || echo 0)
+  if [ -f "$f" ]; then
+    IFS=$'\t' read -r last_hook old_pid old_session < <(jq -r \
+      '[(.last_hook // 0), (.pid // ""), (.session // "")] | map(tostring) | join("\t")' "$f" 2>/dev/null || echo 0)
+  fi
   [ "${AGENT_BUS_VIA:-cli}" = hook ] && last_hook="$now"
   [ "$TOOL" = claude ] && socket="${CLAUDE_CODE_MESSAGING_SOCKET:-}"
+  # The same session in a live process keeps its pid; anything else looks again.
+  if [ -z "${AGENT_BUS_PID:-}" ] && [ -n "$old_pid" ] && [ "$old_session" = "$SESSION" ] \
+     && kill -0 "$old_pid" 2>/dev/null; then pid=$old_pid
+  else pid=$(agent_pid); fi
   [ "$TOOL" = codex ] && codex_queue=$(state_get '.codex_queue // ""' | jq -r .)
   # Preserve webhook registration written by `grok register` so that a Grok Bot
   # calling normal bus commands (read, resolve, …) does not silently clear it.
@@ -240,10 +271,10 @@ touch_seat() {
     --arg wt "$WT" --arg branch "$BRANCH" --arg cwd "$TOP" --arg session "$SESSION" \
     --arg socket "$socket" --arg codex_queue "$codex_queue" --argjson epoch "$now" \
     --argjson last_hook "${last_hook:-0}" --arg lane "$LANE" --arg lane_src "${LANE_SRC:-unfiled}" \
-    --arg grok_webhook "$grok_webhook" --arg grok_secret_env "$grok_secret_env" \
+    --arg grok_webhook "$grok_webhook" --arg grok_secret_env "$grok_secret_env" --arg pid "$pid" \
     '{addr:$addr,tool:$tool,repo:$repo,repo_id:$repo_id,wt:$wt,branch:$branch,cwd:$cwd,
       session:$session,socket:$socket,codex_queue:$codex_queue,epoch:$epoch,last_hook:$last_hook,lane:$lane,
-      lane_src:$lane_src}
+      lane_src:$lane_src,pid:($pid | tonumber? // null)}
      + (if $grok_webhook != "" then {grok_webhook:$grok_webhook,grok_secret_env:$grok_secret_env} else {} end)' >"$tmpf" \
     && mv "$tmpf" "$f" || rm -f "$tmpf"
 }
@@ -1878,7 +1909,8 @@ snapshot_json() {
   now=$(now_epoch)
   seats=$(seat_rows | jq -sc --argjson cut "$((now - SEAT_TTL))" --argjson codex_cut "$(codex_idle_cut)" \
     "$JQ_SEAT_LIVE"'[.[] | select(buslive($cut; $codex_cut) and (.tool // "") != "lead")
-      | {addr, tool, repo, repo_id, wt, branch, lane: (.lane // ""), lane_src: (.lane_src // ""),
+      | {addr, tool, repo, repo_id, wt, branch, cwd: (.cwd // ""), pid: (.pid // null),
+         lane: (.lane // ""), lane_src: (.lane_src // ""),
          epoch: ((.epoch // 0) | tonumber? // 0), last_hook: ((.last_hook // 0) | tonumber? // 0),
          scope: ((.tool // "") + "/" + (.wt // "")),
          wakeable: (((.socket // "") != "") or ((.codex_queue // "") != "")
@@ -2533,7 +2565,7 @@ agent-bus — handoff bus for coding agents sharing repos and worktrees.
   offboard                    stand down: PM role and claims released, open
                               items listed
   log [n]                     recent packets and closes
-  snapshot                    machine-wide JSON: seats, open work, lanes,
+  snapshot                    machine-wide JSON: seats (with pid and worktree path), open work, lanes,
                               attention, recent activity (read-only; for viewers)
   doctor                      identity, host install, live seats
   gc [--restore-open]         prune expired state (also runs daily from hooks); open

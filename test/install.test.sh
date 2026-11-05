@@ -79,6 +79,12 @@ assert_eq "--from points current at the checkout" "$ROOT" "$(readlink "$SHARE/cu
 out=$(AGENT_BUS_DOWNLOAD_URL="file://$T/missing.tar.gz" "$ROOT/install.sh" --version v0 2>&1 || true)
 assert_has "a failed download says so" "download failed" "$out"
 
+# A fresh machine: claude is on PATH but has never run (no ~/.claude yet).
+H2="$T/home2"; mkdir -p "$H2" "$T/fakebin"; printf '#!/bin/sh\n' >"$T/fakebin/claude"; chmod +x "$T/fakebin/claude"
+out=$(HOME="$H2" PATH="$T/fakebin:$PATH" AGENT_BUS_DOWNLOAD_URL="file://$T/9.9.1.tar.gz" "$ROOT/install.sh" --version v9.9.1 2>&1) \
+  && ok "installs before claude has ever run" || bad "installs before claude has ever run" "$out"
+assert_eq "creates claude settings with hooks" 4 "$(jq '[.hooks[][].hooks[].command] | length' "$H2/.claude/settings.json" 2>/dev/null || echo 0)"
+
 # Homebrew: the keg path changes every upgrade; hooks must use opt/.
 B="$(cd "$T" && pwd -P)/brew"
 mkdir -p "$B/Cellar/agent-bus/1.0" "$B/bin" "$B/opt"

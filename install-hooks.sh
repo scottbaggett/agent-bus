@@ -69,7 +69,7 @@ add_group() { # <event> <command>
 }
 
 install_claude() {
-  local f; [ -f "$CLAUDE_SETTINGS" ] || echo '{}' >"$CLAUDE_SETTINGS"
+  local f; mkdir -p "$(dirname "$CLAUDE_SETTINGS")"; [ -f "$CLAUDE_SETTINGS" ] || echo '{}' >"$CLAUDE_SETTINGS"
   f=$(real "$CLAUDE_SETTINGS"); backup "$f"
   local out; out=$(strip_marked <"$f")
   if ((!uninstall)); then

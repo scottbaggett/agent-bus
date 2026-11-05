@@ -79,8 +79,9 @@ You're done with your part and another window should pick it up.
 agent-bus post --to opencode/checkout-api.3f1a --state handoff --touched auto -m "# Wire up the client ..."
 ```
 
-The other agent sees it on its next prompt, or is woken if idle. Address one
-seat, never everyone: a broadcast (`@here`) has no owner, so nobody acts on it.
+The other agent sees it on its next prompt, or is woken if idle. `post` tells
+you which, one line per agent it reached. Address one seat, never everyone: a
+broadcast (`@here`) has no owner, so nobody acts on it, and `post` says so.
 
 Between two Claude Code sessions, use Claude's own session messaging instead;
 agent-bus is for Claude ↔ OpenCode ↔ Codex.
@@ -100,9 +101,20 @@ agent-bus review <id> --approve
 agent-bus review <id> --changes -m "Handle the burst case"
 ```
 
-Handoffs come back the same way. When an agent finishes work it was handed,
-closing it sends it to whoever handed it over to accept (unless your rules say
-done means done). No agent can approve its own work.
+Handoffs come back the same way. When an agent finishes work it was handed, it
+answers and closes it in one step, and that sends it to whoever handed it over
+to accept (unless your rules say done means done). No agent can approve its
+own work.
+
+```sh
+agent-bus reply <id> -m "Done: limiter in src/rate.ts, tests green"
+```
+
+When an agent can't go on without the answer, it asks and waits:
+
+```sh
+agent-bus ask --to codex/main.5f21 -m "# Does this migration look safe?"
+```
 
 ### Split a feature across worktrees
 
@@ -122,7 +134,8 @@ agent.
 
 For a bigger feature, make one agent the lane's PM. It gets a copy of every
 work item in the lane, picks up anything without an owner, and keeps the lane
-moving.
+moving. A new PM taking over gets one list of what's open, not a flood of old
+messages.
 
 > "You're the PM for eng-142."
 
@@ -141,6 +154,16 @@ agent-bus post --re <id> --close escalated --to @lead --state question -m "Drop 
 ```
 
 You see it in `agent-bus attention`, answer, and close it.
+
+### Tell your agents something yourself
+
+To send a message as you, run this in your own terminal. Agents see it labeled
+as coming from you, so they treat it as your request rather than another
+agent's:
+
+```sh
+agent-bus send --to codex/main.5f21,opencode/checkout-api.3f1a -m "Stop merging until the release is cut"
+```
 
 ### Record decisions so later sessions follow them
 
@@ -162,7 +185,12 @@ agent-bus claim src/billing/invoice.ts
 ```
 
 Claims are advisory and expire after 4 hours. If someone else holds it, the
-agent asks instead of overwriting.
+agent asks instead of overwriting. Claim things that aren't files the same way,
+so two agents don't merge the same MR:
+
+```sh
+agent-bus claim mr:3594
+```
 
 ### Clean up
 
@@ -191,6 +219,8 @@ Details and caveats for each: [docs/hosts.md](docs/hosts.md).
 | `agent-bus status` | where this agent stands: lane, what waits on it, the rules |
 | `agent-bus who` | live agents, PMs, open work, claims |
 | `agent-bus read` | this agent's packets |
+| `agent-bus reply <id> -m …` | answer an item and close it |
+| `agent-bus ask --to <seat> -m …` | ask and wait for the answer |
 | `agent-bus attention` | what needs you, with the fix for each |
 | `agent-bus guide [worker\|supervisor\|reviewer]` | the patterns, short |
 | `agent-bus init --show` | this repo's rules |

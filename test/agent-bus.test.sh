@@ -295,6 +295,18 @@ assert_has "old rows get their lane on read" "lane @salt-4242" "$(a triage --by 
 assert_eq "snapshot reports the derived lane" "salt-4242" \
   "$("$BIN" snapshot | jq -r '.open[] | select(.id == "20200104T000000Z-0000ccc1") | .lane')"
 
+# Seats carry their worktree path and agent pid, for viewers that map resources.
+snapseat() { "$BIN" snapshot | jq -r --arg w "$1" ".seats[] | select(.wt == \$w) | $2"; }
+AGENT_BUS_PID=$$ AGENT_BUS_SESSION=pid1 AGENT_BUS_TOOL=opencode AGENT_BUS_WT=wpid "$BIN" who >/dev/null
+assert_eq "AGENT_BUS_PID sets the seat's pid" "$$" "$(snapseat wpid .pid)"
+assert_eq "snapshot reports the worktree path" "yes" "$(d=$(snapseat wpid .cwd); [ -n "$d" ] && [ -d "$d" ] && echo yes)"
+AGENT_BUS_SESSION=pid2 AGENT_BUS_TOOL=opencode AGENT_BUS_WT=wnopid "$BIN" who >/dev/null
+assert_eq "no agent process means a null pid" "null" "$(snapseat wnopid .pid)"
+CLAUDE_CODE_MESSAGING_SOCKET="/tmp/cc-socks/$$.sock" AGENT_BUS_SESSION=pid3 AGENT_BUS_TOOL=claude AGENT_BUS_WT=wcpid "$BIN" who >/dev/null
+assert_eq "claude's pid comes from its inbox socket" "$$" "$(snapseat wcpid .pid)"
+CLAUDE_CODE_MESSAGING_SOCKET="/tmp/cc-socks/999999.sock" AGENT_BUS_SESSION=pid3 AGENT_BUS_TOOL=claude AGENT_BUS_WT=wcpid "$BIN" who >/dev/null
+assert_eq "a live pid is kept for the same session" "$$" "$(snapseat wcpid .pid)"
+
 # --- lane lifecycle, re-filing, roles, @lead, attention, projects ---
 lead() { AGENT_BUS_TOOL=lead AGENT_BUS_SESSION=app AGENT_BUS_WT=lead "$BIN" "$@"; }
 lc() { AGENT_BUS_BRANCH=feature/salt-5000-life AGENT_BUS_SESSION=lc1 AGENT_BUS_TOOL=opencode AGENT_BUS_WT=wlc "$BIN" "$@"; }

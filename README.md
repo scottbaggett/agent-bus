@@ -14,13 +14,21 @@ No daemon, no server. One bash script, `jq`, and an append-only log under
 ## Install
 
 ```sh
-ln -sf "$PWD/bin/agent-bus" ~/.local/bin/agent-bus
-./install-hooks.sh            # Claude hooks + OpenCode plugin
-./install-hooks.sh --codex    # Codex Desktop hooks (separate; needs trust in Codex)
+curl -fsSL https://raw.githubusercontent.com/scottbaggett/agent-bus/main/install.sh | bash
 ```
 
-Each host also gets the **`/agent-bus` skill**: type `/agent-bus` in any agent
-session to see where you stand and what to do next.
+This needs `jq` (`brew install jq`). It installs the latest release into
+`~/.local/share/agent-bus`, puts `agent-bus` in `~/.local/bin`, and wires up
+every agent it finds: Claude Code hooks, the OpenCode plugin and Codex hooks,
+plus the **`/agent-bus` skill** in each. Type `/agent-bus` in any agent session
+to see where you stand and what to do next.
+
+Or with Homebrew, then wire the agents yourself:
+
+```sh
+brew install scottbaggett/tap/agent-bus
+agent-bus hooks
+```
 
 Then set your team's rules once per repo, and commit the file it writes:
 
@@ -30,9 +38,20 @@ agent-bus init                # four questions; writes .agent-bus.json
 
 Skip it and the first agent session in the repo asks you the same questions.
 
-Each flag takes `--uninstall` to reverse. Upgrading from v1:
-`./install-hooks.sh --remove-legacy` strips the Codex and Cursor hooks v1
-installed. Claude hooks from v1 keep working unchanged.
+| | |
+|---|---|
+| `agent-bus update` | install the latest release (`--version <tag>` for a given one) |
+| `agent-bus hooks` | re-wire agents, e.g. after installing a new one (`--claude`, `--opencode`, `--codex`, `--uninstall`) |
+| `agent-bus uninstall` | remove hooks, skills and the install; your bus history in `~/.agents/bus` stays |
+| `agent-bus doctor` | check the install |
+
+Options for the installer go after `bash -s --`: `--version <tag>`, `--ref
+<branch>` (unreleased), `--no-hooks`.
+
+**Working on agent-bus itself:** clone it and run `./install.sh --from .`.
+Agents then run your checkout, so every edit is live for all of them; switch
+back with the one-line installer. Upgrading from v1: `agent-bus hooks
+--remove-legacy` strips the Codex and Cursor hooks v1 installed.
 
 ## Harnesses
 
@@ -43,7 +62,7 @@ was addressed to, or a PM for work items. Broadcasts (`@here`, `@repo`, `@all`,
 
 ### Claude Code
 
-**Install:** `./install-hooks.sh --claude`. New sessions pick it up; nothing to
+**Install:** `agent-bus hooks --claude` (the installer does this). New sessions pick it up; nothing to
 restart.
 
 **Use:** packets you own are injected at session start and on every prompt, and
@@ -65,7 +84,7 @@ hook at the end of a turn). Reach OpenCode and Codex seats with
 Also the way to run Codex models with full bus support: pick one such as
 `openai/gpt-5.5` in OpenCode.
 
-**Install:** `./install-hooks.sh --opencode`, then restart OpenCode (config is
+**Install:** `agent-bus hooks --opencode` (the installer does this), then restart OpenCode (config is
 read once at startup).
 
 **Use:** send the session one message first. The plugin can't see a session
@@ -85,7 +104,7 @@ every prompt, and resumes the session when it's idle and owns new work.
 
 ### Codex Desktop
 
-**Install:** `./install-hooks.sh --codex`, then review and trust the four
+**Install:** `agent-bus hooks --codex` (the installer does this), then review and trust the four
 agent-bus hooks in Codex (`/hooks`), then restart or resume the chat so its
 startup hook runs. Codex asks for trust again whenever a hook definition
 changes; the installer never edits trust settings, and it leaves your other
@@ -119,7 +138,7 @@ agent-bus codex enable       # resume, or connect manually without hooks
 - Use the same bus directory and Codex home on both sides. With a custom
   `AGENT_BUS_HOME`, give it to the Codex chat and its hooks too.
   `AGENT_BUS_CODEX_SETTINGS` installs into a different hooks file.
-- `./install-hooks.sh --codex --uninstall` removes only the managed hooks and
+- `agent-bus hooks --codex --uninstall` removes only the managed hooks and
   disables existing queue registrations.
 
 ### Codex CLI and other shells

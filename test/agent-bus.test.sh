@@ -136,6 +136,37 @@ assert_lacks "reply to an fyi closes nothing" "closed" "$(b reply "$fid" -m 'tha
 out=$(b reply "$fid" -m x --reason handed-off 2>&1 || true)
 assert_has "reply cannot hand off" "needs a destination" "$out"
 assert_has "subcommand --help shows that command" "reply <id> -m <body>" "$("$BIN" reply --help)"
+# ask: post a question and wait for the answer.
+( for i in 1 2 3 4 5 6 7 8 9 10; do
+    q=$(jq -r 'select(.kind == "msg" and .subject == "which port for vite?") | .id' "$BUS_HOME/ledger.jsonl" 2>/dev/null | head -1 || true)
+    [ -n "$q" ] && { b reply "$q" -m "port 5188" >/dev/null; break; }
+    sleep 0.3; done ) &
+out=$(AGENT_BUS_ASK_POLL=0.2 a ask --to "$B" -m '# which port for vite?' --timeout 10)
+wait || true
+assert_has "ask prints the answer" "port 5188" "$out"
+out=$(AGENT_BUS_ASK_POLL=0.2 a ask --to "$B" -m '# nobody answers' --timeout 1; echo "exit=$?")
+assert_has "ask times out with exit 2" "exit=2" "$out"
+assert_has "a timed-out question stays open" "stays open as" "$out"
+# claims on things that aren't files
+assert_has "claim an MR by name" "claimed mr:3594" "$(a claim MR:3594)"
+assert_has "a second claimer is told who has it" "CONTESTED mr:3594" "$(c claim mr:3594 2>&1)"
+a release mr:3594 >/dev/null
+# send is for the human at a terminal
+out=$(a send --to "$B" -m 'from me' 2>&1 </dev/null || true)
+assert_has "send refuses without a terminal" "only runs in your own terminal" "$out"
+# One session, two folders: it reads packets sent to either seat.
+seat sx opencode wfolder1 who >/dev/null; seat sx opencode wfolder2 who >/dev/null
+a post --to "$(addr seat sx opencode wfolder1)" -m '# for the main checkout' >/dev/null
+assert_has "a session reads packets sent to its other seat" "for the main checkout" "$(seat sx opencode wfolder2 read --peek)"
+# A packet the human sent is labeled as theirs.
+uid="20200105T000000Z-0000aa01"; printf 'please look\n' >"$BUS_HOME/msg/$uid.md"
+printf '{"kind":"msg","id":"%s","epoch":%s,"from":"shell/wa","to":"%s","state":"question","subject":"from the human","repo_id":"%s","user":true}\n' \
+  "$uid" "$(date -u +%s)" "$B" "$(a whoami | awk '/^repo_id/{print $2}')" >>"$BUS_HOME/ledger.jsonl"
+assert_has "a user-sent packet is labeled as the user's" "from your user, sent from their own terminal" "$(b read --peek)"
+# doctor flags standing instructions that post to @here
+ch=$(mktemp -d); printf 'agent-bus post --to @here --state needs-review\n' >"$ch/AGENTS.md"
+assert_has "doctor flags @here instructions" "tells agents to post --to @here" "$(CODEX_HOME="$ch" a doctor 2>/dev/null)"
+rm -rf "$ch"
 assert_lacks "subcommand --help shows only that command" "snapshot" "$("$BIN" reply --help)"
 out=$(c resolve "$rid" --reason handed-off 2>&1 || true)
 assert_has "resolve cannot hand off" "needs a destination" "$out"
@@ -776,7 +807,7 @@ assert_has "gc keeps old re-filings" '"lane":"salt-3001"' "$(cat "$BUS_HOME/ledg
 # Concurrent appends: 10 parallel posts must all land in the ledger.
 # Use a unique subject prefix that no other test produces.
 for _i in $(seq 1 10); do a post --to "$B" -m "# locktest_conc$_i" >/dev/null & done
-wait
+wait || true
 # -c ensures compact (single-line) JSON output so wc -l counts rows correctly.
 conc_n=$(jq -rcR 'fromjson? // empty | select(.kind=="msg" and (.subject | startswith("locktest_conc")))' \
   "$BUS_HOME/ledger.jsonl" | wc -l | tr -d ' ')
@@ -906,7 +937,7 @@ fi
 # budget check and the increment (that is a separate design matter), so we
 # only assert file integrity, not a precise wakes count.
 for _i in $(seq 1 10); do a post --to "$C" --state question -m "# statelock$_i" >/dev/null & done
-wait
+wait || true
 _sf="$BUS_HOME/state/$(printf '%s' "$C" | tr '/:@ ' '____').json"
 assert_has "concurrent state writes: state file is valid JSON" \
   "$(jq . "$_sf" >/dev/null 2>&1 && echo ok || echo bad)" "ok"

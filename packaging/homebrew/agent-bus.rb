@@ -6,7 +6,7 @@ class AgentBus < Formula
   desc "File-backed handoff bus for coding agents sharing repos and worktrees"
   homepage "https://github.com/scottbaggett/agent-bus"
   url "https://github.com/scottbaggett/agent-bus/archive/refs/tags/v0.3.0.tar.gz"
-  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+  sha256 "2e4f0192baa4e3b0d685cdbf05b7af9022f37c437c8b53aa86ee32a102c1b4ac"
 
   depends_on "jq"
 

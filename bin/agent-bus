@@ -598,9 +598,9 @@ render_packets() {
      (.re // ""), (.close // "")] | map(clean) | join("\u001f")')
 }
 
-HINTS='reply:   agent-bus post --re <id> --to <seat> --state done -m "..."
-close:   agent-bus resolve <id> --reason done|denied|canceled|duplicate
-hand on: agent-bus post --re <id> --close handed-off --to <seat> --state handoff -m "..."'
+HINTS='reply and close: agent-bus reply <id> -m "what you did"   (--reason denied|canceled|duplicate|superseded; --keep-open)
+close only:      agent-bus resolve <id>
+hand on:         agent-bus post --re <id> --close handed-off --to <seat> --state handoff -m "..."'
 
 # ------------------------------------------------------------------- push
 
@@ -1719,13 +1719,17 @@ cmd_resolve() {
     esac
   done
   [ -n "$ids" ] || die "resolve: needs a packet id"
-  [ -n "$reason" ] || die "resolve: --reason is required (done|denied|canceled|duplicate|superseded) — a close must say where the work went"
+  # Closing as done is the common case; asking for it after a failed call was busywork.
+  [ -n "$reason" ] || reason=done
   [ "$reason" = handed-off ] && die "resolve: handing off needs a destination — agent-bus post --re <id> --close handed-off --to <seat> --state handoff -m '...'"
   [ "$reason" = escalated ] && die "resolve: escalating needs a destination — agent-bus post --re <id> --close escalated --to @lead --state question -m '...'"
   in_list "$reason" "$REASONS" || die "resolve: --reason must be one of: done denied canceled duplicate superseded"
+  local n_ids=0 n_ok=0
   for id in $ids; do
+    n_ids=$((n_ids + 1))
     if ! valid_id "$id"; then printf 'agent-bus: %s — not a packet id\n' "$id" >&2; continue; fi
     check_closable "$id" || continue
+    n_ok=$((n_ok + 1))
     # Gated work isn't closed by the one who did it: done hands it to the
     # reviewer, who approves (closes) it or sends it back.
     local gate; gate=$(item_field "$id" review)
@@ -1740,7 +1744,41 @@ cmd_resolve() {
     closed=1
   done
   ((closed)) && reset_wake
+  if ((n_ids > 1)); then printf '%d of %d closed%s\n' "$n_ok" "$n_ids" "$( ((n_ok < n_ids)) && echo '; the rest are listed above with why')"; fi
+  ((n_ok > 0)) || return 1
   return 0
+}
+
+# Answer an item and close it in one step: the reply goes to whoever sent it.
+# Gated work goes to its reviewer instead, as resolve does.
+cmd_reply() {
+  [ $# -ge 1 ] && valid_id "$1" || die "reply: usage — agent-bus reply <id> -m \"what you did\" [--reason done|denied|canceled|duplicate|superseded] [--keep-open]"
+  local id="$1" reason=done keep=0 body='' bodyfile='' from state gate
+  shift
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --keep-open) keep=1; shift ;;
+      --reason) [ $# -ge 2 ] || die "reply: --reason needs a value"; reason="$2"; shift 2 ;;
+      -m|--message) [ $# -ge 2 ] || die "reply: -m needs a value"; body="$2"; shift 2 ;;
+      --file|-f) [ $# -ge 2 ] || die "reply: --file needs a value"; bodyfile="$2"; shift 2 ;;
+      *) die "reply: unknown flag $1" ;;
+    esac
+  done
+  [ -n "$bodyfile" ] && body=$(cat "$bodyfile")
+  [ -n "$body" ] || die "reply: needs a body (-m or --file)"
+  from=$(item_field "$id" from); state=$(item_field "$id" state)
+  [ -n "$from" ] || die "reply: no packet $id"
+  [ "$from" = "$ADDR" ] && die "reply: $id is your own packet — use agent-bus resolve $id to close it"
+  case "$reason" in handed-off|escalated) die "reply: $reason needs a destination — use agent-bus post --re $id --close $reason --to <seat>" ;; esac
+  in_list "$reason" "$REASONS" || die "reply: --reason must be one of: done denied canceled duplicate superseded"
+  if ((keep)) || ! in_list "$state" 'needs-review blocked handoff question'; then
+    cmd_post --re "$id" --to "$from" --state fyi -m "$body"; return
+  fi
+  gate=$(item_field "$id" review)
+  if [ "$reason" = done ] && [ -n "$gate" ] && [ "$gate" != "$ADDR" ] && [ "$TOOL" != lead ]; then
+    cmd_resolve "$id" --reason done -m "$body"; return
+  fi
+  cmd_post --re "$id" --close "$reason" --to "$from" --state done -m "$body"
 }
 
 cmd_triage() {
@@ -1890,6 +1928,17 @@ cmd_role() {
     printf 'now receiving needs-review, blocked, handoff, question from seats in lane @%s and sent to @%s\n' "$lane" "$lane"
   else
     printf 'now receiving needs-review, blocked, handoff, question from any worktree\n'
+  fi
+  # What is already open becomes this PM's. List it once, newest first, and
+  # mark it read, instead of waking on every old packet one by one.
+  local open n
+  open=$(open_items "$lane" | jq -sc 'sort_by(-(.epoch // 0))')
+  n=$(jq 'length' <<<"$open")
+  if ((n > 0)); then
+    printf '\n%d open item(s) in this scope, newest first (marked read; agent-bus show <id> for one):\n' "$n"
+    jq -r --argjson now "$(now_epoch)" '.[:15][] | "  [\(.state)] \(($now - (.epoch // $now)) / 3600 | floor)h ago  from \(.from)  \(.subject // "" | .[0:80])  (\(.id))"' <<<"$open" | sanitize
+    ((n > 15)) && printf '  … %d more: agent-bus triage%s\n' "$((n - 15))" "${lane:+ --lane $lane}"
+    mark_read "$(jq -c 'map(.id)' <<<"$open")"
   fi
 }
 
@@ -2647,7 +2696,11 @@ agent-bus — handoff bus for coding agents sharing repos and worktrees.
                               need a supervisory --state)
   read [--peek] [--all]       show packets for this seat (marks read unless --peek)
   show <id>                   a packet, its replies and closes, and its body
-  resolve <id>... --reason r  close items (done|denied|canceled|duplicate|superseded)
+  reply <id> -m <body> [--reason r] [--keep-open]
+                              answer an item and close it in one step (reason
+                              default done); gated work goes to its reviewer
+  resolve <id>... [--reason r]  close items (done by default; denied|canceled|
+                              duplicate|superseded)
   triage [--lane <name>] [--by owner|lane]
                               open work in this repo: GONE owners, NOT PICKED UP,
                               STALE
@@ -2697,6 +2750,18 @@ groups lanes into projects: {"projects":[{"name":"Checkout","repo":"web-*",
 EOF
 }
 
+# The usage lines for one command: its entry and the indented lines under it.
+cmd_help() {
+  local out
+  out=$(usage | awk -v c="$1" '
+    /^  [a-z]/ { split($1, w, " "); on = (w[1] == c); if (on) found = 1 }
+    /^$/ { on = 0 }
+    on { print }')
+  if [ -z "$out" ]; then usage; return 0; fi
+  printf '%s\n' "$out"
+  printf '\n(agent-bus help lists every command)\n'
+}
+
 # --------------------------------------------------------------------- main
 
 cmd="${1:-help}"; shift || true
@@ -2711,6 +2776,10 @@ case "$cmd" in
   update|upgrade) cmd_update "$@"; exit ;;
   uninstall) cmd_uninstall "$@"; exit ;;
 esac
+# `agent-bus <command> --help` prints that command's lines from the usage.
+case " $* " in *" --help "*|*" -h "*)
+  [ "$cmd" = help ] || [ "$cmd" = -h ] || [ "$cmd" = --help ] || { cmd_help "$cmd"; exit; } ;;
+esac
 resolve_identity
 case "$cmd" in
   version|--version) cmd_version ;;
@@ -2724,6 +2793,7 @@ case "$cmd" in
   heartbeat) touch_seat; maybe_gc ;;
   show) cmd_show "$@" ;;
   resolve) touch_seat; cmd_resolve "$@" ;;
+  reply) touch_seat; cmd_reply "$@" ;;
   triage) touch_seat; cmd_triage "$@" ;;
   lane) cmd_lane "$@" ;;
   file) touch_seat; cmd_file "$@" ;;

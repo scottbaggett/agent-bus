@@ -124,7 +124,19 @@ a read >/dev/null
 
 # --- closing ---
 out=$(c resolve "$rid" 2>&1 || true)
-assert_has "resolve needs a reason" "--reason is required" "$out"
+assert_lacks "resolve no longer demands a reason" "--reason is required" "$out"
+# reply: answer and close in one step, back to the sender.
+B=$(addr b)
+qid=$(a post --to "$B" --state question -m '# which port?' | idof)
+out=$(b reply "$qid" -m "5188")
+assert_has "reply posts to the sender" "-> $(addr a)" "$out"
+assert_has "reply closes the item" "closed $qid (done)" "$out"
+fid=$(a post --to "$B" -m '# fyi only' | idof)
+assert_lacks "reply to an fyi closes nothing" "closed" "$(b reply "$fid" -m 'thanks')"
+out=$(b reply "$fid" -m x --reason handed-off 2>&1 || true)
+assert_has "reply cannot hand off" "needs a destination" "$out"
+assert_has "subcommand --help shows that command" "reply <id> -m <body>" "$("$BIN" reply --help)"
+assert_lacks "subcommand --help shows only that command" "snapshot" "$("$BIN" reply --help)"
 out=$(c resolve "$rid" --reason handed-off 2>&1 || true)
 assert_has "resolve cannot hand off" "needs a destination" "$out"
 out=$(c resolve "$rid" --reason meh 2>&1 || true)
@@ -254,6 +266,11 @@ assert_has "lane PM is woken for its lane" "block" "$(lp stop-hook </dev/null | 
 pid=$(l1 post --to @pm --state question -m $'# ask lane pm\n\nx' | idof)
 assert_has "@pm from a lane seat reaches the lane PM" "ask lane pm" "$(lp read --peek)"
 bid=$(l1 post --to @spaces --state blocked -m $'# lane blocker\n\nx' | idof)
+out=$(ot role pm --lane spaces --force)
+assert_has "a PM takeover lists what is already open" "open item(s) in this scope, newest first" "$out"
+assert_has "the list names the item" "lane blocker" "$out"
+assert_lacks "and marks it read instead of waking on it" "lane blocker" "$(ot read --peek)"
+lp role pm --lane spaces --force >/dev/null
 out=$(lp triage --lane spaces)
 assert_has "lane broadcasts are owned by the lane PM" "owner $LP" "$out"
 assert_lacks "triage --lane filters to the lane" "other lane stuck" "$out"

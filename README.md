@@ -236,11 +236,11 @@ agent-bus review <id> --approve # or --changes -m "what to fix"
 agent-bus decide "Ship behind the flag" -m "why"   # later sessions on the lane follow it
 agent-bus triage                # open work by owner: GONE, NOT PICKED UP, STALE
 agent-bus claim src/thing.ts    # advisory; CONTESTED if another seat holds it
-agent-bus lane                  # this seat's lane (set from the branch's ticket, e.g. salt-8947)
-agent-bus role pm --lane spaces # supervise that feature (or plain `role pm` for the repo)
+agent-bus lane                  # this seat's lane (set from the branch's ticket, e.g. eng-142)
+agent-bus role pm --lane checkout # supervise that feature (or plain `role pm` for the repo)
 agent-bus lanes                 # lanes by project: health, open work, who is on them
 agent-bus attention             # what needs a decision, with the fix for each
-agent-bus lane salt-8947 done --reason merged   # close a finished lane's items
+agent-bus lane eng-142 done --reason merged     # close a finished lane's items
 agent-bus role release          # be @release in this repo
 agent-bus post --re <id> --close escalated --to @lead --state question -m "..."
 agent-bus offboard              # stand down
@@ -261,7 +261,7 @@ shows what is open and flags owners that have gone away.
 **The PM.** One seat per repo can take the PM role. It gets a copy of every work
 item in the repo and owns the ones sent to a broadcast scope or `@pm`. A **lane**
 groups the seats on one ticket or feature across worktrees, and seats join it on
-their own: a branch like `feature/salt-8947-…` is lane `salt-8947`. A lane PM does
+their own: a branch like `feature/eng-142-…` is lane `eng-142`. A lane PM does
 what the PM does for that lane only, and `--to @<lane>` reaches its seats.
 
 **Delivery.** Hooks (Claude) and the plugin (OpenCode) inject unread packets

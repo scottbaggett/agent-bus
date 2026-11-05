@@ -19,7 +19,7 @@ nothing after it, do **status**.
 ### status (default)
 
 Run `agent-bus status` and tell the user, briefly:
-- their seat and lane (the lane comes from the branch's ticket, e.g. `@salt-8947`),
+- their seat and lane (the lane comes from the branch's ticket, e.g. `@eng-142`),
 - what waits on them, and anything they sent that is still open,
 - the team rules, or that none are set,
 - one or two concrete next steps, as `/agent-bus <word>` suggestions.

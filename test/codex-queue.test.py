@@ -120,7 +120,8 @@ sys.exit(int(os.environ.get('FAKE_QUEUE_EXIT', '0')))
         # The budget is opt-in since wakes became unlimited by default.
         self.env['AGENT_BUS_WAKE_BUDGET'] = '3'
         target = self.enable()
-        for _ in range(4): self.post(target)
+        # Each read makes the next post eligible for a fresh notice.
+        for _ in range(4): self.post(target); self.cmd('read')
         self.assertEqual(len(self.requests()), 3)
         self.assertEqual(self.rows('delivery')[-1]['status'], 'budget_exhausted')
         self.assertEqual(json.loads(self.cmd('codex','status').stdout)['mode'],'budget_exhausted')
@@ -167,6 +168,15 @@ sys.exit(int(os.environ.get('FAKE_QUEUE_EXIT', '0')))
         self.assertNotEqual(self.cmd('codex','enable',session='local',check=False).returncode, 0)
         self.assertNotEqual(self.cmd('codex','enable',tool='claude',check=False).returncode, 0)
 
+    def test_one_notice_until_read(self):
+        target = self.enable()
+        self.post(target); self.post(target)
+        self.assertEqual(len(self.requests()), 1)
+        self.assertEqual(self.rows('delivery')[-1]['status'], 'already_notified')
+        self.cmd('read')
+        self.post(target)
+        self.assertEqual(len(self.requests()), 2)
+
     def test_missing_binary_does_not_lose_packet(self):
         target = self.enable(); self.fake.unlink()
         self.post(target)
@@ -182,6 +192,10 @@ sys.exit(int(os.environ.get('FAKE_QUEUE_EXIT', '0')))
         status, code, _ = adapter.run(['/bin/sleep','10'], 0.05)
         self.assertEqual((status,code), ('uncertain', None))
         self.enable()
+        # A read far in the future keeps the one-notice-until-read rule out of
+        # the way: this test is about the budget under concurrency.
+        st=json.loads(self.state().read_text()); st['read_at']=10**12
+        self.state().write_text(json.dumps(st))
         outcomes=[]
         def reserve(n):
             outcomes.append(adapter.reserve(self.state(),str(n),3,str(self.fake.resolve())))

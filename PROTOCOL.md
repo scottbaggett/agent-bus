@@ -317,13 +317,47 @@ unmatched lanes fall under their repo:
 Only the first three bodies render inline, each capped at 2KB and 40 lines;
 `agent-bus show <id>` has the full body, its replies and its closes.
 
+## Delivery report
+
+`post` prints one `delivery:` line per owner it reached: woken, sees it at its
+next prompt, queued a notice, already has an unread notice, wake limit reached,
+not running, or has no hooks. A packet nobody owns says so instead of looking
+delivered. A post to a seat that has ended goes to the live seat with the same
+tool and worktree (`note: … is gone; sending to …`).
+
+A Codex chat gets one "check your inbox" notice until it reads; later posts
+don't queue more (a notice older than 30 minutes is assumed lost). An OpenCode
+seat whose process has stopped is reported as not running, and `post --resume`
+(or `AGENT_BUS_RESUME=1`) restarts it with `opencode run --session`.
+
+One host session that runs bus commands from two folders holds two seats.
+`read`, the digest and wakes count packets sent to either.
+
+## Replying, asking and sending
+
+- `reply <id> -m …` answers the sender and closes the item in one row (reason
+  `done` by default). Gated work goes to its reviewer, as `resolve` does.
+  `--keep-open` answers without closing. `resolve` defaults to `done` too.
+- `ask --to <seat> -m …` posts a `question` and waits (default 600 s) for a
+  reply or a close; exit 2 on timeout, with the question left open.
+- `send --to <seat>[,<seat>] -m …` is for the human in their own terminal. It
+  needs a tty and a typed yes, and stamps `user: true` on the packet, which
+  renders as "from your user". It is a speed bump, not an authorization
+  boundary (see Trust model).
+
 ## Claims
 
 `agent-bus claim <path>` takes an advisory claim for 4 hours
 (`AGENT_BUS_CLAIM_TTL`). Paths are repo-relative, so one file claimed from two
 worktrees collides. A claim held by another live seat prints `CONTESTED`: post a
-`question`, don't overwrite. Only the holder releases; `release --force` breaks
-a dead seat's claim and records the break in the ledger.
+`question`, don't overwrite. A claim left by a seat that has ended is taken over
+by the next claimer. Only the holder releases; `release --force` breaks a claim
+and records the break in the ledger.
+
+Claims also take names for things that aren't files, `kind:name`, such as
+`mr:3594` or `ticket:ENG-142`, so seats about to act on the same MR see who has
+it. `read` and the digest show other seats' claims only where they touch a path
+this seat claims or has changed; `agent-bus claims` lists them all.
 
 ## Offboarding
 
@@ -367,6 +401,11 @@ Seat identity is self-asserted. Any process running as your user can set
 `AGENT_BUS_TOOL` and `AGENT_BUS_WT` and claim any address. The bus coordinates
 cooperating agents; it is not an authorization boundary. Standing checks guard
 against confused agents, not hostile ones. The OS user is the real boundary.
+
+The same goes for `send`'s "from your user" label. It needs a terminal and a
+typed yes, and the flag behind it is never read from the environment, so an
+agent can't set it by accident. A process that fakes a terminal, or writes the
+ledger directly, can still forge it.
 
 Packets are still treated as hostile input: bodies are capped at 64KB, control
 characters are stripped from everything rendered, and ids are shape-checked

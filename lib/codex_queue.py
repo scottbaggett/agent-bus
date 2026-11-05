@@ -53,6 +53,10 @@ def discover():
     raise ValueError("no queue-capable Codex found; set AGENT_BUS_CODEX_BIN to the Desktop executable")
 
 
+# A queued notice older than this is assumed lost, and the next post sends another.
+NOTICE_FRESH_SECS = 1800
+
+
 @contextlib.contextmanager
 def state_lock(path):
     """PID-stamped exclusive lock, consistent with bus_lock in bin/agent-bus.
@@ -117,8 +121,16 @@ def reserve(path, packet, budget, binary):
         attempts = state.get("codex_attempts", [])
         if packet in attempts:
             return "already_attempted"
+        # One "check your inbox" notice covers every packet until the chat reads.
+        # Notices queued during a long turn used to fire as a burst afterwards,
+        # each to an inbox the first one had already emptied.
+        now = int(time.time())
+        notified, read = state.get("notified_at", 0), state.get("read_at", 0)
+        if notified > read and now - notified < NOTICE_FRESH_SECS:
+            return "already_notified"
         if budget > 0 and state.get("wakes", 0) >= budget:
             return "budget_exhausted"
+        state["notified_at"] = now
         # Reserve before submitting. An interrupted/ambiguous submission is never
         # automatically retried; queue acceptance does not mark anything read.
         state["codex_attempts"] = (attempts + [packet])[-500:]

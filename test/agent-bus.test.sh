@@ -124,7 +124,50 @@ a read >/dev/null
 
 # --- closing ---
 out=$(c resolve "$rid" 2>&1 || true)
-assert_has "resolve needs a reason" "--reason is required" "$out"
+assert_lacks "resolve no longer demands a reason" "--reason is required" "$out"
+# reply: answer and close in one step, back to the sender.
+B=$(addr b)
+qid=$(a post --to "$B" --state question -m '# which port?' | idof)
+out=$(b reply "$qid" -m "5188")
+assert_has "reply posts to the sender" "-> $(addr a)" "$out"
+assert_has "reply closes the item" "closed $qid (done)" "$out"
+fid=$(a post --to "$B" -m '# fyi only' | idof)
+assert_lacks "reply to an fyi closes nothing" "closed" "$(b reply "$fid" -m 'thanks')"
+out=$(b reply "$fid" -m x --reason handed-off 2>&1 || true)
+assert_has "reply cannot hand off" "needs a destination" "$out"
+assert_has "subcommand --help shows that command" "reply <id> -m <body>" "$("$BIN" reply --help)"
+# ask: post a question and wait for the answer.
+( for i in 1 2 3 4 5 6 7 8 9 10; do
+    q=$(jq -r 'select(.kind == "msg" and .subject == "which port for vite?") | .id' "$BUS_HOME/ledger.jsonl" 2>/dev/null | head -1 || true)
+    [ -n "$q" ] && { b reply "$q" -m "port 5188" >/dev/null; break; }
+    sleep 0.3; done ) &
+out=$(AGENT_BUS_ASK_POLL=0.2 a ask --to "$B" -m '# which port for vite?' --timeout 10)
+wait || true
+assert_has "ask prints the answer" "port 5188" "$out"
+out=$(AGENT_BUS_ASK_POLL=0.2 a ask --to "$B" -m '# nobody answers' --timeout 1; echo "exit=$?")
+assert_has "ask times out with exit 2" "exit=2" "$out"
+assert_has "a timed-out question stays open" "stays open as" "$out"
+# claims on things that aren't files
+assert_has "claim an MR by name" "claimed mr:3594" "$(a claim MR:3594)"
+assert_has "a second claimer is told who has it" "CONTESTED mr:3594" "$(c claim mr:3594 2>&1)"
+a release mr:3594 >/dev/null
+# send is for the human at a terminal
+out=$(a send --to "$B" -m 'from me' 2>&1 </dev/null || true)
+assert_has "send refuses without a terminal" "only runs in your own terminal" "$out"
+# One session, two folders: it reads packets sent to either seat.
+seat sx opencode wfolder1 who >/dev/null; seat sx opencode wfolder2 who >/dev/null
+a post --to "$(addr seat sx opencode wfolder1)" -m '# for the main checkout' >/dev/null
+assert_has "a session reads packets sent to its other seat" "for the main checkout" "$(seat sx opencode wfolder2 read --peek)"
+# A packet the human sent is labeled as theirs.
+uid="20200105T000000Z-0000aa01"; printf 'please look\n' >"$BUS_HOME/msg/$uid.md"
+printf '{"kind":"msg","id":"%s","epoch":%s,"from":"shell/wa","to":"%s","state":"question","subject":"from the human","repo_id":"%s","user":true}\n' \
+  "$uid" "$(date -u +%s)" "$B" "$(a whoami | awk '/^repo_id/{print $2}')" >>"$BUS_HOME/ledger.jsonl"
+assert_has "a user-sent packet is labeled as the user's" "from your user, sent from their own terminal" "$(b read --peek)"
+# doctor flags standing instructions that post to @here
+ch=$(mktemp -d); printf 'agent-bus post --to @here --state needs-review\n' >"$ch/AGENTS.md"
+assert_has "doctor flags @here instructions" "tells agents to post --to @here" "$(CODEX_HOME="$ch" a doctor 2>/dev/null)"
+rm -rf "$ch"
+assert_lacks "subcommand --help shows only that command" "snapshot" "$("$BIN" reply --help)"
 out=$(c resolve "$rid" --reason handed-off 2>&1 || true)
 assert_has "resolve cannot hand off" "needs a destination" "$out"
 out=$(c resolve "$rid" --reason meh 2>&1 || true)
@@ -205,7 +248,13 @@ out=$(a claim --all 2>&1 || true)
 assert_has "flag-shaped paths are refused" "looks like a flag" "$out"
 a claim src/y.ts >/dev/null
 assert_lacks "claims are repo-scoped" "src/y.ts" "$(AGENT_BUS_REPO_ID=other a claims)"
-assert_has "others see the claim in read" "src/y.ts" "$(c read --peek)"
+assert_lacks "read leaves out claims that don't touch you" "src/y.ts" "$(c read --peek)"
+assert_has "read counts the other claims" "other claim(s) in this repo: agent-bus claims" "$(c read --peek)"
+probe="test/.claim-probe-$$"; : >"$ROOT/$probe"
+a claim "$ROOT/$probe" >/dev/null
+assert_has "read shows a claim on a file you changed" "-> $probe" "$(c read --peek)"
+rm -f "$ROOT/$probe"; a release "$ROOT/$probe" >/dev/null 2>&1 || true
+assert_has "claims lists every claim" "src/y.ts" "$(c claims)"
 
 # --- offboard ---
 pm claim src/z.ts >/dev/null
@@ -248,6 +297,11 @@ assert_has "lane PM is woken for its lane" "block" "$(lp stop-hook </dev/null | 
 pid=$(l1 post --to @pm --state question -m $'# ask lane pm\n\nx' | idof)
 assert_has "@pm from a lane seat reaches the lane PM" "ask lane pm" "$(lp read --peek)"
 bid=$(l1 post --to @spaces --state blocked -m $'# lane blocker\n\nx' | idof)
+out=$(ot role pm --lane spaces --force)
+assert_has "a PM takeover lists what is already open" "open item(s) in this scope, newest first" "$out"
+assert_has "the list names the item" "lane blocker" "$out"
+assert_lacks "and marks it read instead of waking on it" "lane blocker" "$(ot read --peek)"
+lp role pm --lane spaces --force >/dev/null
 out=$(lp triage --lane spaces)
 assert_has "lane broadcasts are owned by the lane PM" "owner $LP" "$out"
 assert_lacks "triage --lane filters to the lane" "other lane stuck" "$out"
@@ -507,13 +561,36 @@ PY
   O1=$(addr seat o1 claude wp)
   out=$(AGENT_BUS_NO_PUSH=0 seat o3 claude wx post --to "$O1" --state needs-review -m '# wake owner')
   sleep 0.3
-  assert_has "post wakes the idle owner" "woke 1 idle peer" "$out"
+  assert_has "post wakes the idle owner" "delivery: $O1 — woken" "$out"
   assert_has "owner got an inbox frame" "agent-bus read" "$(cat "$SOCKD/owner.log" 2>/dev/null)"
   assert_eq "bystander got nothing" "" "$(cat "$SOCKD/bystander.log" 2>/dev/null)"
   out=$(AGENT_BUS_NO_PUSH=0 seat o3 claude wp post --to @here --state needs-review -m '# broadcast review' 2>/dev/null)
-  assert_lacks "broadcast review wakes no bystander" "woke" "$out"
+  assert_lacks "broadcast review wakes no bystander" "— woken" "$out"
   out=$(AGENT_BUS_NO_PUSH=0 seat o3 claude wp post --to @here -m '# broadcast fyi')
-  assert_lacks "a broadcast fyi wakes nobody" "woke" "$out"
+  assert_lacks "a broadcast fyi wakes nobody" "— woken" "$out"
+  assert_has "post says a broadcast reaches nobody" "nobody owns this, so nobody is woken" "$out"
+  # A restarted agent's new seat inherits posts sent to the old name.
+  seat h1 opencode wheir who >/dev/null
+  H1=$(addr seat h1 opencode wheir)
+  f="$BUS_HOME/seats/$(printf '%s' "$H1" | tr '/' '_').json"; jq '.epoch = 0' "$f" >"$f.t" && mv "$f.t" "$f"
+  seat h2 opencode wheir who >/dev/null
+  H2=$(addr seat h2 opencode wheir)
+  out=$(AGENT_BUS_NO_PUSH=0 seat o3 claude wx post --to "$H1" --state handoff -m '# for the restarted seat' 2>&1)
+  assert_has "a post to a gone seat goes to its live heir" "is gone; sending to $H2" "$out"
+  assert_has "the heir owns it" "for the restarted seat" "$(seat h2 opencode wheir read --peek)"
+  # OpenCode that isn't running is reported, not silently queued.
+  AGENT_BUS_PID=999999 seat h3 opencode wstop who >/dev/null
+  out=$(AGENT_BUS_NO_PUSH=0 seat o3 claude wx post --to "$(addr seat h3 opencode wstop)" -m '# are you there')
+  assert_has "post says an OpenCode seat is stopped" "not running; it sees this when restarted" "$out"
+  AGENT_BUS_TOOL=shell AGENT_BUS_WT=wsh "$BIN" who >/dev/null
+  out=$(AGENT_BUS_NO_PUSH=0 seat o3 claude wx post --to shell/wsh -m '# plain shell')
+  assert_has "post says a hookless seat must read" "has no hooks" "$out"
+  # A claim left by an ended seat doesn't block.
+  seat h2 opencode wheir claim src/left.ts >/dev/null
+  f="$BUS_HOME/seats/$(printf '%s' "$H2" | tr '/' '_').json"; jq '.epoch = 0' "$f" >"$f.t" && mv "$f.t" "$f"
+  out=$(seat o3 claude wx claim src/left.ts 2>&1)
+  assert_has "a gone seat's claim is taken over" "has ended; taking it over" "$out"
+  assert_has "and claimed" "claimed src/left.ts" "$out"
   assert_eq "bystander still got nothing" "" "$(cat "$SOCKD/bystander.log" 2>/dev/null)"
   kill "$SRV" 2>/dev/null || true; wait "$SRV" 2>/dev/null || true; SRV=; rm -rf "$SOCKD"
 else
@@ -730,7 +807,7 @@ assert_has "gc keeps old re-filings" '"lane":"salt-3001"' "$(cat "$BUS_HOME/ledg
 # Concurrent appends: 10 parallel posts must all land in the ledger.
 # Use a unique subject prefix that no other test produces.
 for _i in $(seq 1 10); do a post --to "$B" -m "# locktest_conc$_i" >/dev/null & done
-wait
+wait || true
 # -c ensures compact (single-line) JSON output so wc -l counts rows correctly.
 conc_n=$(jq -rcR 'fromjson? // empty | select(.kind=="msg" and (.subject | startswith("locktest_conc")))' \
   "$BUS_HOME/ledger.jsonl" | wc -l | tr -d ' ')
@@ -860,7 +937,7 @@ fi
 # budget check and the increment (that is a separate design matter), so we
 # only assert file integrity, not a precise wakes count.
 for _i in $(seq 1 10); do a post --to "$C" --state question -m "# statelock$_i" >/dev/null & done
-wait
+wait || true
 _sf="$BUS_HOME/state/$(printf '%s' "$C" | tr '/:@ ' '____').json"
 assert_has "concurrent state writes: state file is valid JSON" \
   "$(jq . "$_sf" >/dev/null 2>&1 && echo ok || echo bad)" "ok"

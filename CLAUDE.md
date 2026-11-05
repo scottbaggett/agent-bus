@@ -76,6 +76,7 @@ Rules:
 | `lib/codex_hook.py` | Codex session registration and cleanup |
 | `plugins/agent-bus/` | OpenCode plugin |
 | `PROTOCOL.md` | Full protocol |
+| `docs/hosts.md` | Per-host setup, delivery and caveats (Claude, OpenCode, Codex, Grok) |
 | `skills/agent-bus/SKILL.md` | The `/agent-bus` skill, linked into each host by the installer |
 | `skills/handoff/SKILL.md` | Old skill name; points at `/agent-bus` |
 | `test/agent-bus.test.sh` | Tests |

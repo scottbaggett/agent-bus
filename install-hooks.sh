@@ -6,6 +6,7 @@
 # itself, before the first write.
 #
 # Usage: install-hooks.sh [--claude] [--opencode] [--codex] [--uninstall] [--remove-legacy]
+#   Each host also gets the /agent-bus skill (linked from skills/agent-bus).
 #   default: --claude --opencode
 #   --remove-legacy strips hooks a v1 install left in Codex and Cursor configs.
 set -euo pipefail
@@ -128,8 +129,36 @@ remove_legacy() {
   done
 }
 
+# The /agent-bus skill, linked (not copied) so `git pull` keeps it current.
+# Claude Code and OpenCode both read ~/.claude/skills; Codex reads its own.
+# The old `handoff` name is linked too, but never over something already there.
+link_skill() { # dir name
+  local dest="$1/$2" src="$ROOT/skills/$2"
+  [ -d "$src" ] || return 0
+  if ((uninstall)); then
+    if [ -L "$dest" ] && [ "$(readlink "$dest")" = "$src" ]; then rm -f "$dest"; echo "skill:    removed $dest"; fi
+    return 0
+  fi
+  mkdir -p "$1"
+  if [ -L "$dest" ]; then ln -sfn "$src" "$dest"
+  elif [ -e "$dest" ]; then
+    [ "$2" = agent-bus ] && echo "skill:    $dest exists and is not ours — left alone" >&2
+    return 0
+  else ln -s "$src" "$dest"; fi
+  [ "$2" = agent-bus ] && echo "skill:    /agent-bus installed ($dest)"
+  return 0
+}
+install_skills() {
+  local dirs=''
+  { ((do_claude)) || ((do_opencode)); } && dirs="$HOME/.claude/skills"
+  ((do_codex)) && dirs="$dirs ${CODEX_HOME:-$HOME/.codex}/skills"
+  local d
+  for d in $dirs; do link_skill "$d" agent-bus; link_skill "$d" handoff; done
+}
+
 ((do_claude)) && install_claude
 ((do_opencode)) && install_opencode
 ((do_codex)) && install_codex
+install_skills
 ((legacy)) && remove_legacy
 exit 0

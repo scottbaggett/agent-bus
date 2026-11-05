@@ -19,6 +19,17 @@ ln -sf "$PWD/bin/agent-bus" ~/.local/bin/agent-bus
 ./install-hooks.sh --codex    # Codex Desktop hooks (separate; needs trust in Codex)
 ```
 
+Each host also gets the **`/agent-bus` skill**: type `/agent-bus` in any agent
+session to see where you stand and what to do next.
+
+Then set your team's rules once per repo, and commit the file it writes:
+
+```sh
+agent-bus init                # four questions; writes .agent-bus.json
+```
+
+Skip it and the first agent session in the repo asks you the same questions.
+
 Each flag takes `--uninstall` to reverse. Upgrading from v1:
 `./install-hooks.sh --remove-legacy` strips the Codex and Cursor hooks v1
 installed. Claude hooks from v1 keep working unchanged.
@@ -195,11 +206,15 @@ System Settings → General → Login Items.
 ## Use
 
 ```sh
+agent-bus status                # where you stand: lane, what waits on you, the rules
+agent-bus guide                 # the patterns, short (worker | supervisor | reviewer)
 agent-bus who                   # live seats, the PM, open work, claims
 agent-bus read                  # your packets
 agent-bus post --to <seat|@pm> --state needs-review --touched auto --file handoff.md
 agent-bus post --re <id> --close handed-off --to <seat> --state handoff -m "..."
-agent-bus resolve <id> --reason done
+agent-bus resolve <id> --reason done -m "what you did"   # gated work goes to its reviewer
+agent-bus review <id> --approve # or --changes -m "what to fix"
+agent-bus decide "Ship behind the flag" -m "why"   # later sessions on the lane follow it
 agent-bus triage                # open work by owner: GONE, NOT PICKED UP, STALE
 agent-bus claim src/thing.ts    # advisory; CONTESTED if another seat holds it
 agent-bus lane                  # this seat's lane (set from the branch's ticket, e.g. salt-8947)
@@ -256,7 +271,7 @@ are reclaimed automatically; callers never steal blindly after a timeout.
 warns if they differ.
 
 Full protocol: [PROTOCOL.md](PROTOCOL.md). Agent runbook:
-[skills/handoff/SKILL.md](skills/handoff/SKILL.md).
+[skills/agent-bus/SKILL.md](skills/agent-bus/SKILL.md).
 
 ## Trust
 

@@ -40,7 +40,9 @@ sys.exit(int(os.environ.get('FAKE_QUEUE_EXIT', '0')))
             'CODEX_THREAD_ID','OPENCODE','OPENCODE_SESSION_ID')}
         self.env.update(AGENT_BUS_HOME=str(self.home / 'bus'), AGENT_BUS_NO_AUTO_GC='1',
                         AGENT_BUS_CODEX_BIN=str(self.fake), FAKE_CALLS=str(self.calls),
-                        AGENT_BUS_REPO_ID='testrepo', AGENT_BUS_WT='testwt')
+                        AGENT_BUS_REPO_ID='testrepo', AGENT_BUS_WT='testwt',
+                        # Pre-policy rules: broadcast work items stay legal, done means done.
+                        AGENT_BUS_POLICY_OWNER='pm', AGENT_BUS_POLICY_REVIEW='none')
 
     def cmd(self, *args, tool='codex', session=None, extra=None, check=True, input=None):
         env = self.env | {'AGENT_BUS_TOOL': tool, 'AGENT_BUS_SESSION': session or self.thread}
@@ -115,6 +117,8 @@ sys.exit(int(os.environ.get('FAKE_QUEUE_EXIT', '0')))
         self.assertEqual(self.seat()['codex_queue'], '')
 
     def test_budget_and_close_reset(self):
+        # The budget is opt-in since wakes became unlimited by default.
+        self.env['AGENT_BUS_WAKE_BUDGET'] = '3'
         target = self.enable()
         for _ in range(4): self.post(target)
         self.assertEqual(len(self.requests()), 3)

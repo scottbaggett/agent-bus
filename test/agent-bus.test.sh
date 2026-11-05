@@ -25,6 +25,9 @@ export AGENT_BUS_HOME="$BUS_HOME" AGENT_BUS_NO_PUSH=1 AGENT_BUS_NO_AUTO_GC=1
 # Lanes are derived from the branch; pin a trunk branch so fixtures start
 # unfiled no matter which branch the suite runs on.
 export AGENT_BUS_BRANCH=develop
+# Pin the pre-policy rules for the older tests: broadcasts stay legal and done
+# means done. The policy tests below set their own.
+export AGENT_BUS_POLICY_OWNER=pm AGENT_BUS_POLICY_REVIEW=none
 
 # Fixture seats: seat <name> <tool> <worktree> <cmd...>
 # Fixture seats are mostly claude, so their posts pass --allow-claude; the
@@ -367,6 +370,80 @@ assert_eq "projects.json groups lanes by glob" "Lifecycle" \
   "$("$BIN" snapshot | jq -r '.lanes[] | select(.lane == "salt-5999") | .project')"
 rm -f "$BUS_HOME/projects.json"
 lc role release --clear >/dev/null
+
+# --- team rules: init, policy, ownerless work, review gates, decisions ---
+# Policy seats drop the harness pins; PO/PR/PD override owner/review/decisions.
+pol() { AGENT_BUS_BRANCH=feature/salt-7700-pol AGENT_BUS_SESSION="$1" AGENT_BUS_TOOL=opencode AGENT_BUS_WT="w$1" \
+  AGENT_BUS_POLICY_OWNER="${PO:-}" AGENT_BUS_POLICY_REVIEW="${PR:-}" AGENT_BUS_POLICY_DECISIONS="${PD:-}" "$BIN" "${@:2}"; }
+P1=$(pol p1 whoami | awk '/^seat/{print $2}'); P2=$(pol p2 whoami | awk '/^seat/{print $2}')
+pol p1 who >/dev/null; pol p2 who >/dev/null
+# The repo's rules file lives in the bus home for the test, never the checkout.
+RF="$BUS_HOME/repo-policy.json"; export AGENT_BUS_REPO_POLICY="$RF"
+# defaults, nudge, init --set
+assert_has "defaults refuse ownerless work" "owner = refuse" "$(pol p1 init --show)"
+assert_has "an unset repo nudges the agent to ask its user" "no team rules are set" "$(pol p3 digest)"
+out=$(pol p1 init --set owner=bogus 2>&1 || true)
+assert_has "init rejects bad values" "'bogus' is not a valid owner" "$out"
+out=$(pol p1 init --set owner=refuse,review=requester,ask_lead=scope,disagreement,decisions=on)
+assert_has "init --set saves the rules" "saved to" "$out"
+assert_eq "ask_lead keeps its commas" "scope,disagreement" "$(jq -r .policy.ask_lead "$RF")"
+assert_lacks "a set repo no longer nudges" "no team rules" "$(pol p4 digest)"
+assert_has "orientation states the rules" "work items need a recipient" "$(pol p5 digest)"
+assert_has "AGENT_BUS_POLICY_* overrides the repo" "owner = lead" "$(PO=lead pol p1 init --show)"
+assert_has "guide teaches the patterns" "Hand work to someone specific" "$(pol p1 guide)"
+assert_has "status shows the rules" "rules here:" "$(pol p1 status)"
+# ownerless work: refused with suggestions, or given to the lead
+out=$(pol p1 post --to @here --state needs-review -m '# nobody owns me' 2>&1 || true)
+assert_has "a broadcast work item with no supervisor is refused" "has no owner" "$out"
+assert_has "the refusal suggests a live lane peer" "--to $P2" "$out"
+assert_has "and the lead" "--to @lead" "$out"
+assert_has "messages still broadcast" "posted" "$(pol p1 post --to @here -m '# just so you know')"
+out=$(PO=lead pol p1 post --to @here --state blocked -m '# lead owns me' 2>&1)
+assert_has "owner=lead gives it to the lead" "the lead owns this" "$out"
+assert_eq "the lead owns it in snapshot" "lead" \
+  "$("$BIN" snapshot | jq -r '.open[] | select(.subject == "lead owns me") | .owner')"
+# review gate: whoever asked accepts the work
+hid=$(pol p1 post --to "$P2" --state handoff -m '# build the card' | idof)
+assert_eq "assigned work records its reviewer" "$P1" "$(tail -n 1 "$BUS_HOME/ledger.jsonl" | jq -r .review)"
+out=$(pol p2 resolve "$hid" --reason done -m "built")
+assert_has "done on gated work submits it for review" "submitted $hid for review by $P1" "$out"
+out=$(pol p2 post --re "$hid" --close done --to "$P1" --state done -m x 2>&1 || true)
+assert_has "the doer cannot close gated work with post either" "needs review by $P1" "$out"
+rid=$(pol p1 read --peek | sed -n 's/^ *id: //p' | tail -n 1)
+assert_has "the reviewer gets a review item" "review: build the card" "$(pol p1 read --peek)"
+out=$(pol p2 review "$rid" --approve 2>&1 || true)
+assert_has "nobody approves their own work" "can't review it" "$out"
+out=$(pol p1 review "$rid" --changes 2>&1 || true)
+assert_has "changes need notes" "say what to fix" "$out"
+assert_has "changes send it back" "sent back to $P2" "$(pol p1 review "$rid" --changes -m 'add an empty state')"
+assert_has "the doer gets the notes" "changes requested: build the card" "$(pol p2 read --peek)"
+cid=$(pol p2 read --peek | sed -n 's/^ *id: //p' | tail -n 1)
+assert_has "resubmitting goes back to the same reviewer" "for review by $P1" "$(pol p2 resolve "$cid" --reason done)"
+rid=$(pol p1 read --peek | sed -n 's/^ *id: //p' | tail -n 1)
+assert_has "approval closes it" "approved: build the card" "$(pol p1 review "$rid" --approve)"
+assert_lacks "nothing from the loop stays open" "build the card" "$(pol p1 triage)"
+# a reviewer who has gone hands the review to the lead
+hid=$(pol p1 post --to "$P2" --state handoff --review opencode/wgone.1234 -m '# orphan review' | idof)
+assert_has "a gone reviewer is replaced by the lead" "for review by @lead" "$(pol p2 resolve "$hid" --reason done)"
+assert_has "the lead sees it as a review" "review" "$("$BIN" snapshot | jq -r '.attention[].kind')"
+lrid=$("$BIN" snapshot | jq -r '.open[] | select(.review_of != null and .owner == "lead") | .id' | head -1)
+assert_has "the lead can approve" "approved: orphan review" "$(lead review "$lrid" --approve)"
+assert_has "review=none skips the gate" "resolved" \
+  "$(hid=$(PR=none pol p1 post --to "$P2" --state handoff -m '# no gate' | idof); pol p2 resolve "$hid" --reason done)"
+# decisions
+out=$(pol p1 decide "Cards ship behind the cards_v2 flag" -m "billing not ready")
+assert_has "decide records a decision" "decided for @salt-7700" "$out"
+did=$(sed -n 's/.*(\(.*\))$/\1/p' <<<"$out")
+assert_has "later sessions on the lane are told" "decisions to follow here: Cards ship behind the cards_v2 flag" "$(pol p6 digest)"
+assert_has "decisions lists them with why" "why: billing not ready" "$(pol p1 decisions)"
+pol p1 decide "Cards ship to everyone" --supersedes "$did" >/dev/null
+out=$(pol p1 decisions)
+assert_lacks "a superseded decision drops out" "cards_v2 flag" "$out"
+assert_has "its replacement shows" "Cards ship to everyone" "$out"
+assert_has "snapshot carries lane decisions" "Cards ship to everyone" "$("$BIN" snapshot | jq -r '.lanes[].decisions[]?.text')"
+assert_has "decisions are hidden when the team turned them off" "" \
+  "$(PD=off pol p7 digest | grep -c 'decisions to follow' || true)"
+rm -f "$RF"; unset AGENT_BUS_REPO_POLICY
 
 # --- snapshot: one machine-wide JSON view for viewers ---
 snap=$("$BIN" snapshot)

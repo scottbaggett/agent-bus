@@ -415,7 +415,7 @@ def seatme: {addr, scope: ((.tool // "") + "/" + (.wt // "")), session: (.sessio
 # in the worker'"'"'s worktree).
 def owns($me):
   .to == $me.addr
-  or (.to == "@lead" and is_lead($me))
+  or ((.to == "@lead" or .assign == "@lead") and is_lead($me))
   or (same_repo($me) and (.to == $me.scope or (role_holder != "" and role_holder == $me.addr)
       or (pm_for($me) and (.to == "@pm" or (sup and ((.probe // false) | not))))));
 # Broadcasts deliver context, never ownership.
@@ -1082,8 +1082,43 @@ cmd_who() {
   return 0
 }
 
+# One field of a stored packet, or empty.
+item_field() { lq '[$L[] | select(.kind == "msg" and .id == $id)][0][$f] // empty | tostring' --arg id "$1" --arg f "$2"; }
+
+# Whether `to` is a broadcast (@here, @repo, @all, @<lane>) that no PM covers:
+# no repo PM, and no PM for the target lane or the sender's lane.
+broadcast_unowned() {
+  local t="$1"
+  case "$t" in
+    @here|@repo|@all) ;;
+    @pm|@lead) return 1 ;;
+    @*) [ -n "$(role_seat "${t#@}")" ] && return 1 ;;  # a named role has a holder
+    *) return 1 ;;
+  esac
+  [ -n "$(pm_seat)" ] && return 1
+  [ -n "$LANE" ] && [ -n "$(lane_pm_seat "$LANE")" ] && return 1
+  case "$t" in @here|@repo|@all) ;; @*) [ -n "$(lane_pm_seat "${t#@}")" ] && return 1 ;; esac
+  return 0
+}
+
+# The refusal for an ownerless work item: who could take it instead.
+unowned_hint() { # state to
+  local peers
+  peers=$(seat_rows | jq -rs --arg l "$LANE" --arg rid "$REPO_ID" --arg me "$ADDR" --arg wt "$WT" \
+    --argjson cut "$(( $(now_epoch) - SEAT_TTL ))" --argjson codex_cut "$(codex_idle_cut)" --argjson now "$(now_epoch)" \
+    "$JQ_SEAT_LIVE"'[.[] | select(.repo_id == $rid and .addr != $me and buslive($cut; $codex_cut)
+        and ((.tool // "") != "lead") and (($l != "" and .lane == $l) or .wt == $wt))]
+      | sort_by(-(.epoch // 0)) | .[:5][]
+      | "  --to \(.addr)   (\(if .lane != "" then "@" + .lane + ", " else "" end)active \(($now - (.epoch // $now)) / 60 | floor)m ago)"')
+  printf 'post: a %s sent to %s has no owner — nobody supervises %s. Send it to someone who will act on it:\n%s%s  --to @lead   (the human decides)\n(team rule owner=refuse; see agent-bus init --show)' \
+    "$1" "$2" "${LANE:+lane @$LANE in }$REPO" "$peers" "${peers:+
+}"
+}
+
 cmd_post() {
   local to='' state='fyi' subject='' body='' bodyfile='' touched='[]' re='' close='' allow_claude=0
+  local review_arg='' review_of='' review=''
+
   while [ $# -gt 0 ]; do
     if [ "$1" = --allow-claude ]; then allow_claude=1; shift; continue; fi
     [ $# -ge 2 ] || die "post: $1 needs a value"
@@ -1095,6 +1130,8 @@ cmd_post() {
       --file|-f) bodyfile="$2" ;;
       --re) valid_id "$2" || die "post: --re expects a packet id like 20260101T000000Z-0a1b2c3d"; re="$2" ;;
       --close) close="$2" ;;
+      --review) review_arg="$2" ;;
+      --review-of) valid_id "$2" || die "post: --review-of expects a packet id"; review_of="$2" ;;
       --touched)
         if [ "$2" = auto ]; then
           touched=$( { git diff --name-only HEAD 2>/dev/null; git ls-files --others --exclude-standard 2>/dev/null; } \
@@ -1122,6 +1159,35 @@ cmd_post() {
     @*) [ -n "$(role_seat "${to#@}")" ] || { valid_lane "${to#@}" && lane_exists "${to#@}"; } \
           || die "post: unknown scope $to (use a seat from 'agent-bus who', a role, a lane, @here, @repo, @pm, @lead, or @all)" ;;
   esac
+  # A work item must have an owner. Sent to a broadcast that no PM covers, it
+  # would have none: policy decides whether to refuse it or give it to the lead.
+  local assign=''
+  if in_list "$state" 'needs-review blocked handoff question' && broadcast_unowned "$to"; then
+    case "$(policy_get owner)" in
+      refuse) die "$(unowned_hint "$state" "$to")" ;;
+      *) assign='@lead' ;;
+    esac
+  fi
+  # Review gate: who must accept this work once it is done. Explicit --review
+  # wins; a handoff keeps the reviewer of the item it continues; otherwise new
+  # assigned work (handoff) gets the team default — the requester, the lead,
+  # or nobody.
+  if [ "$review_arg" = none ]; then review=''
+  elif [ -n "$review_arg" ]; then
+    case "$review_arg" in @lead|*/*) review="$review_arg" ;; *) die "post: --review takes a seat, @lead or none" ;; esac
+  elif [ -n "$re" ] && [ "$close" = handed-off ] && [ -n "$(item_field "$re" review)" ]; then
+    review=$(item_field "$re" review)
+  elif [ "$state" = handoff ] && [ -z "$review_of" ]; then
+    case "$(policy_get review)" in requester) review="$ADDR" ;; lead) review='@lead' ;; esac
+  fi
+  [ "$review" = "$to" ] && review=''
+  # Closing gated work as done is the reviewer's call, not the doer's.
+  if [ "$close" = done ] && [ -n "$re" ] && [ "$TOOL" != lead ]; then
+    local gate; gate=$(item_field "$re" review)
+    if [ -n "$gate" ] && [ "$gate" != "$ADDR" ]; then
+      die "post: $re needs review by $gate before it is done — agent-bus resolve $re --reason done -m \"what you did\" submits it"
+    fi
+  fi
   if [ -n "$close" ]; then
     [ -n "$re" ] || die "post: --close needs --re <id> (the item being closed)"
     in_list "$close" "$REASONS" || die "post: --close must be one of: $REASONS"
@@ -1151,27 +1217,26 @@ cmd_post() {
     --arg repo "$REPO" --arg repo_id "$REPO_ID" --arg wt "$WT" --arg branch "$BRANCH" \
     --arg cwd "$TOP" --arg subject "${subject:0:200}" --argjson touched "$touched" \
     --arg re "$re" --arg close "$close" --arg lane "$LANE" \
-    --arg ref "$ref" \
+    --arg ref "$ref" --arg assign "$assign" --arg review "$review" --arg review_of "$review_of" \
     '{kind:"msg",id:$id,ts:$ts,epoch:$epoch,from:$from,session:$session,to:$to,state:$state,
       repo:$repo,repo_id:$repo_id,wt:$wt,branch:$branch,cwd:$cwd,subject:$subject,
       touched:$touched,re:(if $re == "" then null else $re end)}
      + (if $close == "" then {} else {close:$close} end)
      + (if $lane == "" then {} else {lane:$lane} end)
-     + (if $ref == "" then {} else {refs:[$ref]} end)')
+     + (if $ref == "" then {} else {refs:[$ref]} end)
+     + (if $assign == "" then {} else {assign:$assign} end)
+     + (if $review == "" then {} else {review:$review} end)
+     + (if $review_of == "" then {} else {review_of:$review_of} end)')
   ledger_append "$rec"
   # A reply proves the parent was seen.
   [ -n "$re" ] && mark_read "[\"$re\"]"
   [ -n "$close" ] && reset_wake
   printf 'posted %s -> %s  [%s]  id=%s\n' "$ADDR" "$to" "$state" "$id"
+  [ -n "$review" ] && printf 'when it is done, %s reviews it\n' "$review"
   [ -n "$close" ] && printf 'closed %s (%s)\n' "$re" "$close"
 
-  if in_list "$state" 'needs-review blocked handoff question'; then
-    case "$to" in @here|@repo|@all)
-      local owner; owner=$( { [ -n "$LANE" ] && lane_pm_seat "$LANE"; } || true); owner=${owner:-$(pm_seat)}
-      printf 'note: [%s] on %s is context for everyone there; its owner is %s. Address a seat or @pm to pick one.\n' \
-        "$state" "$to" "${owner:-nobody (no PM registered)}" >&2 ;;
-    esac
-  fi
+  [ "$assign" = '@lead' ] && printf 'note: nobody supervises %s, so the lead owns this (team rule owner=%s)\n' \
+    "$to" "$(policy_get owner)" >&2
 
   [ "${AGENT_BUS_NO_PUSH:-0}" = 1 ] && return 0
   local src="from another agent, not your user" sock woke=0
@@ -1206,8 +1271,81 @@ check_closable() {
   return 1
 }
 
+# ------------------------------------------------------------------ policy
+#
+# Team rules, set once with `agent-bus init` and shared through a committed
+# .agent-bus.json in the repo. Precedence: AGENT_BUS_POLICY_<KEY> env, then
+# personal ~/.agents/bus/config.json, then the repo file, then these defaults.
+#   owner     who owns a work item sent to a broadcast nobody supervises:
+#             refuse (make the sender pick a recipient) | lead | pm
+#   review    who accepts finished work: requester | lead | none
+#   ask_lead  when agents stop and ask the lead: any of scope,destructive,
+#             disagreement — or never
+#   decisions record decisions and show them at session start: on | off
+POLICY_DEFAULTS='{"owner":"refuse","review":"requester","ask_lead":"scope,destructive","decisions":"on"}'
+POLICY_KEYS='owner review ask_lead decisions'
+
+policy_valid() { # key value
+  case "$1" in
+    owner) in_list "$2" 'refuse lead pm' ;;
+    review) in_list "$2" 'requester lead none' ;;
+    decisions) in_list "$2" 'on off' ;;
+    ask_lead) [ "$2" = never ] || { local v; for v in ${2//,/ }; do in_list "$v" 'scope destructive disagreement' || return 1; done; } ;;
+    *) return 1 ;;
+  esac
+}
+# AGENT_BUS_REPO_POLICY points elsewhere (tests; trying rules out before committing).
+repo_policy_file() { printf '%s' "${AGENT_BUS_REPO_POLICY:-$TOP/.agent-bus.json}"; }
+policy_layer() { [ -f "$1" ] && jq -c '.policy // {}' "$1" 2>/dev/null || printf '{}'; }
+policy_json() {
+  local repo='{}' personal env='{}' k v
+  [ "$REPO" != - ] && repo=$(policy_layer "$(repo_policy_file)")
+  personal=$(policy_layer "$BUS/config.json")
+  for k in $POLICY_KEYS; do
+    v=$(printenv "AGENT_BUS_POLICY_$(printf '%s' "$k" | tr a-z A-Z)" || true)
+    [ -n "$v" ] && policy_valid "$k" "$v" && env=$(jq -c --arg k "$k" --arg v "$v" '.[$k] = $v' <<<"$env")
+  done
+  jq -nc --argjson d "$POLICY_DEFAULTS" --argjson r "$repo" --argjson p "$personal" --argjson e "$env" '$d + $r + $p + $e'
+}
+policy_get() { policy_json | jq -r --arg k "$1" '.[$k] // ""'; }
+# Whether anyone has set rules for this repo (or personally).
+policy_configured() {
+  { [ "$REPO" != - ] && [ -f "$(repo_policy_file)" ]; } || [ "$(policy_layer "$BUS/config.json")" != '{}' ]
+}
+# The rules as one sentence, for orientation lines and `status`.
+policy_summary() {
+  policy_json | jq -r '
+    [ (if .owner == "refuse" then "work items need a recipient (a seat or @lead)"
+       elif .owner == "lead" then "unaddressed work items go to the lead"
+       else "unaddressed work items go to the lane PM" end),
+      (if .review == "requester" then "finished work goes back to whoever asked"
+       elif .review == "lead" then "the lead accepts finished work"
+       else "done means done" end),
+      (if .ask_lead == "never" then empty
+       else "ask the lead (--to @lead) before " + (.ask_lead | split(",") | map(
+         if . == "scope" then "scope changes" elif . == "destructive" then "destructive actions"
+         else "settling agent disagreements" end) | join(", ")) end) ] | join("; ")'
+}
+
+POLICY_NUDGE='Ask your user four quick questions, then save the answers with agent-bus init --set:
+  1. owner: a work item sent to everyone (@here) has no owner. refuse (make the sender pick a recipient; recommended) | lead (send to the user) | pm (send to a lane PM)
+  2. review: who accepts finished work? requester (whoever asked; recommended) | lead | none
+  3. ask_lead: when should agents stop and ask the user? any of scope,destructive,disagreement (recommended: scope,destructive) | never
+  4. decisions: record decisions and show them to later sessions? on (recommended) | off
+Example: agent-bus init --set owner=refuse,review=requester,ask_lead=scope,destructive,decisions=on
+Then remind the user to commit .agent-bus.json so the whole team shares the rules.'
+
 orient() {
   [ "$REPO" = - ] && return 0
+  if ! policy_configured; then
+    printf 'agent-bus: no team rules are set for %s yet. %s\n' "$REPO" "$POLICY_NUDGE"
+  fi
+  orient_seat
+  policy_configured && printf 'agent-bus rules here: %s. Type /agent-bus for help.\n' "$(policy_summary)"
+  return 0
+}
+
+orient_seat() {
   if [ -z "$LANE" ]; then
     printf 'agent-bus: you are %s, not in a lane (branch %s names no ticket). If this work has a ticket or feature name, run: agent-bus lane <name>\n' \
       "$ADDR" "$BRANCH"
@@ -1221,6 +1359,13 @@ orient() {
   pm=$(lane_pm_seat "$LANE")
   printf 'agent-bus: you are %s in lane @%s (from %s) · %s open item(s) in this lane%s%s. Wrong lane? agent-bus lane <name>\n' \
     "$ADDR" "$LANE" "$LANE_SRC" "${n:-0}" "${peers:+ · peers: $peers}" "${pm:+ · lane PM: $pm}" | sanitize
+  # Decisions settled for this lane (and repo-wide): follow them, or escalate.
+  if [ "$(policy_get decisions)" = on ]; then
+    decisions_rows '' | jq -rs --argjson now "$(now_epoch)" '
+      if length == 0 then empty else
+        "agent-bus decisions to follow here: " + (.[:3] | map(.text + " (" + .by + ")") | join("; "))
+        + (if length > 3 then " · +\(length - 3) more: agent-bus decisions" else "" end) end' | sanitize
+  fi
 }
 
 cmd_read() {
@@ -1270,11 +1415,112 @@ cmd_show() {
   return 0
 }
 
+# A subject without the review-loop prefixes it may have gathered.
+base_subject() { sed -E 's/^((review|changes requested): )+//'; }
+
+# Hand finished, gated work to its reviewer as a needs-review item. A reviewer
+# whose session has ended is replaced by the lead, so nothing waits on nobody.
+submit_review() { # id reviewer note
+  local id="$1" target="$2" subj
+  [ "$target" = '@lead' ] || seat_live "$target" || target='@lead'
+  subj=$(item_field "$id" subject | base_subject)
+  cmd_post --allow-claude --re "$id" --close handed-off --to "$target" --state needs-review --review none \
+    --review-of "$id" -s "review: ${subj:0:180}" -m "${3:-Done and ready for review: $subj}" >/dev/null
+  printf 'submitted %s for review by %s — it closes when they approve it\n' "$id" "$target"
+}
+
+# `agent-bus review <id> --approve | --changes -m "..."`. <id> is the review
+# item, or the work item it reviews.
+cmd_review() {
+  local id='' verdict='' note=''
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --approve) verdict=approve; shift ;;
+      --changes) verdict=changes; shift ;;
+      -m|--message) [ $# -ge 2 ] || die "review: -m needs a value"; note="$2"; shift 2 ;;
+      -*) die "review: unknown flag $1" ;;
+      *) valid_id "$1" || die "review: not a packet id: $1"; id="$1"; shift ;;
+    esac
+  done
+  [ -n "$id" ] && [ -n "$verdict" ] || die "review: usage — agent-bus review <id> --approve | --changes -m \"what to fix\""
+  local rid
+  if [ -n "$(item_field "$id" review_of)" ]; then rid="$id"
+  else
+    rid=$(lq 'closed($L) as $c | [$L[] | select(.kind == "msg" and .review_of == $id and ($c[.id] | not)) | .id] | last // empty' --arg id "$id")
+    [ -n "$rid" ] || die "review: $id is not waiting for review"
+  fi
+  local holder reviewer subj
+  holder=$(item_field "$rid" from); reviewer=$(item_field "$rid" to); subj=$(item_field "$rid" subject | base_subject)
+  [ "$holder" = "$ADDR" ] && die "review: you did this work, so you can't review it"
+  if [ "$TOOL" != lead ] && [ "$reviewer" != "$ADDR" ]; then
+    die "review: $rid is for $reviewer to review"
+  fi
+  if [ "$verdict" = approve ]; then
+    ledger_append "$(jq -nc --arg msg "$rid" --arg by "$ADDR" --arg note "$note" --argjson epoch "$(now_epoch)" \
+      '{kind:"resolve",msg:$msg,by:$by,reason:"done",approved:true,epoch:$epoch} + (if $note == "" then {} else {note:$note} end)')"
+    reset_wake
+    printf 'approved: %s\n' "$subj"
+  else
+    [ -n "$note" ] || die "review --changes: say what to fix with -m"
+    cmd_post --allow-claude --re "$rid" --close handed-off --to "$holder" --state handoff \
+      --review "$( [ "$TOOL" = lead ] && echo @lead || echo "$ADDR")" \
+      -s "changes requested: $subj" -m "$note" >/dev/null
+    printf 'sent back to %s with your notes\n' "$holder"
+  fi
+}
+
+# Decisions: settled answers that later sessions on the lane should follow.
+cmd_decide() {
+  local text='' why='' lane="$LANE" sup='' id
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --lane) [ $# -ge 2 ] || die "decide: --lane needs a value"; lane="$2"; shift 2 ;;
+      -m|--why) [ $# -ge 2 ] || die "decide: -m needs a value"; why="$2"; shift 2 ;;
+      --supersedes) [ $# -ge 2 ] && valid_id "$2" || die "decide: --supersedes needs a decision id"; sup="$2"; shift 2 ;;
+      --repo-wide) lane=''; shift ;;
+      -*) die "decide: unknown flag $1" ;;
+      *) [ -z "$text" ] || die "decide: one decision at a time (quote it)"; text="$1"; shift ;;
+    esac
+  done
+  [ -n "$text" ] || die "decide: usage — agent-bus decide \"<decision>\" [--lane l | --repo-wide] [-m why] [--supersedes <id>]"
+  [ "$REPO" != - ] || die "decide: run this inside the repo the decision is about"
+  id="$(date -u +%Y%m%dT%H%M%SZ)-$(head -c4 /dev/urandom | xxd -p)"
+  ledger_append "$(jq -nc --arg id "$id" --arg text "${text:0:300}" --arg why "${why:0:2000}" --arg lane "$lane" \
+    --arg repo "$REPO" --arg repo_id "$REPO_ID" --arg by "$ADDR" --arg sup "$sup" --argjson epoch "$(now_epoch)" \
+    '{kind:"decision",id:$id,text:$text,lane:$lane,repo:$repo,repo_id:$repo_id,by:$by,epoch:$epoch}
+     + (if $why == "" then {} else {why:$why} end) + (if $sup == "" then {} else {supersedes:$sup} end)')"
+  printf 'decided%s: %s  (%s)\n' "${lane:+ for @$lane}" "$text" "$id"
+}
+
+# Current decisions in this repo: newest first, superseded ones left out.
+decisions_rows() { # lane ('' = this lane and repo-wide, '*' = all)
+  lq '([$L[] | select(.kind == "decision" and (.supersedes // "") != "") | .supersedes] | map({(.): true}) | add // {}) as $gone
+    | [$L[] | select(.kind == "decision" and .repo_id == $me.repo_id and ($gone[.id] | not))
+        | select($lane == "*" or .lane == "" or .lane == (if $lane == "" then $me.lane else $lane end))]
+    | sort_by(-.epoch) | .[]' --arg lane "$1"
+}
+
+cmd_decisions() {
+  local lane=''
+  case "${1:-}" in
+    --lane) lane="${2:-}"; valid_lane "$lane" || die "decisions: --lane needs a lane name" ;;
+    --all) lane='*' ;;
+    '') ;;
+    *) die "decisions: usage — agent-bus decisions [--lane <l> | --all]" ;;
+  esac
+  local rows; rows=$(decisions_rows "$lane")
+  if [ -z "$rows" ]; then printf 'no decisions recorded%s\n' "${LANE:+ for @$LANE}"; return 0; fi
+  jq -r --argjson now "$(now_epoch)" '
+    def age($e): ($now - $e) as $s | if $s < 3600 then "\($s / 60 | floor)m" elif $s < 86400 then "\($s / 3600 | floor)h" else "\($s / 86400 | floor)d" end;
+    "\(if .lane == "" then "repo" else "@" + .lane end)  \(.text)\n    — \(.by), \(age(.epoch)) ago  (\(.id))\(if .why then "\n    why: " + .why else "" end)"' <<<"$rows" | sanitize
+}
+
 cmd_resolve() {
-  local reason='' ids='' closed=0 id
+  local reason='' ids='' closed=0 id note=
   while [ $# -gt 0 ]; do
     case "$1" in
       --reason) [ $# -ge 2 ] || die "resolve: --reason needs a value"; reason="$2"; shift 2 ;;
+      -m|--message) [ $# -ge 2 ] || die "resolve: -m needs a value"; note="$2"; shift 2 ;;
       -*) die "resolve: unknown flag $1" ;;
       *) ids="$ids $1"; shift ;;
     esac
@@ -1287,6 +1533,14 @@ cmd_resolve() {
   for id in $ids; do
     if ! valid_id "$id"; then printf 'agent-bus: %s — not a packet id\n' "$id" >&2; continue; fi
     check_closable "$id" || continue
+    # Gated work isn't closed by the one who did it: done hands it to the
+    # reviewer, who approves (closes) it or sends it back.
+    local gate; gate=$(item_field "$id" review)
+    if [ "$reason" = done ] && [ -n "$gate" ] && [ "$gate" != "$ADDR" ] && [ "$TOOL" != lead ]; then
+      submit_review "$id" "$gate" "$note"
+      closed=1
+      continue
+    fi
     ledger_append "$(jq -nc --arg msg "$id" --arg by "$ADDR" --arg reason "$reason" --argjson epoch "$(now_epoch)" \
       '{kind:"resolve",msg:$msg,by:$by,reason:$reason,epoch:$epoch}')"
     printf 'resolved %s (%s)\n' "$id" "$reason"
@@ -1607,13 +1861,14 @@ snapshot_json() {
     | [$L[] | select(.kind == "msg" and sup and ($c[.id] | not) and ((.probe // false) | not))
         | . + {lane: item_lane($fm)}
         | (.repo_id // "") as $rid | ($lanepms[$rid] // {}) as $lp | .id as $id
-        | (if .to == "@lead" then "lead"
+        | (if .to == "@lead" or .assign == "@lead" then "lead"
            elif ((.to // "") | startswith("@")) then
              ([(($roles[$rid] // {})[.to[1:]] // empty), (.to[1:] | $lp[.] // empty), ($lp[.lane] // empty),
                ($pms[$rid] // empty), "(no PM)"] | first)
            else .to end) as $o
         | {id, epoch: (.epoch // 0), from, to, state, subject: (.subject // ""), repo: (.repo // "-"),
            repo_id: $rid, lane, owner: $o, branch: (.branch // ""),
+           review: (.review // null), review_of: (.review_of // null),
            gone: ($o != "lead" and (live($o) | not)),
            stale: ((.epoch // 0) <= $now - $stale),
            unread: ((($by[$o].read // null) != null) and (($by[$o].read | index($id)) == null)
@@ -1631,6 +1886,10 @@ snapshot_json() {
     | ($seats | map(select(.lane != "")) | group_by((.repo_id // "") + ":" + .lane)
        | map({key: (((.[0].repo_id) // "") + ":" + .[0].lane), value: .}) | from_entries) as $seatsByLane
     | ([$byLane, $seatsByLane] | map(keys) | add | unique) as $keys
+    | ([$L[] | select(.kind == "decision" and (.supersedes // "") != "") | .supersedes] | map({(.): true}) | add // {}) as $gone
+    | ([$L[] | select(.kind == "decision" and ($gone[.id] | not))]
+       | group_by((.repo_id // "") + ":" + (.lane // "")) | map({key: ((.[0].repo_id // "") + ":" + (.[0].lane // "")),
+           value: (sort_by(-.epoch) | map({id, text, why: (.why // null), by, epoch}))}) | from_entries) as $dec
     | [$keys[] | . as $k | ($byLane[$k] // []) as $items | ($seatsByLane[$k] // []) as $ls
         | ($k | split(":")) as $kp | $kp[0] as $rid | ($kp[1:] | join(":")) as $lane
         | ($lr[$k] // {state: "open"}) as $row
@@ -1643,6 +1902,7 @@ snapshot_json() {
            oldest: ($items | map(.epoch) | min // null), last: $last,
            seats: ($ls | map(.addr)), pm: (($lanepms[$rid] // {})[$lane] // null),
            branch: ($act[$k].branch // ""), cwd: ($act[$k].cwd // ""), merged: $isMerged,
+           decisions: ($dec[$k] // []),
            health: (if $row.state == "parked" then "parked"
                     elif $lane == "unfiled" then "unfiled"
                     elif ($items | length) > 0 and $isMerged then "merged"
@@ -1655,8 +1915,13 @@ snapshot_json() {
        open: $open, lanes: $lanes,
        attention: (
          [$open[] | select(.owner == "lead")
-           | {kind: "needs-you", repo, lane, id, epoch, text: "\(.from) asks you: \(.subject)",
-              fix: "agent-bus resolve \(.id) --reason done"}]
+           | if .review_of then
+               {kind: "review", repo, lane, id, epoch, text: "\(.from) finished: \(.subject | sub("^review: "; ""))",
+                fix: "agent-bus review \(.id) --approve   (or --changes -m \"...\")"}
+             else
+               {kind: "needs-you", repo, lane, id, epoch, text: "\(.from) asks you: \(.subject)",
+                fix: "agent-bus resolve \(.id) --reason done"}
+             end]
          + [$open[] | select(.unread and (.gone | not) and .owner != "lead")
            | {kind: "not-picked-up", repo, lane, id, epoch,
               text: "\(.owner) has not read \(.state) from \(.from): \(.subject)",
@@ -1690,7 +1955,7 @@ snapshot_json() {
                 text: "PM \(if .lane then "for @" + .lane else "for the repo" end) is \(.value), which is no longer running",
                 fix: "agent-bus role pm\(if .lane then " --lane " + .lane else "" end) --force   (from the new supervisor)"}))
          ),
-       recent: [$L[] | select(.kind == "msg" or .kind == "resolve" or .kind == "delivery" or .kind == "lane" or .kind == "file")]
+       recent: [$L[] | select(.kind == "msg" or .kind == "resolve" or .kind == "delivery" or .kind == "lane" or .kind == "file" or .kind == "decision")]
          | .[-100:] | reverse
          | map(if .kind == "msg" then
                  {kind, id, epoch: (.epoch // 0), from, to, state, subject: (.subject // ""), repo: (.repo // "-"),
@@ -1700,6 +1965,8 @@ snapshot_json() {
                elif .kind == "lane" then
                  {kind, id: (.lane + "@" + (.epoch | tostring)), epoch: (.epoch // 0), from: .by, lane,
                   state: (.state // null), reason: (.reason // ""), subject: (.title // "")}
+               elif .kind == "decision" then
+                 {kind, id, epoch: (.epoch // 0), from: .by, lane: (.lane // ""), subject: .text, reason: (.why // "")}
                elif .kind == "file" then
                  {kind, id: .msg, epoch: (.epoch // 0), from: .by, lane, subject: ($subj[.msg] // "")}
                else
@@ -1882,7 +2149,7 @@ cmd_gc() {
   # (parked, titles, sweeps) that must outlive the 14-day window.
   local old='(fromjson? // {}) as $j | ($j.epoch | type) == "number" and $j.epoch < $cut
              and (($j.kind == "msg" and $open[$j.id // ""]) | not)
-             and ($j.kind != "lane" and $j.kind != "file")'
+             and ($j.kind != "lane" and $j.kind != "file" and $j.kind != "decision")'
   jq -rR --argjson cut "$cut" --argjson open "$open" ". as \$raw | select($old) | \$raw" \
     "$LEDGER" >"$LEDGER.drop" 2>/dev/null || : >"$LEDGER.drop"
   n_rot=$(grep -c . "$LEDGER.drop" 2>/dev/null || true)
@@ -1969,6 +2236,187 @@ cmd_doctor() {
          elif .tool == "grok" then ", webhook delivery\(if (.grok_secret_env // "") != "" then " (secret: $\(.grok_secret_env))" else "" end)"
          else "" end)"' | sanitize
   return 0
+}
+
+# ---------------------------------------------------------------- onboarding
+
+# Write policy keys into a policy file, merging with what is there.
+policy_write() { # file json
+  local f="$1" cur='{}'
+  [ -f "$f" ] && cur=$(jq -c . "$f" 2>/dev/null || echo '{}')
+  jq --argjson p "$2" '.policy = ((.policy // {}) + $p)' <<<"$cur" >"$f.tmp" && mv "$f.tmp" "$f"
+}
+
+# Parse "k=v,k=v" into JSON. ask_lead's own value may hold commas
+# (ask_lead=scope,destructive), so a bare word continues the previous key.
+policy_parse() {
+  local out='{}' part k='' v parts
+  IFS=, read -r -a parts <<<"$1"
+  for part in "${parts[@]}"; do
+    if [[ "$part" == *=* ]]; then
+      k=${part%%=*}; v=${part#*=}
+      in_list "$k" "$POLICY_KEYS" || die "init: unknown setting '$k' (expected: $POLICY_KEYS)"
+    else
+      [ "$k" = ask_lead ] || die "init: '$part' has no key — use key=value"
+      v="$(jq -r --arg k "$k" '.[$k]' <<<"$out"),$part"
+    fi
+    out=$(jq -c --arg k "$k" --arg v "$v" '.[$k] = $v' <<<"$out")
+  done
+  while IFS=$'\t' read -r k v; do
+    [ -n "$k" ] || continue
+    policy_valid "$k" "$v" || die "init: '$v' is not a valid $k"
+  done < <(jq -r 'to_entries[] | "\(.key)\t\(.value)"' <<<"$out")
+  printf '%s' "$out"
+}
+
+# Ask one numbered question on the terminal; Enter takes the first option.
+ask_choice() { # prompt option...
+  local prompt="$1" i=1 o a; shift
+  printf '\n%s\n' "$prompt" >&2
+  for o in "$@"; do printf '  %d) %s\n' "$i" "$o" >&2; i=$((i + 1)); done
+  printf 'choice [1]: ' >&2
+  read -r a </dev/tty || a=''
+  [[ "$a" =~ ^[0-9]+$ ]] && ((a >= 1 && a <= $#)) || a=1
+  printf '%s' "$a"
+}
+
+# `agent-bus init`: install hooks, set the team's rules, explain the patterns.
+cmd_init() {
+  local set='' personal=0 show=0 hooks=1 target pj
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --set) [ $# -ge 2 ] || die "init: --set needs key=value[,key=value]"; set="$2"; shift ;;
+      --personal) personal=1 ;;
+      --show) show=1 ;;
+      --no-hooks) hooks=0 ;;
+      *) die "init: usage — agent-bus init [--set k=v,...] [--personal] [--show] [--no-hooks]" ;;
+    esac
+    shift
+  done
+  if ((personal)); then target="$BUS/config.json"
+  else
+    [ "$REPO" != - ] || die "init: run this inside the repo whose rules you are setting (or use --personal)"
+    target=$(repo_policy_file)
+  fi
+  if ((show)); then
+    printf 'rules for %s%s:\n' "$REPO" "$(policy_configured || echo ' (not set — these are the defaults)')"
+    policy_json | jq -r 'to_entries[] | "  \(.key) = \(.value)"'
+    printf '\n%s\n' "$(policy_summary)"
+    return 0
+  fi
+  if [ -n "$set" ]; then
+    pj=$(policy_parse "$set")
+    policy_write "$target" "$pj"
+    printf 'saved to %s: %s\n' "$target" "$(policy_summary)"
+    ((personal)) || printf 'commit %s so the whole team shares these rules\n' "$(basename "$target")"
+    return 0
+  fi
+  [ -t 0 ] || die "init: no terminal to ask on — use agent-bus init --set k=v,... (see agent-bus init --show)"
+
+  printf 'agent-bus setup for %s\n' "$REPO"
+  if ((hooks)); then
+    local flags=''
+    [ -d "$HOME/.claude" ] && flags="$flags --claude"
+    { command -v opencode >/dev/null 2>&1 || [ -d "$HOME/.config/opencode" ]; } && flags="$flags --opencode"
+    { [ -d "${CODEX_HOME:-$HOME/.codex}" ] && command -v python3 >/dev/null 2>&1; } && flags="$flags --codex"
+    local inst; inst="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)/install-hooks.sh"
+    if [ -n "$flags" ] && [ -x "$inst" ]; then
+      if [ "$(ask_choice "Install agent-bus into the agents found on this machine ($flags )?" "Yes" "Skip")" = 1 ]; then
+        # shellcheck disable=SC2086
+        "$inst" $flags
+      fi
+    fi
+  fi
+
+  local owner review ask decisions a
+  a=$(ask_choice "1. A work item sent to everyone (@here) has no owner. What should happen?" \
+    "Refuse it and make the agent pick a recipient (recommended)" "Send it to me (the lead)" "Send it to the lane's PM agent")
+  owner=$(printf 'refuse lead pm' | cut -d' ' -f"$a")
+  a=$(ask_choice "2. When an agent finishes work, who accepts it?" \
+    "Whoever asked for it (recommended)" "Me, always" "Nobody — done means done")
+  review=$(printf 'requester lead none' | cut -d' ' -f"$a")
+  a=$(ask_choice "3. When should agents stop and ask you?" \
+    "Scope changes and destructive actions (recommended)" "Scope changes, destructive actions and agent disagreements" \
+    "Only scope changes" "Never — let them decide")
+  ask=$(printf 'scope,destructive scope,destructive,disagreement scope never' | cut -d' ' -f"$a")
+  a=$(ask_choice "4. Should agents record decisions so later sessions follow them?" "Yes (recommended)" "No")
+  decisions=$(printf 'on off' | cut -d' ' -f"$a")
+  pj=$(jq -nc --arg o "$owner" --arg r "$review" --arg a "$ask" --arg d "$decisions" \
+    '{owner:$o, review:$r, ask_lead:$a, decisions:$d}')
+  policy_write "$target" "$pj"
+  printf '\nsaved to %s\n' "$target"
+  ((personal)) || printf 'commit it so the whole team shares these rules: git add %s\n' "$(basename "$target")"
+  printf '\nThe rules: %s.\n\n' "$(policy_summary)"
+  cmd_guide worker
+  printf '\nIn any agent session, type /agent-bus to see where you stand and what to do next.\n'
+}
+
+# `agent-bus guide [worker|supervisor|reviewer]`: the patterns, short.
+cmd_guide() {
+  local role="${1:-worker}"
+  case "$role" in
+    worker) cat <<'EOF'
+How to work on the bus (worker):
+  1. Your lane comes from your branch (feature/salt-8947-… is @salt-8947). Check: agent-bus status
+  2. Work that waits on you arrives on its own at each prompt. See it again: agent-bus read
+  3. Hand work to someone specific, never to everyone:
+       agent-bus post --to <seat|@lead> --state needs-review --touched auto -m "# what, why, what's left"
+  4. Finished something you were given? Close it with a reason (it may go back to whoever asked):
+       agent-bus resolve <id> --reason done
+  5. Passing your work on? Close and hand over in one step:
+       agent-bus post --re <id> --close handed-off --to <seat> --state handoff -m "..."
+  6. Need the human? agent-bus post --re <id> --close escalated --to @lead --state question -m "..."
+  7. Before editing a file another agent may touch: agent-bus claim <path>
+  8. Stopping? agent-bus offboard
+EOF
+      ;;
+    supervisor) cat <<'EOF'
+How to supervise a lane:
+  1. agent-bus role pm --lane <lane>     you get every work item from that lane
+  2. agent-bus attention                 what needs a decision, with the fix for each
+  3. agent-bus triage --lane <lane>      open work by owner; GONE owners first
+  4. For each item: close it with a reason, or hand it on. Never leave it.
+  5. A finished lane: agent-bus lane <lane> done --reason merged
+  6. Record what you settle: agent-bus decide "<decision>" --lane <lane> -m "why"
+EOF
+      ;;
+    reviewer) cat <<'EOF'
+How to review:
+  1. Items waiting for your review arrive like any other work: agent-bus read
+  2. Look at the work (agent-bus show <id> lists what it touched), then:
+       agent-bus review <id> --approve
+       agent-bus review <id> --changes -m "what to fix"
+  3. You can't approve your own work.
+EOF
+      ;;
+    *) die "guide: worker | supervisor | reviewer" ;;
+  esac
+}
+
+# `agent-bus status`: where this seat stands and what to do next. The skill's
+# front door; cheap enough to run at any time.
+cmd_status() {
+  local mine sent peers pm n
+  orient_seat
+  mine=$(lq 'closed($L) as $c | file_map($L) as $fm
+    | [$L[] | select(.kind == "msg" and sup and ($c[.id] | not) and owns($me) and (authored($me) | not))]
+    | sort_by(-(.epoch // 0)) | .[] | "\(.id)\t\(.state)\t\(.from)\t\(.subject // "")"')
+  sent=$(lq 'closed($L) as $c
+    | [$L[] | select(.kind == "msg" and sup and ($c[.id] | not) and authored($me))] | length')
+  n=$(grep -c . <<<"$mine" || true)
+  if [ "${n:-0}" -gt 0 ]; then
+    printf '\n%s item(s) wait on you:\n' "$n"
+    head -n 5 <<<"$mine" | while IFS=$'\t' read -r id st from subj; do
+      printf '  [%s] %s — from %s  (%s)\n' "$st" "$subj" "$from" "$id"
+    done | sanitize
+    ((n > 5)) && printf '  …and %s more: agent-bus read --all\n' $((n - 5))
+  else
+    printf '\nnothing waits on you\n'
+  fi
+  [ "${sent:-0}" -gt 0 ] && printf '%s item(s) you sent are still open\n' "$sent"
+  if policy_configured; then printf '\nrules here: %s\n' "$(policy_summary)"
+  else printf '\nno team rules set for %s yet — run agent-bus init (or ask your agent to set them up)\n' "$REPO"; fi
+  printf '\nnext: agent-bus read · post --to <seat|@lead> … · resolve <id> --reason done · guide\n'
 }
 
 usage() {
@@ -2078,6 +2526,12 @@ case "$cmd" in
   log) cmd_log "$@" ;;
   snapshot) cmd_snapshot ;;
   lanes) cmd_lanes "$@" ;;
+  init) cmd_init "$@" ;;
+  status) touch_seat; cmd_status ;;
+  guide) cmd_guide "$@" ;;
+  review) touch_seat; cmd_review "$@" ;;
+  decide) touch_seat; cmd_decide "$@" ;;
+  decisions) cmd_decisions "$@" ;;
   attention) cmd_attention "$@" ;;
   doctor) cmd_doctor ;;
   gc) cmd_gc "$@" ;;

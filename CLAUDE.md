@@ -24,9 +24,9 @@ Reading a work item does not close it; only `resolve` or `post --close` does.
   (`feat:`, `fix:`, `docs:`, `test:`, `chore:`, …). See `.cursor/rules/conventional-commits.mdc`.
 - Runtime state stays in `~/.agents/bus/` — never commit `ledger.jsonl`, `msg/`,
   `seats/`, `claims/`, or `state/`.
-- Tests: `./test/agent-bus.test.sh` and `python3 test/codex-queue.test.py`
+- Tests: `./test/agent-bus.test.sh`, `./test/install.test.sh` and `python3 test/codex-queue.test.py`
 - Per-host delivery checks the suite cannot make: [test/MANUAL.md](test/MANUAL.md)
-- Install / refresh lifecycle hooks: `./install-hooks.sh` (Claude, OpenCode); `./install-hooks.sh --codex` (Codex)
+- Run your checkout as the live CLI: `./install.sh --from .`. Re-wire hooks: `agent-bus hooks`
 
 ## Coordinating with other seats
 
@@ -70,7 +70,9 @@ Rules:
 |---|---|
 | `bin/agent-bus` | CLI |
 | `lib/codex_queue.py` | Bounded, opt-in Codex queue adapter |
-| `install-hooks.sh` | Claude/OpenCode installer; `--codex` lifecycle installer |
+| `install.sh` | One-line installer, update and uninstall (`curl … \| bash`) |
+| `install-hooks.sh` | Wires hosts: Claude hooks, OpenCode plugin, Codex hooks, skills (`agent-bus hooks`) |
+| `packaging/homebrew/` | Homebrew formula, copied to the tap at each release |
 | `lib/codex_hook.py` | Codex session registration and cleanup |
 | `plugins/agent-bus/` | OpenCode plugin |
 | `app/` | macOS menu bar app for the lead (`app/build.sh`): attention, lanes, cleanup; reads `agent-bus snapshot` |

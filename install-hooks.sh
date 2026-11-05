@@ -14,6 +14,18 @@ set -euo pipefail
 MARKER='# agent-bus-managed'
 CODEX_MARKER='# agent-bus-codex-managed'
 ROOT="$(cd "$(dirname "$0")" && pwd)"
+# Hooks and skills must outlive an upgrade: when this copy is the installer's
+# current version, or a Homebrew keg, point them at the stable path instead.
+stable_root() {
+  local real share="${AGENT_BUS_INSTALL_DIR:-$HOME/.local/share/agent-bus}"
+  real=$(cd "$ROOT" && pwd -P)
+  if [ -d "$share/current" ] && [ "$(cd "$share/current" && pwd -P)" = "$real" ]; then
+    printf '%s' "$share/current"
+  elif [[ "$real" == */Cellar/agent-bus/*/libexec ]]; then
+    printf '%s' "${real%%/Cellar/*}/opt/agent-bus/libexec"
+  else printf '%s' "$ROOT"; fi
+}
+ROOT=$(stable_root)
 if [ -n "${AGENT_BUS_BIN:-}" ]; then BIN="$AGENT_BUS_BIN"
 elif [ -x "$ROOT/bin/agent-bus" ]; then BIN="$ROOT/bin/agent-bus"
 else BIN="$(command -v agent-bus || echo "$HOME/.local/bin/agent-bus")"; fi
@@ -57,7 +69,7 @@ add_group() { # <event> <command>
 }
 
 install_claude() {
-  local f; [ -f "$CLAUDE_SETTINGS" ] || echo '{}' >"$CLAUDE_SETTINGS"
+  local f; mkdir -p "$(dirname "$CLAUDE_SETTINGS")"; [ -f "$CLAUDE_SETTINGS" ] || echo '{}' >"$CLAUDE_SETTINGS"
   f=$(real "$CLAUDE_SETTINGS"); backup "$f"
   local out; out=$(strip_marked <"$f")
   if ((!uninstall)); then

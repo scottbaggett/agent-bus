@@ -255,7 +255,7 @@ unmatched lanes fall under their repo:
     that ends with owned items unread.
   - OpenCode: the plugin polls `agent-bus stop-hook` while the session is idle
     and resumes it with the result.
-  - Codex Desktop: install `./install-hooks.sh --codex` and review/trust its
+  - Codex Desktop: install `agent-bus hooks --codex` and review/trust its
     hooks. SessionStart automatically registers the host-provided session UUID
     and cwd; UserPromptSubmit/Stop refresh it. Manual `agent-bus codex enable`
     also works without hooks. The seat retains its thread UUID and a queue-capable

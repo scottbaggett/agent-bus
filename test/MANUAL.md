@@ -136,7 +136,7 @@ an approximately ten-second cadence.
 
 ## T4 — Codex lifecycle integration
 
-Install with `./install-hooks.sh --codex`, then review/trust the four hooks in
+Install with `agent-bus hooks --codex`, then review/trust the four hooks in
 Codex. Preserve unrelated hook definitions and trust settings. With a disposable
 chat, verify actual startup registration without running `codex enable`, a
 nonzero `last_hook`, and a valid queue binary in `codex status`. Verify a queued

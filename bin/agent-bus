@@ -587,14 +587,17 @@ push_targets() {
 
 # Opt in from the actual Desktop chat. A plain CLI session is pull-only.
 # Resolve the helper through the installed CLI symlink, not the caller's cwd.
-codex_helper() {
+codex_helper() { printf '%s/lib/codex_queue.py' "$(self_root)"; }
+
+# The directory this CLI lives in (the checkout or install), through symlinks.
+self_root() {
   local src="${BASH_SOURCE[0]}" dir
   while [ -L "$src" ]; do
     dir=$(cd "$(dirname "$src")" && pwd)
     src=$(readlink "$src")
     [[ "$src" = /* ]] || src="$dir/$src"
   done
-  printf '%s/lib/codex_queue.py' "$(cd "$(dirname "$src")/.." && pwd)"
+  cd "$(dirname "$src")/.." && pwd
 }
 
 cmd_codex() {
@@ -1010,7 +1013,66 @@ release_mine() {
 
 # ---------------------------------------------------------------- commands
 
-cmd_version() { printf 'agent-bus %s\n' "$VERSION"; }
+cmd_version() {
+  local root tag; root=$(self_root)
+  if [ -f "$root/.installed-version" ]; then tag=$(cat "$root/.installed-version")
+  elif [ -e "$root/.git" ]; then tag="checkout $(git -C "$root" describe --tags --always --dirty 2>/dev/null || echo '?')"
+  fi
+  printf 'agent-bus %s%s\n' "$VERSION" "${tag:+ ($tag)}"
+  printf 'from     %s\n' "$root"
+}
+
+INSTALL_URL="https://raw.githubusercontent.com/${AGENT_BUS_REPO:-scottbaggett/agent-bus}/main/install.sh"
+
+# Agents on this machine, as install-hooks.sh flags.
+host_flags() {
+  local f=''
+  { [ -d "$HOME/.claude" ] || command -v claude >/dev/null 2>&1; } && f="$f --claude"
+  { [ -d "$HOME/.config/opencode" ] || command -v opencode >/dev/null 2>&1; } && f="$f --opencode"
+  { [ -d "${CODEX_HOME:-$HOME/.codex}" ] && command -v python3 >/dev/null 2>&1; } && f="$f --codex"
+  printf '%s' "$f"
+}
+
+# `agent-bus hooks [flags]`: (re)wire the agents on this machine to this CLI.
+# No host flags: every agent found here.
+cmd_hooks() {
+  local a hosts=0
+  for a in "$@"; do case "$a" in --claude|--opencode|--codex) hosts=1 ;; esac; done
+  # shellcheck disable=SC2046
+  if ((hosts)); then "$(self_root)/install-hooks.sh" "$@"
+  else "$(self_root)/install-hooks.sh" "$@" $(host_flags); fi
+}
+
+# Homebrew owns its keg: upgrades and removal go through brew.
+is_brew() { [[ "$(cd "$(self_root)" && pwd -P)" == */Cellar/agent-bus/* ]]; }
+
+# `agent-bus update [--version <tag>]`: fetch and install a release. A
+# checkout updates with git instead, so a developer's copy is never replaced.
+cmd_update() {
+  local root; root=$(self_root)
+  is_brew && die "update: installed with Homebrew — brew upgrade agent-bus"
+  if [ -e "$root/.git" ]; then
+    die "update: this agent-bus runs from a checkout ($root) — git pull there, or install releases with: curl -fsSL $INSTALL_URL | bash"
+  fi
+  if [ -x "${AGENT_BUS_INSTALLER:-}" ]; then "$AGENT_BUS_INSTALLER" "$@"
+  else curl -fsSL "$INSTALL_URL" | bash -s -- "$@"; fi
+}
+
+# `agent-bus uninstall`: hooks, skills, the link and the install dir. Never the bus.
+cmd_uninstall() {
+  local root; root=$(self_root)
+  if is_brew; then
+    "$root/install-hooks.sh" --uninstall --claude --opencode --codex || true
+    printf 'hooks removed; finish with: brew uninstall agent-bus\n'; return 0
+  fi
+  if [ -e "$root/.git" ]; then
+    "$root/install-hooks.sh" --uninstall --claude --opencode --codex || true
+    printf 'hooks removed; this CLI is a checkout (%s) — remove its link from your PATH yourself\n' "$root"
+    return 0
+  fi
+  if [ -x "$root/install.sh" ]; then "$root/install.sh" --uninstall
+  else die "uninstall: no install.sh next to this CLI ($root)"; fi
+}
 
 cmd_whoami() {
   local pm; pm=$(pm_seat)
@@ -2194,17 +2256,17 @@ cmd_doctor() {
   local cs="${AGENT_BUS_CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
   if jq -e '[.hooks // {} | .. | .command? // empty | select(contains("agent-bus") and contains("stop-hook"))] | length > 0' \
     "$cs" >/dev/null 2>&1; then printf '  claude    ok (hooks in %s)\n' "$cs"
-  else printf '  claude    not installed — ./install-hooks.sh --claude\n'; fi
+  else printf '  claude    not installed — agent-bus hooks --claude\n'; fi
   local op="${AGENT_BUS_OPENCODE_PLUGIN:-$HOME/.config/opencode/plugins/agent-bus/index.ts}"
-  local src; src="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)/plugins/agent-bus/index.ts"
-  if [ ! -f "$op" ]; then printf '  opencode  not installed — ./install-hooks.sh --opencode\n'
-  elif [ -f "$src" ] && ! cmp -s "$src" "$op"; then printf '  opencode  STALE — installed plugin differs from this checkout; re-run ./install-hooks.sh --opencode\n'
+  local src; src="$(self_root)/plugins/agent-bus/index.ts"
+  if [ ! -f "$op" ]; then printf '  opencode  not installed — agent-bus hooks --opencode\n'
+  elif [ -f "$src" ] && ! cmp -s "$src" "$op"; then printf '  opencode  STALE — installed plugin differs from this checkout; re-run agent-bus hooks --opencode\n'
   else printf '  opencode  ok (plugin)\n'; fi
   local ch="${AGENT_BUS_CODEX_SETTINGS:-${CODEX_HOME:-$HOME/.codex}/hooks.json}"
   if jq -e '[.hooks // {} | .. | .command? // empty | select(contains("# agent-bus-codex-managed"))] | length > 0' \
     "$ch" >/dev/null 2>&1; then
     printf '  codex     lifecycle hooks installed (review/trust new hooks in Codex)\n'
-  else printf '  codex     manual registration — ./install-hooks.sh --codex for lifecycle hooks\n'; fi
+  else printf '  codex     manual registration — agent-bus hooks --codex for lifecycle hooks\n'; fi
   local grok_n
   grok_n=$(seat_rows | jq -r --arg rid "$REPO_ID" \
     'select(.tool == "grok" and .repo_id == $rid) | .addr' | wc -l | tr -d ' ')
@@ -2316,11 +2378,8 @@ cmd_init() {
 
   printf 'agent-bus setup for %s\n' "$REPO"
   if ((hooks)); then
-    local flags=''
-    [ -d "$HOME/.claude" ] && flags="$flags --claude"
-    { command -v opencode >/dev/null 2>&1 || [ -d "$HOME/.config/opencode" ]; } && flags="$flags --opencode"
-    { [ -d "${CODEX_HOME:-$HOME/.codex}" ] && command -v python3 >/dev/null 2>&1; } && flags="$flags --codex"
-    local inst; inst="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)/install-hooks.sh"
+    local flags; flags=$(host_flags)
+    local inst; inst="$(self_root)/install-hooks.sh"
     if [ -n "$flags" ] && [ -x "$inst" ]; then
       if [ "$(ask_choice "Install agent-bus into the agents found on this machine ($flags )?" "Yes" "Skip")" = 1 ]; then
         # shellcheck disable=SC2086
@@ -2424,7 +2483,11 @@ usage() {
   cat <<'EOF'
 agent-bus — handoff bus for coding agents sharing repos and worktrees.
 
-  version                     print version string
+  version                     version, and where this CLI runs from
+  update [--version <tag>]    install the latest (or a given) release
+  uninstall                   remove hooks, skills and the install (not the bus)
+  hooks [--claude|--opencode|--codex] [--uninstall]
+                              (re)wire agents on this machine to this CLI
   codex enable|disable|status control or inspect this chat's queue delivery
                               enable requires python3 and a queue-capable Codex
   grok register|unregister|status  register/remove a remote Grok Bot seat and its
@@ -2503,6 +2566,12 @@ if [ "$cmd" = codex-hook ]; then
   python3 "$(dirname "$(codex_helper)")/codex_hook.py" "${BASH_SOURCE[0]}" || true
   exit 0
 fi
+# Install management needs no seat.
+case "$cmd" in
+  hooks) cmd_hooks "$@"; exit ;;
+  update|upgrade) cmd_update "$@"; exit ;;
+  uninstall) cmd_uninstall "$@"; exit ;;
+esac
 resolve_identity
 case "$cmd" in
   version|--version) cmd_version ;;

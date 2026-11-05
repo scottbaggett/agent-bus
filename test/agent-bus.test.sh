@@ -445,6 +445,9 @@ assert_has "decisions are hidden when the team turned them off" "" \
   "$(PD=off pol p7 digest | grep -c 'decisions to follow' || true)"
 rm -f "$RF"; unset AGENT_BUS_REPO_POLICY
 
+# An unlimited wake budget (the default) never reports a seat out of wakes.
+assert_lacks "budget 0 means nobody runs out of wakes" "budget" "$(AGENT_BUS_WAKE_BUDGET=0 "$BIN" snapshot | jq -r '.attention[].kind')"
+
 # --- snapshot: one machine-wide JSON view for viewers ---
 snap=$("$BIN" snapshot)
 assert_eq "snapshot is one JSON object" "object" "$(jq -r type <<<"$snap")"

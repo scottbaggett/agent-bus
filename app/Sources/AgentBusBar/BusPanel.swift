@@ -17,6 +17,8 @@ struct BusPanel: View {
     @State private var laneFilter: LaneFilter = .active
     @State private var expanded: Set<String> = []
     @State private var showAllOrphans = false
+    @State private var drafts: [String: String] = [:]
+    @State private var recordDecision: Set<String> = []
     // ImageRenderer can't draw AppKit-backed controls or scroll views, so
     // `--render` lays the list out flat and leaves the controls out.
     private let forImage: Bool
@@ -112,24 +114,58 @@ struct BusPanel: View {
     // MARK: attention
 
     @ViewBuilder private var attentionTab: some View {
-        let needs = store.attention(BusStore.needsYou)
+        let needs = store.attention(["needs-you"])
+        let reviews = store.attention(["review"])
         let stuck = store.attention(BusStore.stuck)
         let merged = store.attention(["merged"])
         let orphaned = store.attention(["orphaned"])
         let unfiled = store.attention(["unfiled"])
-        if needs.isEmpty && stuck.isEmpty && merged.isEmpty && orphaned.isEmpty && unfiled.isEmpty {
+        if needs.isEmpty && reviews.isEmpty && stuck.isEmpty && merged.isEmpty && orphaned.isEmpty && unfiled.isEmpty {
             empty("Nothing needs you. Agents ask for you with --to @lead.")
         }
 
         if !needs.isEmpty {
-            section("Needs you", "Agents asked for a decision (posted --to @lead).")
+            section("Needs you", "Agents asked for a decision (posted --to @lead). Your answer goes back to them.")
             ForEach(needs) { a in
                 card(tint: .red) {
                     Text(a.text).font(.callout)
                     meta(a)
+                    if !forImage {
+                        TextField("Your answer", text: draft(a.id), axis: .vertical)
+                            .textFieldStyle(.roundedBorder).font(.callout).lineLimit(1...4)
+                    }
                     HStack {
-                        actionButton("Done") { store.act(["resolve", a.id_ ?? "", "--reason", "done"], label: "Done") }
+                        actionButton("Answer") { answer(a) }
+                        if !forImage {
+                            Toggle("Record as decision", isOn: Binding(
+                                get: { recordDecision.contains(a.id) },
+                                set: { if $0 { recordDecision.insert(a.id) } else { recordDecision.remove(a.id) } }))
+                                .toggleStyle(.checkbox).font(.caption)
+                        }
                         actionButton("Dismiss") { store.act(["resolve", a.id_ ?? "", "--reason", "canceled"], label: "Dismissed") }
+                    }
+                }
+            }
+        }
+
+        if !reviews.isEmpty {
+            section("To review", "Finished work that waits for your approval.")
+            ForEach(reviews) { a in
+                card(tint: .purple) {
+                    Text(a.text).font(.callout).lineLimit(3)
+                    meta(a)
+                    if !forImage {
+                        TextField("What to fix (for Request changes)", text: draft(a.id), axis: .vertical)
+                            .textFieldStyle(.roundedBorder).font(.callout).lineLimit(1...4)
+                    }
+                    HStack {
+                        actionButton("Approve") { store.act(["review", a.id_ ?? "", "--approve"], label: "Approved") }
+                        actionButton("Request changes") {
+                            let note = (drafts[a.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                            guard !note.isEmpty else { return }
+                            store.act(["review", a.id_ ?? "", "--changes", "-m", note], label: "Sent back")
+                            drafts[a.id] = nil
+                        }
                         copyButton(a.id_ ?? "", "Copy id")
                     }
                 }
@@ -214,6 +250,28 @@ struct BusPanel: View {
         }
     }
 
+    private func draft(_ key: String) -> Binding<String> {
+        Binding(get: { drafts[key] ?? "" }, set: { drafts[key] = $0 })
+    }
+
+    /// Reply to the agent that asked, closing its question; optionally record
+    /// the answer as the lane's decision so later sessions follow it.
+    private func answer(_ a: Attention) {
+        let text = (drafts[a.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, let id = a.id_, let to = a.from else { return }
+        let lane = store.lane(repo: a.repo, name: a.lane)
+        var steps: [(args: [String], lane: Lane?)] = [
+            (["post", "--re", id, "--close", "done", "--to", to, "--state", "done", "-m", text], lane)]
+        if recordDecision.contains(a.id) {
+            var decide = ["decide", text]
+            if let l = a.lane, l != "unfiled", !l.isEmpty { decide += ["--lane", l] } else { decide += ["--repo-wide"] }
+            steps.append((decide, lane))
+        }
+        store.actAll(steps, label: recordDecision.contains(a.id) ? "Answered and recorded" : "Answered")
+        drafts[a.id] = nil
+        recordDecision.remove(a.id)
+    }
+
     private func label(_ kind: String) -> String {
         switch kind {
         case "not-picked-up": return "unread"
@@ -279,6 +337,13 @@ struct BusPanel: View {
                     .help("Click to copy \(item.id)")
                 }
                 if items.count > 12 { Text("…and \(items.count - 12) more").font(.caption2).foregroundStyle(.secondary) }
+                ForEach(lane.decisions ?? []) { d in
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        badge("decided", .purple)
+                        Text(d.text).font(.caption).lineLimit(2)
+                    }
+                    .help(d.why ?? "")
+                }
                 if !lane.seats.isEmpty {
                     Text("agents: \(lane.seats.joined(separator: ", "))").font(.caption2.monospaced()).foregroundStyle(.secondary)
                 }
@@ -342,6 +407,9 @@ struct BusPanel: View {
             let why = (e.reason ?? "").isEmpty ? "" : " (\(e.reason ?? ""))"
             return "\(e.from ?? "?") · @\(e.lane ?? "") \(e.state ?? "updated")\(why)"
         case "file": return "\(e.from ?? "?") filed it in @\(e.lane ?? "")"
+        case "decision":
+            let scope = (e.lane ?? "").isEmpty ? "repo" : "@\(e.lane ?? "")"
+            return "\(e.from ?? "?") decided for \(scope)"
         default:
             var line = "\(e.from ?? "?") → \(e.to ?? "?")"
             if let l = e.lane, !l.isEmpty, l != "unfiled" { line += " · @\(l)" }
@@ -356,6 +424,7 @@ struct BusPanel: View {
         case "delivery": badge("wake", .purple)
         case "lane": badge("lane", .teal)
         case "file": badge("filed", .teal)
+        case "decision": badge("decided", .purple)
         default: badge(e.state ?? "msg", stateColor(e.state))
         }
     }
@@ -377,7 +446,6 @@ struct BusPanel: View {
                                 .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                         }
                         Spacer(minLength: 4)
-                        if (seat.wakes ?? 0) >= 3 { badge("no wakes left", .orange) }
                         if seat.wakeable {
                             Image(systemName: "bolt.fill").font(.caption2).foregroundStyle(.yellow)
                                 .help("can be woken while idle")

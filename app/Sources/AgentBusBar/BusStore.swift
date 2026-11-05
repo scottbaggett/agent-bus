@@ -41,7 +41,7 @@ final class BusStore: ObservableObject {
     // MARK: derived views
 
     func attention(_ kinds: Set<String>) -> [Attention] { snapshot.attention.filter { kinds.contains($0.kind) } }
-    static let needsYou: Set<String> = ["needs-you"]
+    static let needsYou: Set<String> = ["needs-you", "review"]
     static let stuck: Set<String> = ["not-picked-up", "blocked", "budget", "wake-failed", "pm-gone"]
     static let cleanup: Set<String> = ["merged", "orphaned", "unfiled"]
 

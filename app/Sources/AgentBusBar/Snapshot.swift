@@ -79,7 +79,16 @@ struct Lane: Decodable, Identifiable {
     var branch: String
     var cwd: String?
     var health: String
+    var decisions: [Decision]?
     var id: String { key }
+}
+
+struct Decision: Decodable, Identifiable {
+    var id: String
+    var text: String
+    var why: String?
+    var by: String
+    var epoch: Int
 }
 
 struct Attention: Decodable, Identifiable {
@@ -89,12 +98,13 @@ struct Attention: Decodable, Identifiable {
     var lane: String?
     var id_: String?
     var seat: String?
+    var from: String?
     var epoch: Int?
     var text: String
     var fix: String
     var id: String { "\(kind)|\(id_ ?? "")|\(lane ?? "")|\(seat ?? "")|\(text)" }
 
-    enum CodingKeys: String, CodingKey { case kind, repo, repo_id, lane, id_ = "id", seat, epoch, text, fix }
+    enum CodingKeys: String, CodingKey { case kind, repo, repo_id, lane, id_ = "id", seat, from, epoch, text, fix }
 }
 
 struct Event: Decodable, Identifiable {

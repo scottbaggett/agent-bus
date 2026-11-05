@@ -1815,7 +1815,7 @@ snapshot_json() {
   local now f base rid a l n seats pms='{}' lanepms='{}' roles='{}' projects='[]' merged='{}'
   now=$(now_epoch)
   seats=$(seat_rows | jq -sc --argjson cut "$((now - SEAT_TTL))" --argjson codex_cut "$(codex_idle_cut)" \
-    "$JQ_SEAT_LIVE"'[.[] | select(buslive($cut; $codex_cut))
+    "$JQ_SEAT_LIVE"'[.[] | select(buslive($cut; $codex_cut) and (.tool // "") != "lead")
       | {addr, tool, repo, repo_id, wt, branch, lane: (.lane // ""), lane_src: (.lane_src // ""),
          epoch: ((.epoch // 0) | tonumber? // 0), last_hook: ((.last_hook // 0) | tonumber? // 0),
          scope: ((.tool // "") + "/" + (.wt // "")),
@@ -1916,10 +1916,10 @@ snapshot_json() {
        attention: (
          [$open[] | select(.owner == "lead")
            | if .review_of then
-               {kind: "review", repo, lane, id, epoch, text: "\(.from) finished: \(.subject | sub("^review: "; ""))",
+               {kind: "review", repo, repo_id, lane, id, from, epoch, text: "\(.from) finished: \(.subject | sub("^review: "; ""))",
                 fix: "agent-bus review \(.id) --approve   (or --changes -m \"...\")"}
              else
-               {kind: "needs-you", repo, lane, id, epoch, text: "\(.from) asks you: \(.subject)",
+               {kind: "needs-you", repo, repo_id, lane, id, from, epoch, text: "\(.from) asks you: \(.subject)",
                 fix: "agent-bus resolve \(.id) --reason done"}
              end]
          + [$open[] | select(.unread and (.gone | not) and .owner != "lead")
@@ -1941,7 +1941,8 @@ snapshot_json() {
            | {kind: "unfiled", repo, lane, epoch: .oldest,
               text: "\(.open) open item(s) in \(.repo) belong to no lane",
               fix: "agent-bus triage --lane unfiled   (then: file <id> <lane>, or lane unfiled sweep --older 7d --reason canceled)"}]
-         + [$seats[] | select((.wakes // 0) >= $budget)
+         # A budget of 0 means unlimited wakes: nobody runs out.
+         + [$seats[] | select($budget > 0 and (.wakes // 0) >= $budget)
            | {kind: "budget", repo, lane, seat: .addr, epoch,
               text: "\(.addr) has used its \($budget) wakes; it will not be woken again until it closes an item",
               fix: "close or hand on its items: agent-bus triage"}]

@@ -75,7 +75,6 @@ Rules:
 | `packaging/homebrew/` | Homebrew formula, copied to the tap at each release |
 | `lib/codex_hook.py` | Codex session registration and cleanup |
 | `plugins/agent-bus/` | OpenCode plugin |
-| `app/` | macOS menu bar app for the lead (`app/build.sh`): attention, lanes, cleanup; reads `agent-bus snapshot` |
 | `PROTOCOL.md` | Full protocol |
 | `skills/agent-bus/SKILL.md` | The `/agent-bus` skill, linked into each host by the installer |
 | `skills/handoff/SKILL.md` | Old skill name; points at `/agent-bus` |

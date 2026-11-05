@@ -194,34 +194,6 @@ secrets file (or the env var fallback) at POST time and never touches the ledger
 By default every post delivers a webhook (no hard stop); set
 `AGENT_BUS_WAKE_BUDGET=N` to opt in to a per-seat limit; closing an item resets it.
 
-## Menu bar app
-
-`app/` holds **Agent Bus**, a small macOS menu bar app (macOS 14+) for the human
-in charge. Its badge counts what waits on you: things agents asked you
-(`--to @lead`) plus stuck work. You get a notification when an agent asks.
-
-- **Attention:** asks for you, with Done and Dismiss; stuck work (unread by a
-  live owner, long-blocked, out of wakes, failed wakes, PMs that are gone), each
-  with the command that fixes it; lanes whose branch merged with work still open;
-  abandoned lanes; unfiled work. Cleanup is one button per lane, or one for all.
-- **Lanes:** by project, with health (active, idle, merged, orphaned, parked).
-  Click a lane for its open items, its agents, and Close, Park or Reopen.
-- **Activity** and **Seats:** the raw feed and the live agents.
-
-Buttons act as the lead (`AGENT_BUS_TOOL=lead`), which may close or change
-anything; bulk closes ask first. Everything else is read through
-`agent-bus snapshot`, and every ten minutes it runs `agent-bus lanes
---check-merged` to see which lane branches have merged.
-
-```sh
-app/build.sh --install --open    # build, copy to ~/Applications, launch
-```
-
-It reads everything through `agent-bus snapshot`, so it needs the CLI at
-`~/.local/bin/agent-bus` (or `AGENT_BUS_BIN`) and `jq` in `/opt/homebrew/bin` or
-`/usr/local/bin`. It never writes to the bus. To start it at login, add it in
-System Settings → General → Login Items.
-
 ## Use
 
 ```sh

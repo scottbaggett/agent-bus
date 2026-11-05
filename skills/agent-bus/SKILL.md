@@ -114,7 +114,7 @@ agent-bus post --to @lead --state question -m "# decision needed: ..."
 agent-bus post --re <id> --close escalated --to @lead --state question -m "..."
 ```
 
-The user sees it in the agent-bus menu bar app and gets a notification.
+The user sees it in `agent-bus attention`.
 
 ### decide
 

@@ -398,7 +398,7 @@ def clean: tostring | gsub("[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]"; "")
 def same_repo($me): if (.repo_id // "") != "" then .repo_id == $me.repo_id else .repo == $me.repo end;
 def authored($me): .from == $me.addr or ($me.session != "local" and (.session // "") == $me.session);
 def is_pm($me): $pm != "" and $pm == $me.addr;
-# The human in charge, through the menu bar app (tool "lead"): owns @lead and
+# The human in charge (tool "lead"): owns @lead and
 # may close anything.
 def is_lead($me): ($me.tool // "") == "lead";
 # The seat holding the named role a packet is addressed to (@release), or "".
@@ -1863,7 +1863,7 @@ cmd_offboard() {
   return 0
 }
 
-# Machine-wide state as one JSON object, for viewers (the menu bar app) and for
+# Machine-wide state as one JSON object, for viewers (a lead dashboard) and for
 # `lanes` / `attention`. Uses the same liveness, ownership, lane and close rules
 # as everything else, across every repo, so a viewer never re-implements them.
 # Read-only: never touches a seat.
@@ -2551,7 +2551,7 @@ Set AGENT_BUS_WAKE_BUDGET=N (N>0) to opt in to a per-seat limit of N stop-hook
 wakes / Codex queue attempts / Grok webhook POSTs; the counter resets when the
 seat closes an item. Claude socket notifications are never counted.
 
-@lead is the human in charge, through the menu bar app (a seat with tool
+@lead is the human in charge (a seat with tool
 "lead"): it owns packets sent to @lead and may close anything. Escalate with
 post --re <id> --close escalated --to @lead. projects.json in the bus directory
 groups lanes into projects: {"projects":[{"name":"Checkout","repo":"web-*",

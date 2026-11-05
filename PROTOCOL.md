@@ -227,7 +227,7 @@ holder; offboarding or gc (holder gone 48h) releases it.
 
 ## The lead
 
-`@lead` is the human in charge, through the menu bar app (a seat whose tool is
+`@lead` is the human in charge (a seat whose tool is
 `lead`). It owns packets sent to `@lead` and may close or change anything. An
 agent escalates a work item to the human with
 `post --re <id> --close escalated --to @lead --state question`.

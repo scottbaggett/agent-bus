@@ -205,7 +205,13 @@ out=$(a claim --all 2>&1 || true)
 assert_has "flag-shaped paths are refused" "looks like a flag" "$out"
 a claim src/y.ts >/dev/null
 assert_lacks "claims are repo-scoped" "src/y.ts" "$(AGENT_BUS_REPO_ID=other a claims)"
-assert_has "others see the claim in read" "src/y.ts" "$(c read --peek)"
+assert_lacks "read leaves out claims that don't touch you" "src/y.ts" "$(c read --peek)"
+assert_has "read counts the other claims" "other claim(s) in this repo: agent-bus claims" "$(c read --peek)"
+probe="test/.claim-probe-$$"; : >"$ROOT/$probe"
+a claim "$ROOT/$probe" >/dev/null
+assert_has "read shows a claim on a file you changed" "-> $probe" "$(c read --peek)"
+rm -f "$ROOT/$probe"; a release "$ROOT/$probe" >/dev/null 2>&1 || true
+assert_has "claims lists every claim" "src/y.ts" "$(c claims)"
 
 # --- offboard ---
 pm claim src/z.ts >/dev/null

@@ -491,6 +491,15 @@ reset_wake() { state_update '.wakes = 0'; }
 
 # ------------------------------------------------------------------ select
 
+# Other seats the same host session holds. One session that runs bus commands
+# from two folders (the main checkout and a worktree) is two seats; packets sent
+# to either reach it, wherever it reads from.
+session_seats() {
+  [ "$SESSION" != local ] || { printf '[]'; return 0; }
+  seat_rows | jq -sc --arg s "$SESSION" --arg t "$TOOL" --arg me "$ADDR" \
+    '[.[] | select((.session // "") == $s and (.tool // "") == $t and .addr != $me) | .addr]'
+}
+
 # Packets addressed to this seat within the lookback window, never its own and
 # never closed. Mode: unread | all | owned (unread, owned: the digest) |
 # wake (unread, owned, supervisory).
@@ -501,12 +510,16 @@ select_packets() {
     closed($L) as $c
     | ($read | map({(.): true}) | add // {}) as $r
     | $L[] | select(.kind == "msg" and (.epoch // 0) >= $cut)
-    | select((authored($me) | not) and gets($me) and ($c[.id] | not))
+    | ((.to // "") as $t | $sib | index($t) != null) as $sibling
+    | (owns($me) or $sibling) as $own
+    | select((authored($me) | not) and ($own or gets($me)) and ($c[.id] | not))
     | select($mode == "all" or ($r[.id] | not))
-    | select($mode != "owned" or owns($me))
-    | select($mode != "wake" or (sup and owns($me)))
-    | . + {own: owns($me), from_pm: (from_pm($me) and same_repo($me))}' \
-    --arg mode "$mode" --argjson cut "$cut" --argjson read "$(state_get '.read // []')"
+    | select($mode != "owned" or $own)
+    | select($mode != "wake" or (sup and $own))
+    | . + {own: $own, from_pm: (from_pm($me) and same_repo($me)),
+           to_sibling: $sibling}' \
+    --arg mode "$mode" --argjson cut "$cut" --argjson read "$(state_get '.read // []')" \
+    --argjson sib "$(session_seats)"
 }
 
 # Open work items in this repo, oldest first, each with its owner resolved and
@@ -1461,6 +1474,17 @@ orient_seat() {
   fi
 }
 
+# Of the claim rows on stdin-like $1, those on a path this seat claims or has
+# changed in its worktree.
+touching_claims() {
+  [ -n "$1" ] || return 0
+  local mine
+  mine=$( { repo_claims | jq -r --arg me "$ADDR" 'select(.addr == $me) | .path'
+            [ "$REPO" != - ] && (cd "$TOP" && { git diff --name-only HEAD 2>/dev/null
+              git ls-files --others --exclude-standard 2>/dev/null; }) ; } | jq -Rsc 'split("\n") | map(select(length > 0))')
+  jq -c --argjson mine "$mine" 'select(.path as $p | $mine | index($p))' <<<"$1"
+}
+
 cmd_read() {
   local mode=unread peek=0 digest=0
   while [ $# -gt 0 ]; do
@@ -1482,18 +1506,24 @@ cmd_read() {
     state_update '.oriented = true'
   fi
   local rows; rows=$(select_packets "$mode")
-  local claims; claims=$(repo_claims | jq -c --arg me "$ADDR" 'select(.addr != $me)')
+  # Other seats' claims only where they touch this seat: paths it claims or has
+  # changed. The full list is `agent-bus claims`; in every prompt it was noise.
+  local others claims n_other
+  others=$(repo_claims | jq -c --arg me "$ADDR" 'select(.addr != $me)')
+  claims=$(touching_claims "$others")
+  n_other=$(( $(grep -c . <<<"$others" || true) - $(grep -c . <<<"$claims" || true) ))
   if [ -z "$rows" ]; then
-    ((digest)) && return 0
-    printf 'agent-bus: nothing unread for %s\n' "$ADDR"
+    ((digest)) && [ -z "$claims" ] && return 0
+    ((digest)) || printf 'agent-bus: nothing unread for %s\n' "$ADDR"
   else
     printf '=== agent-bus: %s packet(s) for %s ===\n(%s)\n' "$(grep -c . <<<"$rows")" "$ADDR" "$PEER_BANNER"
     render_packets <<<"$rows"
   fi
   if [ -n "$claims" ]; then
-    printf '\nclaims held by other seats:\n'
+    printf '\nclaims by other seats on files you claim or changed:\n'
     jq -r '"  \(.addr) -> \(.path)"' <<<"$claims" | sanitize
   fi
+  ((!digest)) && ((n_other > 0)) && printf '(%d other claim(s) in this repo: agent-bus claims)\n' "$n_other"
   [ -n "$rows" ] && printf '\n%s\n' "$HINTS"
   # Both hosts inject hook stdout into the model, so a digest is a delivery.
   if [ -n "$rows" ] && ((!peek)); then mark_read "$RENDERED_IDS"; fi

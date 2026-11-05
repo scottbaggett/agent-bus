@@ -96,6 +96,45 @@ seat and a crashed one look different.
 
 `agent-bus who` shows the open count and how many have no live owner.
 
+## Team rules
+
+Each repo sets four rules once, with `agent-bus init` (asks) or
+`agent-bus init --set k=v,...` (an agent saving its user's answers). They are
+written to `.agent-bus.json` at the repo root; commit it so the team shares them.
+`~/.agents/bus/config.json` holds personal overrides and `AGENT_BUS_POLICY_<KEY>`
+overrides both. `agent-bus init --show` prints what applies.
+
+| Rule | Values (default first) | Effect |
+|---|---|---|
+| `owner` | `refuse` · `lead` · `pm` | A work item sent to a broadcast nobody supervises is refused (with live lane peers and `@lead` suggested), owned by the lead, or owned by a lane PM (the lead if there is none) |
+| `review` | `requester` · `lead` · `none` | Who accepts handed-off work: whoever handed it over, the lead, or nobody |
+| `ask_lead` | `scope,destructive` · any of `scope`, `destructive`, `disagreement` · `never` | When agents must stop and ask the lead; stated in every orientation |
+| `decisions` | `on` · `off` | Show the lane's decisions at session start |
+
+A repo with no rules makes the first digest of each session ask the agent to
+put the four questions to its user and save the answers. Once set, every
+orientation line carries a one-sentence summary of them.
+
+## Review gates
+
+Closing isn't accepting. A `handoff` records its reviewer (`review` on the
+packet): by default whoever handed it over; `post --review <seat|@lead|none>`
+overrides; handing it on keeps the same reviewer.
+
+- The doer's `resolve <id> --reason done -m "…"` does not close gated work: it
+  hands it to the reviewer as a `needs-review` item (`review_of` → the work).
+- `agent-bus review <id> --approve` closes it. `--changes -m "…"` hands it back
+  to the doer as a new `handoff` with the same reviewer.
+- Nobody approves their own work. A reviewer whose session has ended is
+  replaced by `@lead`, so nothing waits on nobody.
+
+## Decisions
+
+`agent-bus decide "<decision>" -m "why"` records a settled answer for the
+current lane (`--lane`, `--repo-wide`). `--supersedes <id>` replaces an older
+one. `agent-bus decisions` lists the current ones. With `decisions=on`, every
+session on the lane is told them at start; agents follow them or ask the lead.
+
 ## The PM
 
 One seat per repo may hold the PM role (`agent-bus role pm`). To supervise one

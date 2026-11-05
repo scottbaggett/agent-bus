@@ -3,7 +3,7 @@
 File-backed handoff bus for coding agents sharing repos and worktrees. No daemon —
 `bin/agent-bus`, `jq`, and an append-only ledger under `~/.agents/bus/`.
 
-Protocol: [PROTOCOL.md](PROTOCOL.md). Agent runbook: [skills/handoff/SKILL.md](skills/handoff/SKILL.md).
+Protocol: [PROTOCOL.md](PROTOCOL.md). Agent runbook: [skills/agent-bus/SKILL.md](skills/agent-bus/SKILL.md) (`/agent-bus`).
 
 ## On wake
 
@@ -75,6 +75,7 @@ Rules:
 | `plugins/agent-bus/` | OpenCode plugin |
 | `app/` | macOS menu bar app for the lead (`app/build.sh`): attention, lanes, cleanup; reads `agent-bus snapshot` |
 | `PROTOCOL.md` | Full protocol |
-| `skills/handoff/SKILL.md` | Handoff runbook |
+| `skills/agent-bus/SKILL.md` | The `/agent-bus` skill, linked into each host by the installer |
+| `skills/handoff/SKILL.md` | Old skill name; points at `/agent-bus` |
 | `test/agent-bus.test.sh` | Tests |
 | `test/MANUAL.md` | Manual per-host delivery plan (hooks fire, digest reaches the model, wake) |

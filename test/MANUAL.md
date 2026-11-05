@@ -10,6 +10,13 @@ Both tests need two seats: the **target** under test and a **sender** in
 another window. The sender cannot be the target: a seat never receives its own
 posts.
 
+Start with the headless run: `./test/e2e.sh` drives real `claude -p`,
+`opencode run` and `codex exec` sessions on a throwaway bus. It covers the
+digest and handoff loop, reply-and-close, `ask`, and `post --resume`. It needs
+the version under test installed (`brew upgrade agent-bus` or
+`./install.sh --from .`). What it can't reach is below: the desktop apps and
+idle wakes.
+
 ## Before
 
 ```sh
@@ -79,9 +86,34 @@ agent-bus resolve <id> --reason done
 agent-bus release --all
 ```
 
+## T5 — v0.3.2 in the desktop apps
+
+Each row is one action from a sender seat and what the target must show.
+
+| Check | Do | Pass |
+|---|---|---|
+| Delivery line, idle Claude | `agent-bus post --to <idle Claude.app seat> -m "nonce <n>"` | post prints `— woken`; the session wakes and answers with the nonce |
+| One Codex notice | post three fyi packets to an idle Codex Desktop chat seat | post prints `queued` once, then `already has an unread notice` twice; the chat gets one notice and reads all three |
+| OpenCode app idle | `agent-bus post --to <idle opencode TUI seat> --state question -m "nonce <n>"` | post prints `its plugin picks this up`; the TUI resumes and replies |
+| One inbox, two folders | in one Claude session, run `agent-bus who` from the main checkout and from a worktree; post to the main-checkout seat | `agent-bus read` from the worktree shows it |
+| Send as the user | in your own terminal: `agent-bus send --to <seat> -m "nonce <n>"`, answer `y` | the target's digest labels it "from your user"; from an agent's shell, `send` is refused |
+| Quieter digest | claim a file from one seat; prompt another seat that hasn't touched it | the digest doesn't list the claim; `agent-bus read` counts it |
+
 ## Record
 
 A surface that was not run is not a pass.
+
+### v0.3.2 headless (`test/e2e.sh`) — 2026-11-05
+
+claude 2.1.317 · opencode 2.2.5 · codex-cli 0.159.0. 12 of 12 passed: handoff picked up from the
+digest, `reply` closes it (Claude, OpenCode, Codex); delivery lines for a seat
+not yet running and an exited OpenCode session; `post --resume` restarted the
+OpenCode session and `ask` got its answer. Found and fixed on the way: the
+team-rules nudge stalled a headless OpenCode worker; OpenCode's recorded pid
+was the shared `opencode serve` process, so a stopped session looked alive;
+a packet read from one folder showed as unread in the session's other folder.
+OpenCode needs a tool-capable model (`E2E_OPENCODE_MODEL`, default
+`openai/gpt-6.1-sol`). T5 (desktop apps) not yet run.
 
 ### v2 — not yet run
 

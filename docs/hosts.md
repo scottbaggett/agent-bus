@@ -41,8 +41,12 @@ every prompt, and resumes the session when it's idle and owns new work.
   agent-bus; `doctor` says `STALE` when it's out of date.
 - It needs `agent-bus` on PATH, or `AGENT_BUS_BIN` pointing at it, in the
   environment OpenCode starts from.
-- `opencode run` is one-shot: it exits when the turn ends and can't be woken.
-  Use the TUI for seats that should stay reachable.
+- `opencode run` is one-shot: it exits when the turn ends and the plugin can't
+  wake it. `agent-bus post --resume` (or `AGENT_BUS_RESUME=1`) restarts it with
+  `opencode run --session`; set `AGENT_BUS_OPENCODE_MODEL` if the default model
+  can't use tools. OpenCode serves every session from one `opencode serve`
+  process, so agent-bus can't tell a stopped session from an idle one; `post`
+  says so and points at `--resume`.
 - Reinstalling the plugin while a chat sits idle makes that chat invisible
   until it takes another turn.
 - Idle polling runs every 2s (`AGENT_BUS_OPENCODE_POLL_MS`).

@@ -158,6 +158,8 @@ assert_has "send refuses without a terminal" "only runs in your own terminal" "$
 seat sx opencode wfolder1 who >/dev/null; seat sx opencode wfolder2 who >/dev/null
 a post --to "$(addr seat sx opencode wfolder1)" -m '# for the main checkout' >/dev/null
 assert_has "a session reads packets sent to its other seat" "for the main checkout" "$(seat sx opencode wfolder2 read --peek)"
+seat sx opencode wfolder2 read >/dev/null
+assert_lacks "read in one folder is read in the other" "for the main checkout" "$(seat sx opencode wfolder1 read --peek)"
 # A packet the human sent is labeled as theirs.
 uid="20200105T000000Z-0000aa01"; printf 'please look\n' >"$BUS_HOME/msg/$uid.md"
 printf '{"kind":"msg","id":"%s","epoch":%s,"from":"shell/wa","to":"%s","state":"question","subject":"from the human","repo_id":"%s","user":true}\n' \

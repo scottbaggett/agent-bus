@@ -27,7 +27,7 @@ export PATH="/usr/bin:/bin:/usr/sbin:/sbin:$(dirname "$(command -v jq)")"
 tarball() { # name
   mkdir -p "$T/pkg"
   rm -rf "$T/pkg/agent-bus-$1"
-  rsync -a --exclude .git --exclude app/.build "$ROOT/" "$T/pkg/agent-bus-$1/"
+  rsync -a --exclude .git "$ROOT/" "$T/pkg/agent-bus-$1/"
   tar -czf "$T/$1.tar.gz" -C "$T/pkg" "agent-bus-$1"
 }
 tarball 9.9.1; tarball 9.9.2
@@ -88,7 +88,7 @@ assert_eq "creates claude settings with hooks" 4 "$(jq '[.hooks[][].hooks[].comm
 # Homebrew: the keg path changes every upgrade; hooks must use opt/.
 B="$(cd "$T" && pwd -P)/brew"
 mkdir -p "$B/Cellar/agent-bus/1.0" "$B/bin" "$B/opt"
-rsync -a --exclude .git --exclude app/.build "$ROOT/" "$B/Cellar/agent-bus/1.0/libexec/"
+rsync -a --exclude .git "$ROOT/" "$B/Cellar/agent-bus/1.0/libexec/"
 ln -s ../Cellar/agent-bus/1.0 "$B/opt/agent-bus"
 ln -s ../Cellar/agent-bus/1.0/libexec/bin/agent-bus "$B/bin/agent-bus"
 "$B/bin/agent-bus" hooks --claude >/dev/null

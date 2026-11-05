@@ -328,10 +328,10 @@ lane_exists() {
 # $pm is the repo PM's address, $lanepms maps lane -> PM address, $me is a
 # seat object.
 # Lane derivation, one definition for both the seat's own lane and read-time
-# grouping of old rows. A ticket key (salt-8947) in the branch or worktree name
+# grouping of old rows. A ticket key (eng-142) in the branch or worktree name
 # wins; otherwise a non-trunk branch's slug; otherwise unfiled. Prefixes that
 # look like versions or product names never count as tickets.
-# AGENT_BUS_TICKET_PREFIXES ("salt eng"), when set, is the only accepted list.
+# AGENT_BUS_TICKET_PREFIXES ("eng ops"), when set, is the only accepted list.
 JQ_LANE='
 def lane_prefixes: '"$(jq -nc --arg p "${AGENT_BUS_TICKET_PREFIXES:-}" '$p | split(" ") | map(select(length > 0) | ascii_downcase)')"';
 def lane_deny: ["utf","gpt","sha","rfc","iso","sonnet","opus","haiku","claude","codex","gemini","llama",
@@ -398,7 +398,7 @@ def clean: tostring | gsub("[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]"; "")
 def same_repo($me): if (.repo_id // "") != "" then .repo_id == $me.repo_id else .repo == $me.repo end;
 def authored($me): .from == $me.addr or ($me.session != "local" and (.session // "") == $me.session);
 def is_pm($me): $pm != "" and $pm == $me.addr;
-# The human in charge, through the menu bar app (tool "lead"): owns @lead and
+# The human in charge (tool "lead"): owns @lead and
 # may close anything.
 def is_lead($me): ($me.tool // "") == "lead";
 # The seat holding the named role a packet is addressed to (@release), or "".
@@ -1863,7 +1863,7 @@ cmd_offboard() {
   return 0
 }
 
-# Machine-wide state as one JSON object, for viewers (the menu bar app) and for
+# Machine-wide state as one JSON object, for viewers (a lead dashboard) and for
 # `lanes` / `attention`. Uses the same liveness, ownership, lane and close rules
 # as everything else, across every repo, so a viewer never re-implements them.
 # Read-only: never touches a seat.
@@ -2418,7 +2418,7 @@ cmd_guide() {
   case "$role" in
     worker) cat <<'EOF'
 How to work on the bus (worker):
-  1. Your lane comes from your branch (feature/salt-8947-… is @salt-8947). Check: agent-bus status
+  1. Your lane comes from your branch (feature/eng-142-… is @eng-142). Check: agent-bus status
   2. Work that waits on you arrives on its own at each prompt. See it again: agent-bus read
   3. Hand work to someone specific, never to everyone:
        agent-bus post --to <seat|@lead> --state needs-review --touched auto -m "# what, why, what's left"
@@ -2514,7 +2514,7 @@ agent-bus — handoff bus for coding agents sharing repos and worktrees.
                               open work in this repo: GONE owners, NOT PICKED UP,
                               STALE
   lane [<name> | --clear]     show or set this seat's lane (default: from the
-                              branch's ticket key, e.g. salt-8947)
+                              branch's ticket key, e.g. eng-142)
   lane <name> done|park|reopen|sweep|title [--reason r] [--older Nd] [--title t]
                               lane lifecycle (lead, repo PM or lane PM): done
                               closes its open items, sweep those older than
@@ -2551,11 +2551,11 @@ Set AGENT_BUS_WAKE_BUDGET=N (N>0) to opt in to a per-seat limit of N stop-hook
 wakes / Codex queue attempts / Grok webhook POSTs; the counter resets when the
 seat closes an item. Claude socket notifications are never counted.
 
-@lead is the human in charge, through the menu bar app (a seat with tool
+@lead is the human in charge (a seat with tool
 "lead"): it owns packets sent to @lead and may close anything. Escalate with
 post --re <id> --close escalated --to @lead. projects.json in the bus directory
-groups lanes into projects: {"projects":[{"name":"Spaces","repo":"salt-*",
-"lanes":["salt-5575","spaces*"]}]}.
+groups lanes into projects: {"projects":[{"name":"Checkout","repo":"web-*",
+"lanes":["eng-120","checkout*"]}]}.
 EOF
 }
 

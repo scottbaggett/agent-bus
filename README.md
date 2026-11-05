@@ -194,34 +194,6 @@ secrets file (or the env var fallback) at POST time and never touches the ledger
 By default every post delivers a webhook (no hard stop); set
 `AGENT_BUS_WAKE_BUDGET=N` to opt in to a per-seat limit; closing an item resets it.
 
-## Menu bar app
-
-`app/` holds **Agent Bus**, a small macOS menu bar app (macOS 14+) for the human
-in charge. Its badge counts what waits on you: things agents asked you
-(`--to @lead`) plus stuck work. You get a notification when an agent asks.
-
-- **Attention:** asks for you, with Done and Dismiss; stuck work (unread by a
-  live owner, long-blocked, out of wakes, failed wakes, PMs that are gone), each
-  with the command that fixes it; lanes whose branch merged with work still open;
-  abandoned lanes; unfiled work. Cleanup is one button per lane, or one for all.
-- **Lanes:** by project, with health (active, idle, merged, orphaned, parked).
-  Click a lane for its open items, its agents, and Close, Park or Reopen.
-- **Activity** and **Seats:** the raw feed and the live agents.
-
-Buttons act as the lead (`AGENT_BUS_TOOL=lead`), which may close or change
-anything; bulk closes ask first. Everything else is read through
-`agent-bus snapshot`, and every ten minutes it runs `agent-bus lanes
---check-merged` to see which lane branches have merged.
-
-```sh
-app/build.sh --install --open    # build, copy to ~/Applications, launch
-```
-
-It reads everything through `agent-bus snapshot`, so it needs the CLI at
-`~/.local/bin/agent-bus` (or `AGENT_BUS_BIN`) and `jq` in `/opt/homebrew/bin` or
-`/usr/local/bin`. It never writes to the bus. To start it at login, add it in
-System Settings → General → Login Items.
-
 ## Use
 
 ```sh
@@ -236,11 +208,11 @@ agent-bus review <id> --approve # or --changes -m "what to fix"
 agent-bus decide "Ship behind the flag" -m "why"   # later sessions on the lane follow it
 agent-bus triage                # open work by owner: GONE, NOT PICKED UP, STALE
 agent-bus claim src/thing.ts    # advisory; CONTESTED if another seat holds it
-agent-bus lane                  # this seat's lane (set from the branch's ticket, e.g. salt-8947)
-agent-bus role pm --lane spaces # supervise that feature (or plain `role pm` for the repo)
+agent-bus lane                  # this seat's lane (set from the branch's ticket, e.g. eng-142)
+agent-bus role pm --lane checkout # supervise that feature (or plain `role pm` for the repo)
 agent-bus lanes                 # lanes by project: health, open work, who is on them
 agent-bus attention             # what needs a decision, with the fix for each
-agent-bus lane salt-8947 done --reason merged   # close a finished lane's items
+agent-bus lane eng-142 done --reason merged     # close a finished lane's items
 agent-bus role release          # be @release in this repo
 agent-bus post --re <id> --close escalated --to @lead --state question -m "..."
 agent-bus offboard              # stand down
@@ -261,7 +233,7 @@ shows what is open and flags owners that have gone away.
 **The PM.** One seat per repo can take the PM role. It gets a copy of every work
 item in the repo and owns the ones sent to a broadcast scope or `@pm`. A **lane**
 groups the seats on one ticket or feature across worktrees, and seats join it on
-their own: a branch like `feature/salt-8947-…` is lane `salt-8947`. A lane PM does
+their own: a branch like `feature/eng-142-…` is lane `eng-142`. A lane PM does
 what the PM does for that lane only, and `--to @<lane>` reaches its seats.
 
 **Delivery.** Hooks (Claude) and the plugin (OpenCode) inject unread packets

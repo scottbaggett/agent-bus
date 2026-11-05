@@ -239,7 +239,11 @@ agent_pid() {
     case "$p" in ''|*[!0-9]*|0|1) return 0 ;; esac
     c=$(ps -o comm= -p "$p" 2>/dev/null) || return 0
     c=$(printf '%s' "${c##*/}" | tr '[:upper:]' '[:lower:]')
-    case "$c" in "$TOOL"|"$TOOL "*|"$TOOL-"*|"$TOOL."*) echo "$p"; return 0 ;; esac
+    case "$c" in "$TOOL"|"$TOOL "*|"$TOOL-"*|"$TOOL."*)
+      # A shared server (opencode serve) is not this session's process.
+      case " $(ps -o args= -p "$p" 2>/dev/null) " in *" serve "*) return 0 ;; esac
+      echo "$p"; return 0 ;;
+    esac
     p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
   done
 }
@@ -503,12 +507,24 @@ session_seats() {
     '[.[] | select((.session // "") == $s and (.tool // "") == $t and .addr != $me) | .addr]'
 }
 
+# What this seat and the session's other seats have read: a packet read from
+# one folder is read in the other.
+session_reads() {
+  local a f
+  { state_get '.read // []'
+    for a in $(jq -r '.[]' <<<"$1"); do
+      f="$BUS/state/$(slugify "$a").json"
+      [ -f "$f" ] && jq -c '.read // []' "$f" 2>/dev/null
+    done; } | jq -sc 'add // [] | unique'
+}
+
 # Packets addressed to this seat within the lookback window, never its own and
 # never closed. Mode: unread | all | owned (unread, owned: the digest) |
 # wake (unread, owned, supervisory).
 # Each row gains own (this seat must act) and from_pm (sent by the repo PM).
 select_packets() {
-  local mode="$1" cut=$(( $(now_epoch) - LOOKBACK_DAYS * 86400 ))
+  local mode="$1" cut=$(( $(now_epoch) - LOOKBACK_DAYS * 86400 )) sib
+  sib=$(session_seats)
   lq '
     closed($L) as $c
     | ($read | map({(.): true}) | add // {}) as $r
@@ -521,8 +537,8 @@ select_packets() {
     | select($mode != "wake" or (sup and $own))
     | . + {own: $own, from_pm: (from_pm($me) and same_repo($me)),
            to_sibling: $sibling}' \
-    --arg mode "$mode" --argjson cut "$cut" --argjson read "$(state_get '.read // []')" \
-    --argjson sib "$(session_seats)"
+    --arg mode "$mode" --argjson cut "$cut" --argjson read "$(session_reads "$sib")" \
+    --argjson sib "$sib"
 }
 
 # Open work items in this repo, oldest first, each with its owner resolved and
@@ -642,8 +658,12 @@ owner_rows() {
 }
 
 # Whether a seat's agent process is still running: yes, no, or unknown.
+# OpenCode serves every session from one long-lived `opencode serve` process,
+# so a pid that is that server says nothing about the session: unknown.
 pid_state() {
-  case "${1:-}" in ''|null|*[!0-9]*) printf unknown ;; *) kill -0 "$1" 2>/dev/null && printf yes || printf no ;; esac
+  case "${1:-}" in ''|null|*[!0-9]*) printf unknown; return ;; esac
+  kill -0 "$1" 2>/dev/null || { printf no; return; }
+  case " $(ps -o args= -p "$1" 2>/dev/null) " in *" serve "*) printf unknown ;; *) printf yes ;; esac
 }
 
 # Restart a stopped OpenCode session so it picks up new work. `opencode run`
@@ -651,7 +671,7 @@ pid_state() {
 resume_opencode() { # addr session cwd id
   command -v opencode >/dev/null 2>&1 || return 1
   [ -n "$2" ] && [ "$2" != local ] && [ -d "$3" ] || return 1
-  (cd "$3" && nohup opencode run --session "$2" \
+  (cd "$3" && nohup opencode run --session "$2" ${AGENT_BUS_OPENCODE_MODEL:+-m "$AGENT_BUS_OPENCODE_MODEL"} \
     "agent-bus: packet $4 waits for you. Run: agent-bus read" >/dev/null 2>&1 &) || return 1
 }
 
@@ -1423,11 +1443,16 @@ deliver() { # rec src resume
           printf 'delivery: %s — woken\n' "$addr"
         else printf 'delivery: %s — sees it at its next prompt\n' "$addr"; fi ;;
       opencode)
-        if [ "$(pid_state "$(jq -r '.pid // ""' <<<"$row")")" = no ]; then
-          if [ "$resume" = 1 ] && resume_opencode "$addr" "$(jq -r '.session // ""' <<<"$row")" "$(jq -r '.cwd // ""' <<<"$row")" "$id"; then
-            printf 'delivery: %s — was stopped; restarted it to pick this up\n' "$addr"
-          else printf 'delivery: %s — not running; it sees this when restarted (post --resume restarts it)\n' "$addr"; fi
-        else printf 'delivery: %s — its plugin picks this up within seconds\n' "$addr"; fi ;;
+        local ps_; ps_=$(pid_state "$(jq -r '.pid // ""' <<<"$row")")
+        if [ "$ps_" = yes ]; then
+          printf 'delivery: %s — its plugin picks this up within seconds\n' "$addr"
+        elif [ "$resume" = 1 ] && resume_opencode "$addr" "$(jq -r '.session // ""' <<<"$row")" "$(jq -r '.cwd // ""' <<<"$row")" "$id"; then
+          printf 'delivery: %s — restarted its session to pick this up\n' "$addr"
+        elif [ "$ps_" = no ]; then
+          printf 'delivery: %s — not running; it sees this when restarted (post --resume restarts it)\n' "$addr"
+        else
+          printf 'delivery: %s — its plugin picks this up if the session is open; if it has exited, post --resume restarts it\n' "$addr"
+        fi ;;
       codex|grok) ;;  # reported by their own transports below
       *) printf 'delivery: %s — has no hooks; it sees this only when it runs agent-bus read\n' "$addr" ;;
     esac
@@ -1514,7 +1539,7 @@ policy_summary() {
          else "settling agent disagreements" end) | join(", ")) end) ] | join("; ")'
 }
 
-POLICY_NUDGE='Ask your user four quick questions, then save the answers with agent-bus init --set:
+POLICY_NUDGE='Do the task you were given first; the recommended defaults apply meanwhile. When your user is there to answer (never in a headless or worker run), ask them four quick questions and save the answers with agent-bus init --set:
   1. owner: a work item sent to everyone (@here) has no owner. refuse (make the sender pick a recipient; recommended) | lead (send to the user) | pm (send to a lane PM)
   2. review: who accepts finished work? requester (whoever asked; recommended) | lead | none
   3. ask_lead: when should agents stop and ask the user? any of scope,destructive,disagreement (recommended: scope,destructive) | never

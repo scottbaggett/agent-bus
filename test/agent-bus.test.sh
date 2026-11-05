@@ -513,13 +513,36 @@ PY
   O1=$(addr seat o1 claude wp)
   out=$(AGENT_BUS_NO_PUSH=0 seat o3 claude wx post --to "$O1" --state needs-review -m '# wake owner')
   sleep 0.3
-  assert_has "post wakes the idle owner" "woke 1 idle peer" "$out"
+  assert_has "post wakes the idle owner" "delivery: $O1 — woken" "$out"
   assert_has "owner got an inbox frame" "agent-bus read" "$(cat "$SOCKD/owner.log" 2>/dev/null)"
   assert_eq "bystander got nothing" "" "$(cat "$SOCKD/bystander.log" 2>/dev/null)"
   out=$(AGENT_BUS_NO_PUSH=0 seat o3 claude wp post --to @here --state needs-review -m '# broadcast review' 2>/dev/null)
-  assert_lacks "broadcast review wakes no bystander" "woke" "$out"
+  assert_lacks "broadcast review wakes no bystander" "— woken" "$out"
   out=$(AGENT_BUS_NO_PUSH=0 seat o3 claude wp post --to @here -m '# broadcast fyi')
-  assert_lacks "a broadcast fyi wakes nobody" "woke" "$out"
+  assert_lacks "a broadcast fyi wakes nobody" "— woken" "$out"
+  assert_has "post says a broadcast reaches nobody" "nobody owns this, so nobody is woken" "$out"
+  # A restarted agent's new seat inherits posts sent to the old name.
+  seat h1 opencode wheir who >/dev/null
+  H1=$(addr seat h1 opencode wheir)
+  f="$BUS_HOME/seats/$(printf '%s' "$H1" | tr '/' '_').json"; jq '.epoch = 0' "$f" >"$f.t" && mv "$f.t" "$f"
+  seat h2 opencode wheir who >/dev/null
+  H2=$(addr seat h2 opencode wheir)
+  out=$(AGENT_BUS_NO_PUSH=0 seat o3 claude wx post --to "$H1" --state handoff -m '# for the restarted seat' 2>&1)
+  assert_has "a post to a gone seat goes to its live heir" "is gone; sending to $H2" "$out"
+  assert_has "the heir owns it" "for the restarted seat" "$(seat h2 opencode wheir read --peek)"
+  # OpenCode that isn't running is reported, not silently queued.
+  AGENT_BUS_PID=999999 seat h3 opencode wstop who >/dev/null
+  out=$(AGENT_BUS_NO_PUSH=0 seat o3 claude wx post --to "$(addr seat h3 opencode wstop)" -m '# are you there')
+  assert_has "post says an OpenCode seat is stopped" "not running; it sees this when restarted" "$out"
+  AGENT_BUS_TOOL=shell AGENT_BUS_WT=wsh "$BIN" who >/dev/null
+  out=$(AGENT_BUS_NO_PUSH=0 seat o3 claude wx post --to shell/wsh -m '# plain shell')
+  assert_has "post says a hookless seat must read" "has no hooks" "$out"
+  # A claim left by an ended seat doesn't block.
+  seat h2 opencode wheir claim src/left.ts >/dev/null
+  f="$BUS_HOME/seats/$(printf '%s' "$H2" | tr '/' '_').json"; jq '.epoch = 0' "$f" >"$f.t" && mv "$f.t" "$f"
+  out=$(seat o3 claude wx claim src/left.ts 2>&1)
+  assert_has "a gone seat's claim is taken over" "has ended; taking it over" "$out"
+  assert_has "and claimed" "claimed src/left.ts" "$out"
   assert_eq "bystander still got nothing" "" "$(cat "$SOCKD/bystander.log" 2>/dev/null)"
   kill "$SRV" 2>/dev/null || true; wait "$SRV" 2>/dev/null || true; SRV=; rm -rf "$SOCKD"
 else

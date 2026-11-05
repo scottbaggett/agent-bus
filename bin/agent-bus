@@ -486,7 +486,7 @@ state_update() {
   jq -c "$@" "$filter" <<<"$prev" >"$f.tmp" && mv "$f.tmp" "$f"
   bus_unlock "$f"
 }
-mark_read() { state_update '.read = ((.read // []) + $ids | unique | .[-500:])' --argjson ids "$1"; }
+mark_read() { state_update '.read = ((.read // []) + $ids | unique | .[-500:]) | .read_at = $now' --argjson ids "$1" --argjson now "$(now_epoch)"; }
 reset_wake() { state_update '.wakes = 0'; }
 
 # ------------------------------------------------------------------ select
@@ -614,19 +614,40 @@ poke_seat() {
     | nc -U "$sock" -w 2 >/dev/null 2>&1 || true
 }
 
-# Live seats with a socket that should be woken for packet $1: its owners only.
-# A broadcast wakes nobody — poking every Claude seat in the repo for one fyi
-# interrupted all of them.
-push_targets() {
+# The live seat that took over from a gone seat: same tool and worktree in
+# this repo, most recently active.
+live_heir() {
+  local scope="${1%.*}" now; now=$(now_epoch)
+  seat_rows | jq -rs --arg sc "$scope" --arg rid "$REPO_ID" --arg gone "$1" \
+    --argjson cut "$((now - SEAT_TTL))" --argjson codex_cut "$(codex_idle_cut)" "$JQ_SEAT_LIVE"'
+    [.[] | select(((.tool // "") + "/" + (.wt // "")) == $sc and .repo_id == $rid and .addr != $gone
+                  and buslive($cut; $codex_cut))] | sort_by(-(.epoch // 0)) | first | .addr // empty'
+}
+
+# Every live seat that owns packet $1, whatever its tool, for the delivery
+# report: one JSON row each.
+owner_rows() {
   local now; now=$(now_epoch)
-  seat_rows | jq -rn --argjson m "$1" --arg pm "$(pm_seat)" --argjson lanepms "$(lane_pms)" --argjson roles "$(role_map)" \
+  seat_rows | jq -c -n --argjson m "$1" --arg pm "$(pm_seat)" --argjson lanepms "$(lane_pms)" --argjson roles "$(role_map)" \
     --argjson cut "$(( now - SEAT_TTL ))" \
     --argjson codex_cut "$(( now - CODEX_MAX_IDLE_TTL ))" "$JQ_LIB"'
-    inputs | select(.tool == "claude" and (.epoch // 0) >= $cut and (.socket // "") != "")
-    | seatme as $s
-    | select(($m | authored($s)) | not)
-    | select($m | owns($s))
-    | .socket' 2>/dev/null || true
+    [inputs | select(buslive($cut; $codex_cut) and (.tool // "") != "lead")
+     | seatme as $s | select(($m | authored($s)) | not) | select($m | owns($s))]
+    | unique_by(.addr) | .[]' 2>/dev/null || true
+}
+
+# Whether a seat's agent process is still running: yes, no, or unknown.
+pid_state() {
+  case "${1:-}" in ''|null|*[!0-9]*) printf unknown ;; *) kill -0 "$1" 2>/dev/null && printf yes || printf no ;; esac
+}
+
+# Restart a stopped OpenCode session so it picks up new work. `opencode run`
+# exits after each reply; people resumed these by hand dozens of times.
+resume_opencode() { # addr session cwd id
+  command -v opencode >/dev/null 2>&1 || return 1
+  [ -n "$2" ] && [ "$2" != local ] && [ -d "$3" ] || return 1
+  (cd "$3" && nohup opencode run --session "$2" \
+    "agent-bus: packet $4 waits for you. Run: agent-bus read" >/dev/null 2>&1 &) || return 1
 }
 
 # Opt in from the actual Desktop chat. A plain CLI session is pull-only.
@@ -1007,11 +1028,12 @@ queue_codex_targets() {
     ledger_append "$(jq -nc --argjson result "$result" --arg msg "$(jq -r .id <<<"$rec")" \
       --arg to "$addr" --arg thread "$session" --argjson epoch "$(now_epoch)" \
       '$result + {kind:"delivery",transport:"codex-queue",msg:$msg,to:$to,thread:$thread,epoch:$epoch}')"
-    if [ "$status" = queued ]; then
-      printf 'queued inbox notice for %s\n' "$addr"
-    else
-      printf 'agent-bus: packet saved; Codex notice for %s: %s (see delivery row in ledger)\n' "$addr" "$status" >&2
-    fi
+    case "$status" in
+      queued) printf 'delivery: %s — queued a "check your inbox" notice\n' "$addr" ;;
+      already_notified) printf 'delivery: %s — already has an unread notice; it sees this when it reads\n' "$addr" ;;
+      budget_exhausted) printf 'delivery: %s — wake limit reached (AGENT_BUS_WAKE_BUDGET=%s); it sees this at its next read\n' "$addr" "$WAKE_BUDGET" ;;
+      *) printf 'delivery: %s — notice not sent (%s); the packet is saved and waits unread\n' "$addr" "$status" >&2 ;;
+    esac
   done < <(codex_targets "$rec")
 }
 
@@ -1223,10 +1245,12 @@ unowned_hint() { # state to
 
 cmd_post() {
   local to='' state='fyi' subject='' body='' bodyfile='' touched='[]' re='' close='' allow_claude=0
+  local resume="${AGENT_BUS_RESUME:-0}"
   local review_arg='' review_of='' review=''
 
   while [ $# -gt 0 ]; do
     if [ "$1" = --allow-claude ]; then allow_claude=1; shift; continue; fi
+    if [ "$1" = --resume ]; then resume=1; shift; continue; fi
     [ $# -ge 2 ] || die "post: $1 needs a value"
     case "$1" in
       --to) to="$2" ;;
@@ -1264,6 +1288,17 @@ cmd_post() {
            || die "post: no PM registered for ${LANE:+lane @$LANE or }$REPO — that seat should run 'agent-bus role pm${LANE:+ --lane $LANE}'" ;;
     @*) [ -n "$(role_seat "${to#@}")" ] || { valid_lane "${to#@}" && lane_exists "${to#@}"; } \
           || die "post: unknown scope $to (use a seat from 'agent-bus who', a role, a lane, @here, @repo, @pm, @lead, or @all)" ;;
+  esac
+  # A restarted agent gets a new seat name. A post to the old one would wait
+  # forever, so it goes to the live seat with the same tool and worktree.
+  case "$to" in */*.*)
+    if ! seat_live "$to"; then
+      local heir; heir=$(live_heir "$to")
+      if [ -n "$heir" ]; then
+        printf 'note: %s is gone; sending to %s (same tool and worktree)\n' "$to" "$heir" >&2
+        to="$heir"
+      fi
+    fi ;;
   esac
   # A work item must have an owner. Sent to a broadcast that no PM covers, it
   # would have none: policy decides whether to refuse it or give it to the lead.
@@ -1345,17 +1380,52 @@ cmd_post() {
     "$to" "$(policy_get owner)" >&2
 
   [ "${AGENT_BUS_NO_PUSH:-0}" = 1 ] && return 0
-  local src="from another agent, not your user" sock woke=0
+  local src="from another agent, not your user"
   if [ "$(pm_seat)" = "$ADDR" ] || { [ -n "$LANE" ] && [ "$(lane_pm_seat "$LANE")" = "$ADDR" ]; }; then
     src="from the PM your user put in charge here"
   fi
-  while IFS= read -r sock; do
-    [ -n "$sock" ] || continue
-    poke_seat "$sock" "agent-bus: packet $id from $ADDR [$state] — $src. Run: agent-bus read" && woke=$((woke + 1))
-  done < <(push_targets "$rec")
-  ((woke > 0)) && printf 'woke %d idle peer(s)\n' "$woke"
+  [ "${USER_SENT:-0}" = 1 ] && src="from your user"
+  deliver "$rec" "$src" "$resume"
+  return 0
+}
+
+# Wake each owner of a just-posted packet and say plainly what happened to it,
+# one line per owner. A post that reaches nobody says so: broadcasts used to
+# look delivered.
+deliver() { # rec src resume
+  local rec="$1" src="$2" resume="$3" id to state owners row addr tool
+  id=$(jq -r .id <<<"$rec"); to=$(jq -r .to <<<"$rec"); state=$(jq -r .state <<<"$rec")
+  owners=$(owner_rows "$rec")
+  if [ -z "$owners" ]; then
+    case "$to" in
+      @*) printf 'delivery: nobody owns this, so nobody is woken. Agents see it only if they run agent-bus read. To get it acted on, send it --to a seat (agent-bus who).\n' ;;
+      *) printf 'delivery: %s is not running; this waits until it is (or hand it to a live seat: agent-bus who)\n' "$to" ;;
+    esac
+  fi
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    addr=$(jq -r .addr <<<"$row"); tool=$(jq -r '.tool // ""' <<<"$row")
+    case "$tool" in
+      claude)
+        if poke_seat "$(jq -r '.socket // ""' <<<"$row")" \
+             "agent-bus: packet $id for $addr from $ADDR [$state] — $src. Run: agent-bus read (from $(jq -r '.cwd // "its worktree"' <<<"$row"))"; then
+          printf 'delivery: %s — woken\n' "$addr"
+        else printf 'delivery: %s — sees it at its next prompt\n' "$addr"; fi ;;
+      opencode)
+        if [ "$(pid_state "$(jq -r '.pid // ""' <<<"$row")")" = no ]; then
+          if [ "$resume" = 1 ] && resume_opencode "$addr" "$(jq -r '.session // ""' <<<"$row")" "$(jq -r '.cwd // ""' <<<"$row")" "$id"; then
+            printf 'delivery: %s — was stopped; restarted it to pick this up\n' "$addr"
+          else printf 'delivery: %s — not running; it sees this when restarted (post --resume restarts it)\n' "$addr"; fi
+        else printf 'delivery: %s — its plugin picks this up within seconds\n' "$addr"; fi ;;
+      codex|grok) ;;  # reported by their own transports below
+      *) printf 'delivery: %s — has no hooks; it sees this only when it runs agent-bus read\n' "$addr" ;;
+    esac
+  done <<<"$owners"
   queue_codex_targets "$rec"
   deliver_grok_targets "$rec"
+  # Codex seats that own this but never opted in to queue delivery.
+  jq -r 'select(.tool == "codex" and (.codex_queue // "") == "") | .addr' <<<"$owners" 2>/dev/null \
+    | while IFS= read -r addr; do [ -n "$addr" ] && printf 'delivery: %s — no queue delivery; it sees this when it reads\n' "$addr"; done
   return 0
 }
 
@@ -1710,6 +1780,12 @@ cmd_claim() {
   for p in "$@"; do
     np=$(normalize_path "$p")
     h=$(claim_holder "$np")
+    # A claim left by a seat that has ended blocks nobody: people had to
+    # release --force files a restarted agent still held.
+    if [ -n "$h" ] && ! seat_live "${h%% *}"; then
+      printf 'note: %s was held by %s, which has ended; taking it over\n' "$np" "${h%% *}" >&2
+      h=''
+    fi
     if [ -n "$h" ]; then
       printf 'CONTESTED %s — held by %s (%s ago)\n' "$np" "${h%% *}" "$(age "${h##* }")" >&2
       continue

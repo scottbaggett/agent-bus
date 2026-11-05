@@ -21,7 +21,7 @@
 #   claims/<hash>.json  advisory file claims
 set -euo pipefail
 
-VERSION="1.1.0"
+VERSION="0.3.0"
 
 BUS="${AGENT_BUS_HOME:-$HOME/.agents/bus}"
 LEDGER="$BUS/ledger.jsonl"
@@ -2242,7 +2242,8 @@ cmd_doctor() {
   # Stale-install check: compare the `agent-bus` on PATH against this script.
   local ib; ib=$(command -v agent-bus 2>/dev/null || true)
   if [ -n "$ib" ] && [ -x "$ib" ]; then
-    local iv; iv=$("$ib" version 2>/dev/null || printf '(no version command — pre-1.1.0 install)')
+    local iv; iv=$("$ib" version 2>/dev/null | head -n 1 | awk '{print $1, $2}')
+    [ -n "$iv" ] || iv='(no version command — very old install)'
     if [ "$iv" != "agent-bus $VERSION" ]; then
       printf 'agent-bus: warning: %s reports "%s"; this script is "agent-bus %s" — possible stale install\n' \
         "$ib" "$iv" "$VERSION" >&2

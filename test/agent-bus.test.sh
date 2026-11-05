@@ -886,5 +886,9 @@ raw_seat shinit shell tester grok unregister --name shinit >/dev/null
 out=$(AGENT_BUS_TOOL=grok AGENT_BUS_WT=notregistered AGENT_BUS_SESSION=local "$BIN" whoami 2>&1)
 assert_has "whoami warns for unregistered grok seat" "no seat file" "$out"
 
+# --- doctor: the CLI on PATH is this one ---
+out=$(PATH="$ROOT/bin:$PATH" a doctor 2>&1)
+assert_lacks "doctor: no stale-install warning for the same CLI" "possible stale install" "$out"
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 ((fail == 0))

@@ -170,6 +170,9 @@ ch=$(mktemp -d); printf 'agent-bus post --to @here --state needs-review\n' >"$ch
 assert_has "doctor flags @here instructions" "tells agents to post --to @here" "$(CODEX_HOME="$ch" a doctor 2>/dev/null)"
 rm -rf "$ch"
 assert_lacks "subcommand --help shows only that command" "snapshot" "$("$BIN" reply --help)"
+assert_has "tui refuses without a terminal" "needs a terminal" "$("$BIN" tui 2>&1 </dev/null || true)"
+assert_has "send --yes still needs your terminal" "only runs in your own terminal" "$("$BIN" send --yes --to codex/x.1 -m hi 2>&1 </dev/null || true)"
+assert_eq "snapshot has no peers when none are linked" "[]" "$("$BIN" snapshot | jq -c .peers)"
 out=$(c resolve "$rid" --reason handed-off 2>&1 || true)
 assert_has "resolve cannot hand off" "needs a destination" "$out"
 out=$(c resolve "$rid" --reason meh 2>&1 || true)
@@ -1046,6 +1049,8 @@ serve_b seats >"$PA/bus/state/peer.bmac.local.seats.json"
 out=$(pa who)
 assert_has "who shows the other Mac's agents" "on bmac (as of" "$out"
 assert_has "by name" "$oc" "$out"
+assert_eq "snapshot lists the linked Mac and its agents, for the TUI" "bmac $oc" \
+  "$(pa snapshot | jq -r '.peers[] | "\(.name) \(.seats[0].addr)"')"
 mkdir -p "$PA/nossh"; printf '#!/bin/sh\nexit 255\n' >"$PA/nossh/ssh"; chmod +x "$PA/nossh/ssh"
 out=$(AGENT_BUS_NO_PUSH=0 PATH="$PA/nossh:$PATH" pa post --to "$oc" -m "# hi" 2>&1 || true)
 assert_has "a post names the Mac its recipient is on" "is on bmac; sending it there" "$out"

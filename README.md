@@ -155,6 +155,18 @@ agent-bus post --re <id> --close escalated --to @lead --state question -m "Drop 
 
 You see it in `agent-bus attention`, answer, and close it.
 
+### Watch the bus and talk to your agents
+
+```sh
+agent-bus tui
+```
+
+A live view: every agent on this Mac and on linked Macs, what needs you, open
+work, and a feed of what's happening. Pick an agent and press Enter to chat with
+it: what you type is sent as you, and its answers appear as they come in. On a
+work item, Enter shows it, `r` replies, `x` closes it, and `c` opens a chat with
+whoever sent it. `?` lists the keys.
+
 ### Tell your agents something yourself
 
 To send a message as you, run this in your own terminal. Agents see it labeled
@@ -252,6 +264,7 @@ Details and caveats for each: [docs/hosts.md](docs/hosts.md).
 | Command | What it does |
 |---|---|
 | `agent-bus status` | where this agent stands: lane, what waits on it, the rules |
+| `agent-bus tui` | live view: agents, what needs you, open work; chat with any agent |
 | `agent-bus who` | live agents, PMs, open work, claims |
 | `agent-bus avatar [seat]` | an agent's bot, the same wherever it shows |
 | `agent-bus read` | this agent's packets |

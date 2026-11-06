@@ -8,9 +8,14 @@ class AgentBus < Formula
   url "https://github.com/scottbaggett/agent-bus/archive/refs/tags/v0.4.1.tar.gz"
   sha256 "0000000000000000000000000000000000000000000000000000000000000000"
 
+  depends_on "go" => :build
   depends_on "jq"
 
   def install
+    cd "tui" do
+      system "go", "build", "-trimpath", "-ldflags", "-s -w -X main.version=#{version}",
+             "-o", buildpath/"bin/agent-bus-tui", "."
+    end
     libexec.install Dir["*"]
     (libexec/".installed-version").write "v#{version}\n"
     bin.install_symlink libexec/"bin/agent-bus"
@@ -29,5 +34,6 @@ class AgentBus < Formula
 
   test do
     assert_match "agent-bus", shell_output("#{bin}/agent-bus version")
+    assert_match version.to_s, shell_output("#{libexec}/bin/agent-bus-tui --version")
   end
 end

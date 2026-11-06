@@ -2237,18 +2237,24 @@ cmd_ask() {
 # and a typed yes; agents run without one. This is a speed bump, not a
 # security boundary: every seat runs as the same OS user.
 cmd_send() {
-  [ -t 0 ] && [ -t 1 ] || die "send: posts as you, the human, so it only runs in your own terminal. Agents use agent-bus post."
-  local args=() to='' t a
+  local args=() to='' t a yes=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --to) [ $# -ge 2 ] || die "send: --to needs a value"; to="$2"; shift 2 ;;
+      --yes) yes=1; shift ;;
       *) args+=("$1"); shift ;;
     esac
   done
+  # Your terminal only: agents run without one. --yes (the TUI's chat, where
+  # typing the message is the confirmation) still needs it on stdin.
+  [ -t 0 ] && { [ -t 1 ] || [ "$yes" = 1 ]; } \
+    || die "send: posts as you, the human, so it only runs in your own terminal. Agents use agent-bus post."
   [ -n "$to" ] || die "send: --to <seat>[,<seat>...] is required"
-  printf 'Send this as you (the user) to %s? [y/N] ' "$to" >/dev/tty
-  read -r a </dev/tty || a=''
-  case "$a" in y|Y|yes) ;; *) die "send: not sent" ;; esac
+  if [ "$yes" != 1 ]; then
+    printf 'Send this as you (the user) to %s? [y/N] ' "$to" >/dev/tty
+    read -r a </dev/tty || a=''
+    case "$a" in y|Y|yes) ;; *) die "send: not sent" ;; esac
+  fi
   USER_SENT=1
   IFS=',' read -ra targets <<<"$to"
   for t in "${targets[@]}"; do
@@ -2736,7 +2742,38 @@ snapshot_json() {
                end)}' "$LEDGER"
 }
 
-cmd_snapshot() { snapshot_json; }
+# Linked Macs and their agents as of the last sync, for snapshot.
+peer_snapshot_json() {
+  local h f out='[]'
+  [ "${AGENT_BUS_NO_PEERS:-0}" != 1 ] || { printf '[]'; return 0; }
+  for h in $(peer_list); do
+    f=$(peer_seats_file "$h")
+    out=$(jq -c --arg h "$h" --argjson seats "$( [ -f "$f" ] && cat "$f" || printf '[]')" \
+      --argjson synced "$( [ -f "$f" ] && { stat -f %m "$f" 2>/dev/null || stat -c %Y "$f"; } || printf 0)" \
+      '. + [{host: $h, name: ($h | sub("\\.local$"; "")), synced: $synced, seats: $seats}]' <<<"$out")
+  done
+  printf '%s' "$out"
+}
+# The TUI is a separate binary (Go): Homebrew builds it, the curl installer
+# downloads it from the release, and a checkout builds it on first run.
+cmd_tui() {
+  local root bin src; root=$(self_root)
+  [ -t 0 ] && [ -t 1 ] || die "tui: needs a terminal"
+  for bin in "${AGENT_BUS_TUI:-}" "$root/bin/agent-bus-tui" "$root/tui/agent-bus-tui"; do
+    [ -n "$bin" ] && [ -x "$bin" ] && break; bin=''
+  done
+  src="$root/tui"
+  # A checkout rebuilds when the source is newer than its binary.
+  if [ -f "$src/go.mod" ] && command -v go >/dev/null 2>&1 \
+     && { [ -z "$bin" ] || { [ "$bin" = "$src/agent-bus-tui" ] && [ -n "$(find "$src" -name '*.go' -newer "$bin" 2>/dev/null | head -1)" ]; }; }; then
+    printf 'building the TUI …\n' >&2
+    (cd "$src" && go build -o agent-bus-tui .) || die "tui: build failed"
+    bin="$src/agent-bus-tui"
+  fi
+  [ -n "$bin" ] || die "tui: not installed with this copy. Upgrade (brew upgrade agent-bus, or agent-bus update), or install Go to build it from a checkout."
+  AGENT_BUS_CLI="$root/bin/agent-bus" exec "$bin" "$@"
+}
+cmd_snapshot() { snapshot_json | jq -c --argjson peers "$(peer_snapshot_json)" '. + {peers: $peers}'; }
 
 # Which lanes' branches are already merged into their repo's trunk. Results go
 # to state/merged.json for snapshot to read, so hooks never pay for git.
@@ -3259,6 +3296,8 @@ agent-bus — handoff bus for coding agents sharing repos and worktrees.
   offboard                    stand down: PM role and claims released, open
                               items listed
   log [n]                     recent packets and closes
+  tui                         live view: agents here and on linked Macs, what needs you,
+                              open work, a live feed; reply and close from it
   snapshot                    machine-wide JSON: seats (with pid and worktree path), open work, lanes,
                               attention, recent activity (read-only; for viewers)
   doctor                      identity, host install, live seats
@@ -3344,6 +3383,7 @@ case "$cmd" in
   offboard) cmd_offboard "$@" ;;
   log) cmd_log "$@" ;;
   snapshot) cmd_snapshot ;;
+  tui) cmd_tui "$@" ;;
   lanes) cmd_lanes "$@" ;;
   init) cmd_init "$@" ;;
   status) touch_seat; cmd_status ;;

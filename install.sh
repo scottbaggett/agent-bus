@@ -91,6 +91,16 @@ else
   tar -xzf "$tmp/src.tar.gz" -C "$tmp/src" --strip-components=1 || die "could not unpack $url"
   [ -x "$tmp/src/bin/agent-bus" ] || die "$url does not contain bin/agent-bus"
   printf '%s\n' "$tag" >"$tmp/src/.installed-version"
+  # The TUI is a prebuilt binary attached to the release; without one (a
+  # branch, an older tag, an unlisted platform) everything else still works.
+  os=$(uname -s | tr '[:upper:]' '[:lower:]'); arch=$(uname -m)
+  case "$arch" in x86_64) arch=amd64 ;; aarch64) arch=arm64 ;; esac
+  tui_url="${AGENT_BUS_TUI_URL:-https://github.com/$REPO/releases/download/$tag/agent-bus-tui-$os-$arch}"
+  if [ -z "$ref" ] && curl -fsSL "$tui_url" -o "$tmp/src/bin/agent-bus-tui" 2>/dev/null; then
+    chmod +x "$tmp/src/bin/agent-bus-tui"
+  else
+    rm -f "$tmp/src/bin/agent-bus-tui"
+  fi
   rm -rf "$target"; mv "$tmp/src" "$target"
   label="$tag"
 fi

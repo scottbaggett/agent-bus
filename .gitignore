@@ -15,3 +15,5 @@ plugins/agent-bus/bun.lock
 # Python helper/test caches
 __pycache__/
 *.pyc
+tui/agent-bus-tui
+bin/agent-bus-tui

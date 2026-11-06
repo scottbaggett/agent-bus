@@ -17,6 +17,7 @@ trap 'rm -rf "$T"' EXIT
 for _v in $(env | sed -n 's/^\(AGENT_BUS_[A-Z0-9_]*\)=.*/\1/p'); do unset "$_v"; done
 export HOME="$T/home" CODEX_HOME="$T/home/.codex"
 export AGENT_BUS_HOME="$T/bus"
+export AGENT_BUS_TUI_URL="file://$T/no-such-tui"   # no network: no TUI asset unless a test makes one
 mkdir -p "$HOME/.claude" "$AGENT_BUS_HOME"
 echo keep >"$AGENT_BUS_HOME/ledger.jsonl"
 SHARE="$HOME/.local/share/agent-bus" BINDIR="$HOME/.local/bin"
@@ -27,7 +28,7 @@ export PATH="/usr/bin:/bin:/usr/sbin:/sbin:$(dirname "$(command -v jq)")"
 tarball() { # name
   mkdir -p "$T/pkg"
   rm -rf "$T/pkg/agent-bus-$1"
-  rsync -a --exclude .git "$ROOT/" "$T/pkg/agent-bus-$1/"
+  rsync -a --exclude .git --exclude 'agent-bus-tui' "$ROOT/" "$T/pkg/agent-bus-$1/"
   tar -czf "$T/$1.tar.gz" -C "$T/pkg" "agent-bus-$1"
 }
 tarball 9.9.1; tarball 9.9.2
@@ -45,11 +46,14 @@ assert_lacks "claude hooks never pin a version" "versions/" "$hooks"
 assert_eq "skill links through current" "$SHARE/current/skills/agent-bus" "$(readlink "$HOME/.claude/skills/agent-bus")"
 assert_lacks "opencode not wired when absent" "opencode:" "$out"
 assert_has "PATH hint when bin dir is missing from PATH" "fish_add_path" "$out"
+assert_eq "no TUI asset, nothing installed for it" "no" "$([ -e "$SHARE/current/bin/agent-bus-tui" ] && echo yes || echo no)"
 
-out=$(AGENT_BUS_INSTALLER="$ROOT/install.sh" AGENT_BUS_DOWNLOAD_URL="file://$T/9.9.2.tar.gz" \
+printf '#!/bin/sh\necho fake-tui\n' >"$T/tui-asset"
+out=$(AGENT_BUS_TUI_URL="file://$T/tui-asset" AGENT_BUS_INSTALLER="$ROOT/install.sh" AGENT_BUS_DOWNLOAD_URL="file://$T/9.9.2.tar.gz" \
   "$BINDIR/agent-bus" update --version v9.9.2 2>&1)
 assert_has "update installs the new release" "installed agent-bus v9.9.2" "$out"
 assert_eq "update flips current" "$SHARE/versions/v9.9.2" "$(readlink "$SHARE/current")"
+assert_eq "the release's TUI binary is installed beside the CLI" "fake-tui" "$("$SHARE/current/bin/agent-bus-tui" 2>&1)"
 assert_eq "hooks unchanged by update" "$hooks" "$(jq -r '[.hooks[][].hooks[].command] | join("\n")' "$HOME/.claude/settings.json")"
 n=$(jq '[.hooks[][].hooks[].command | select(contains("agent-bus-managed"))] | length' "$HOME/.claude/settings.json")
 assert_eq "re-install does not duplicate hooks" 4 "$n"

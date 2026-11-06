@@ -17,3 +17,4 @@ __pycache__/
 *.pyc
 tui/agent-bus-tui
 bin/agent-bus-tui
+tui/tui

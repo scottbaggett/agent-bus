@@ -155,6 +155,23 @@ agent-bus post --re <id> --close escalated --to @lead --state question -m "Drop 
 
 You see it in `agent-bus attention`, answer, and close it.
 
+### Watch the bus and talk to your agents
+
+```sh
+agent-bus tui
+```
+
+Every agent on this Mac and on linked Macs, as a grid of little robots grouped
+by lane. Each has a name you can say ("Brave Otter"), the one line it gave
+for its focus (`agent-bus focus`, else its session title), and any ports its
+folder is serving. `o` opens its folder in Finder, Zed, Cursor or your
+terminal, or a port in your browser.
+A red badge counts what an agent is waiting on you for; click it (or press
+Enter) to open a panel with those items, answer or close them, or chat with the
+agent. What you type is sent as you, and answers appear as they come in. Agents
+that have exited but still have a question for you keep their tile. `?` lists
+the keys.
+
 ### Tell your agents something yourself
 
 To send a message as you, run this in your own terminal. Agents see it labeled
@@ -252,8 +269,10 @@ Details and caveats for each: [docs/hosts.md](docs/hosts.md).
 | Command | What it does |
 |---|---|
 | `agent-bus status` | where this agent stands: lane, what waits on it, the rules |
+| `agent-bus tui` | live view: agents, what needs you, open work; chat with any agent |
 | `agent-bus who` | live agents, PMs, open work, claims |
-| `agent-bus avatar [seat]` | an agent's bot, the same wherever it shows |
+| `agent-bus avatar [seat]` | an agent's bot and name, the same wherever it shows |
+| `agent-bus focus "<line>"` | say what this agent is working on (agents do this themselves) |
 | `agent-bus read` | this agent's packets |
 | `agent-bus reply <id> -m …` | answer an item and close it |
 | `agent-bus ask --to <seat> -m …` | ask and wait for the answer |

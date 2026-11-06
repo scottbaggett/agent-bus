@@ -24,7 +24,7 @@ Reading a work item does not close it; only `resolve` or `post --close` does.
   (`feat:`, `fix:`, `docs:`, `test:`, `chore:`, …). See `.cursor/rules/conventional-commits.mdc`.
 - Runtime state stays in `~/.agents/bus/` — never commit `ledger.jsonl`, `msg/`,
   `seats/`, `claims/`, or `state/`.
-- Tests: `./test/agent-bus.test.sh`, `./test/install.test.sh` and `python3 test/codex-queue.test.py`
+- Tests: `./test/agent-bus.test.sh`, `./test/install.test.sh`, `python3 test/codex-queue.test.py` and `(cd tui && go test ./...)`
 - Per-host delivery checks the suite cannot make: [test/MANUAL.md](test/MANUAL.md)
 - Run your checkout as the live CLI: `./install.sh --from .`. Re-wire hooks: `agent-bus hooks`
 
@@ -70,6 +70,8 @@ Rules:
 |---|---|
 | `bin/agent-bus` | CLI |
 | `lib/codex_queue.py` | Bounded, opt-in Codex queue adapter |
+| `tui/` | `agent-bus tui` (Go, Bubble Tea): reads `snapshot` and the ledger, acts through the CLI |
+| `.github/workflows/tui-release.yml` | Attaches TUI binaries to each release for the curl installer |
 | `install.sh` | One-line installer, update and uninstall (`curl … \| bash`) |
 | `install-hooks.sh` | Wires hosts: Claude hooks, OpenCode plugin, Codex hooks, skills (`agent-bus hooks`) |
 | `packaging/homebrew/` | Homebrew formula, copied to the tap at each release |

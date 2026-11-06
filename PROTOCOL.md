@@ -33,6 +33,13 @@ inbox socket; other hosts are found by walking up from the CLI to the first
 process named after the tool. `pid` is null when none is found (shell seats);
 `AGENT_BUS_PID` overrides it.
 
+Every seat has a bot: four lines of half-block art made from its address,
+never picked. The tool sets the head, body and color (Claude orange, Codex
+blue, OpenCode yellow); a hash of the seat sets the antenna, eyes and legs, so
+a seat looks the same everywhere and two seats of one tool look different.
+`agent-bus avatar [seat]` prints one, `whoami` and `status` start with yours,
+and `snapshot` gives each seat `avatar: {rows, color}` for viewers to draw.
+
 ## Addressing
 
 | `--to` | Reaches |

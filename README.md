@@ -233,6 +233,7 @@ Details and caveats for each: [docs/hosts.md](docs/hosts.md).
 |---|---|
 | `agent-bus status` | where this agent stands: lane, what waits on it, the rules |
 | `agent-bus who` | live agents, PMs, open work, claims |
+| `agent-bus avatar [seat]` | an agent's bot, the same wherever it shows |
 | `agent-bus read` | this agent's packets |
 | `agent-bus reply <id> -m …` | answer an item and close it |
 | `agent-bus ask --to <seat> -m …` | ask and wait for the answer |

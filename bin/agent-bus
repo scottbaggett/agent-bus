@@ -1170,7 +1170,60 @@ cmd_uninstall() {
   else die "uninstall: no install.sh next to this CLI ($root)"; fi
 }
 
+# ------------------------------------------------------------------ avatars
+#
+# Every seat gets a little bot, generated from its address and never picked:
+# the tool sets the head and the color, the seat's hash the antenna, eyes and
+# legs. The same seat looks the same everywhere; two Codex seats don't.
+avatar_color() {
+  case "$1" in claude) echo '#E0855F' ;; codex) echo '#79AEFF' ;; opencode) echo '#F2C94C' ;;
+    grok) echo '#E8E3D8' ;; *) echo '#9A9384' ;; esac
+}
+# 8x8 bitmap, '#' on, '.' off.
+avatar_bits() { # addr tool
+  local h t e l top head mid
+  h=$(printf '%s' "$1" | shasum | cut -c1-6)
+  t=$((16#${h:0:2} % 3)); e=$((16#${h:2:2} % 3)); l=$((16#${h:4:2} % 3))
+  case $t in 0) top='........' ;; 1) top='...##...' ;; 2) top='..#..#..' ;; esac
+  local eyes; case $e in 0) eyes='.##.' ;; 1) eyes='#..#' ;; 2) eyes='....' ;; esac
+  local head erow b1 b2
+  case "$2" in
+    claude)   head='.######.'; erow=".#${eyes}#."; b1='########'; b2='.######.' ;;
+    codex)    head='.######.'; erow="##${eyes}##"; b1='.######.'; b2='.######.' ;;
+    opencode) head='########'; erow="##${eyes}##"; b1='#.####.#'; b2='..####..' ;;
+    *)        head='.######.'; erow=".#${eyes}#."; b1='.######.'; b2='.######.' ;;
+  esac
+  printf '%s\n' "$top" "$head" "$erow" "$head" "$b1" "$b2"
+  case $l in 0) printf '%s\n' '..#..#..' '..#..#..' ;; 1) printf '%s\n' '.##..##.' '.#....#.' ;;
+    2) printf '%s\n' '..####..' '.#....#.' ;; esac
+}
+# Four lines of half blocks. $3=1 colors them (truecolor).
+avatar_art() { # addr tool color?
+  local bits c=''
+  bits=$(avatar_bits "$1" "$2")
+  if [ "${3:-0}" = 1 ]; then
+    local hex; hex=$(avatar_color "$2"); hex=${hex#\#}
+    c=$(printf '\033[38;2;%d;%d;%dm' "0x${hex:0:2}" "0x${hex:2:2}" "0x${hex:4:2}")
+  fi
+  printf '%s\n' "$bits" | awk -v c="$c" -v r="$([ -n "$c" ] && printf '\033[0m')" '
+    { row[NR] = $0 }
+    END { for (i = 1; i <= 8; i += 2) { out = ""
+      for (j = 1; j <= 8; j++) { a = substr(row[i], j, 1) == "#"; b = substr(row[i+1], j, 1) == "#"
+        out = out (a && b ? "█" : a ? "▀" : b ? "▄" : " ") }
+      print c out r } }'
+}
+use_color() { [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-}" != dumb ]; }
+
+# `agent-bus avatar [seat]`: a seat's bot (yours by default).
+cmd_avatar() {
+  local addr="${1:-$ADDR}" tool
+  tool=${addr%%/*}
+  avatar_art "$addr" "$tool" "$(use_color && echo 1 || echo 0)" | while IFS= read -r line; do printf '  %s\n' "$line"; done
+  printf '  %s\n' "$addr"
+}
+
 cmd_whoami() {
+  cmd_avatar; echo
   local pm; pm=$(pm_seat)
   printf 'seat     %s\nscope    %s\nsession  %s\nrepo     %s\nrepo_id  %s\nworktree %s\nbranch   %s\n' \
     "$ADDR" "$SCOPE" "$SESSION" "$REPO" "$REPO_ID" "$WT" "$BRANCH"
@@ -2173,7 +2226,7 @@ cmd_offboard() {
 #   attention  what needs a decision, each with the command that clears it
 #   recent     the last 100 posts, closes and wakes
 snapshot_json() {
-  local now f base rid a l n seats pms='{}' lanepms='{}' roles='{}' projects='[]' merged='{}'
+  local av now f base rid a l n seats pms='{}' lanepms='{}' roles='{}' projects='[]' merged='{}'
   now=$(now_epoch)
   seats=$(seat_rows | jq -sc --argjson cut "$((now - SEAT_TTL))" --argjson codex_cut "$(codex_idle_cut)" \
     "$JQ_SEAT_LIVE"'[.[] | select(buslive($cut; $codex_cut) and (.tool // "") != "lead")
@@ -2187,6 +2240,9 @@ snapshot_json() {
   # Each live seat's read cursor and wake count, for NOT PICKED UP and spent budgets.
   seats=$(jq -c '.[]' <<<"$seats" | while IFS= read -r row; do
       f="$BUS/state/$(slugify "$(jq -r .addr <<<"$row")").json"
+      av=$(avatar_art "$(jq -r .addr <<<"$row")" "$(jq -r .tool <<<"$row")" | jq -Rsc 'split("\n") | map(select(length > 0))')
+      row=$(jq -c --argjson rows "$av" --arg col "$(avatar_color "$(jq -r .tool <<<"$row")")" \
+        '. + {avatar: {rows: $rows, color: $col}}' <<<"$row")
       if [ -f "$f" ]; then jq -c --slurpfile st "$f" '. + {read: ($st[0].read // []), wakes: ($st[0].wakes // 0)}' <<<"$row"
       else jq -c '. + {read: [], wakes: 0}' <<<"$row"; fi
     done | jq -sc '.')
@@ -2767,6 +2823,7 @@ EOF
 # front door; cheap enough to run at any time.
 cmd_status() {
   local mine sent peers pm n
+  cmd_avatar; echo
   orient_seat
   mine=$(lq 'closed($L) as $c | file_map($L) as $fm
     | [$L[] | select(.kind == "msg" and sup and ($c[.id] | not) and owns($me) and (authored($me) | not))]
@@ -2805,6 +2862,7 @@ agent-bus — handoff bus for coding agents sharing repos and worktrees.
                               webhook URL; status shows wakes and last delivery
   grok shell-init --name <n>  print export lines for running as a Grok seat
   whoami                      this seat's identity
+  avatar [seat]               a seat's bot (yours by default)
   who                         live seats, the PM, open-work count, claims
   post [flags]                send a packet
       --to <seat|scope|@role|@lane|@pm|@lead|@here|@repo|@all>     required
@@ -2916,6 +2974,7 @@ case "$cmd" in
   codex) cmd_codex "$@" ;;
   grok)  cmd_grok  "$@" ;;
   whoami) cmd_whoami ;;
+  avatar) cmd_avatar "$@" ;;
   who) touch_seat; cmd_who ;;
   post) touch_seat; cmd_post "$@" ;;
   read) touch_seat; cmd_read "$@" ;;

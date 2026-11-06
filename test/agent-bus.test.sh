@@ -993,5 +993,14 @@ assert_has "whoami warns for unregistered grok seat" "no seat file" "$out"
 out=$(PATH="$ROOT/bin:$PATH" a doctor 2>&1)
 assert_lacks "doctor: no stale-install warning for the same CLI" "possible stale install" "$out"
 
+# --- avatars: generated from the seat, stable, different per seat ---
+av1=$("$BIN" avatar codex/web.5f21); av2=$("$BIN" avatar codex/web.9e02)
+assert_eq "an avatar is the same every time" "$av1" "$("$BIN" avatar codex/web.5f21)"
+[ "$av1" != "$av2" ] && ok "two seats of one tool look different" || bad "two seats of one tool look different" "$av1"
+assert_has "the avatar is labeled with its seat" "codex/web.5f21" "$av1"
+assert_lacks "no color codes outside a terminal" $'\033' "$av1"
+assert_eq "an avatar is four lines of art" "4" "$("$BIN" snapshot | jq '[.seats[] | .avatar.rows | length] | first')"
+assert_has "snapshot carries the tool's color" "#" "$("$BIN" snapshot | jq -r '.seats[0].avatar.color')"
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 ((fail == 0))

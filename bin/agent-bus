@@ -1194,6 +1194,12 @@ cmd_update() {
 # `agent-bus uninstall`: hooks, skills, the link and the install dir. Never the bus.
 cmd_uninstall() {
   local root; root=$(self_root)
+  # Linked Macs' keys come out with the install: nothing keeps a way in.
+  local h; for h in $(peer_list); do peer_unauthorize "$h"; done
+  if [ -f "$HOME/.ssh/authorized_keys" ] && grep -q ' agent-bus-peer:' "$HOME/.ssh/authorized_keys"; then
+    { grep -v ' agent-bus-peer:' "$HOME/.ssh/authorized_keys" || :; } >"$HOME/.ssh/authorized_keys.agent-bus.tmp" \
+      && mv "$HOME/.ssh/authorized_keys.agent-bus.tmp" "$HOME/.ssh/authorized_keys"
+  fi
   if is_brew; then
     "$root/install-hooks.sh" --uninstall --claude --opencode --codex || true
     printf 'hooks removed; finish with: brew uninstall agent-bus\n'; return 0
@@ -1838,6 +1844,7 @@ cmd_peer() {
       peer_key_ensure
       printf 'linking with %s. ssh may ask for your password on %s, once.\n' "$host" "$host"
       # Your own ssh login (password or key), once: install our key there, get theirs.
+      # shellcheck disable=SC2046 # the key is two words on purpose: type and body
       out=$(ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 "$host" \
               env "PATH=$PEER_PATH" agent-bus peer accept "$(peer_self).local" $(peer_pub) 2>/dev/null); code=$?
       case "$code" in

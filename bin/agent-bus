@@ -1631,14 +1631,14 @@ valid_host() { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$ ]]; }
 # Let a peer's key in, for agent-bus sync only. One line per peer, replaced on
 # re-pairing.
 peer_authorize() { # name pubkey
-  local name="$1" pub="$2" ak="$HOME/.ssh/authorized_keys" self
+  local name="$1" pub="$2" ak="$HOME/.ssh/authorized_keys"
   [[ "$pub" =~ ^ssh-ed25519\ [A-Za-z0-9+/]+=*$ ]] || die "peer: not an ed25519 public key"
   valid_host "$name" || die "peer: bad host name: $name"
-  self=$(command -v agent-bus 2>/dev/null || printf '%s' "$0")
   mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
   touch "$ak" && chmod 600 "$ak"
   { grep -vF " agent-bus-peer:$name" "$ak" || :; } >"$ak.agent-bus.tmp"
-  printf 'command="env PATH=%s %s peer serve",restrict %s agent-bus-peer:%s\n' "$PEER_PATH" "$self" "$pub" "$name" >>"$ak.agent-bus.tmp"
+  # by name, through PEER_PATH: survives moving between brew and the curl install
+  printf 'command="env PATH=%s agent-bus peer serve",restrict %s agent-bus-peer:%s\n' "$PEER_PATH" "$pub" "$name" >>"$ak.agent-bus.tmp"
   mv "$ak.agent-bus.tmp" "$ak"
 }
 peer_unauthorize() { # name

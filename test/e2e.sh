@@ -41,8 +41,7 @@ export AGENT_BUS_HOME; AGENT_BUS_HOME=$(mktemp -d)
 REPO=$(mktemp -d)/e2e-repo
 mkdir -p "$REPO" && git -C "$REPO" init -q && git -C "$REPO" commit -q --allow-empty -m init
 LEDGER="$AGENT_BUS_HOME/ledger.jsonl"
-# A team repo has its rules committed. Without them the first digest asks the
-# agent to interview its user, which a headless run can't do.
+# A team repo has its rules committed; the run checks agents under set rules.
 printf 'bus %s\nrepo %s\n\n' "$AGENT_BUS_HOME" "$REPO"
 
 # Child agents must not inherit this session's identity.

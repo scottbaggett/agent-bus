@@ -1,4 +1,4 @@
-# agent-bus
+# Agent Bus
 
 <p align="center">
   <img src="assets/agent-bus.svg" width="900" alt="agent-bus as a terminal dashboard. A Claude Code agent hands the client work to a Codex agent; Codex claims src/client.ts, does it and sends it back; Claude checks and approves it. An OpenCode agent keeps out of the claimed file and asks you before dropping a table. A live bus log lists each step.">

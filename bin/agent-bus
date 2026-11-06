@@ -1378,7 +1378,8 @@ cmd_post() {
   # A lane taken from a ticket key also travels as an external reference.
   local ref=''
   if [ "$LANE_SRC" = branch ] || [ "$LANE_SRC" = worktree ]; then ref=$(printf '%s' "$LANE" | tr a-z A-Z); fi
-  local id rec
+  local id rec first=0
+  in_list "$state" 'needs-review blocked handoff question' && ! policy_configured && repo_is_new && first=1
   id="$(date -u +%Y%m%dT%H%M%SZ)-$(head -c4 /dev/urandom | xxd -p)"
   printf '%s\n' "$body" >"$BUS/msg/$id.md"
   # One row carries both halves of a handoff: the new item, and the close of
@@ -1406,6 +1407,7 @@ cmd_post() {
   printf 'posted %s -> %s  [%s]  id=%s\n' "$ADDR" "$to" "$state" "$id"
   [ -n "$review" ] && printf 'when it is done, %s reviews it\n' "$review"
   [ -n "$close" ] && printf 'closed %s (%s)\n' "$re" "$close"
+  ((first)) && post_tip "$to" "$review"
 
   [ "$assign" = '@lead' ] && printf 'note: nobody supervises %s, so the lead owns this (team rule owner=%s)\n' \
     "$to" "$(policy_get owner)" >&2
@@ -1418,6 +1420,18 @@ cmd_post() {
   [ "${USER_SENT:-0}" = 1 ] && src="from your user"
   deliver "$rec" "$src" "$resume"
   return 0
+}
+
+# The first work item in a repo with no rules set: say, once, what the default
+# just did and where to change it. This is when the rules mean something.
+post_tip() { # to review
+  local who
+  case "$2" in "$ADDR") who=you ;; @lead) who='your user' ;; '') who='' ;; *) who="$2" ;; esac
+  if [ -n "$who" ]; then
+    printf 'tip: the first piece of work handed over in %s. When %s finishes it, it comes back to %s to check before it counts as done. To change that, or when agents stop and ask your user first: agent-bus init. Mention this to your user in one sentence.\n' "$REPO" "$1" "$who"
+  else
+    printf 'tip: the first piece of work handed over in %s. Who checks finished work, and when agents stop and ask your user first, are team rules: agent-bus init. Mention this to your user in one sentence.\n' "$REPO"
+  fi
 }
 
 # Wake each owner of a just-posted packet and say plainly what happened to it,
@@ -1539,21 +1553,22 @@ policy_summary() {
          else "settling agent disagreements" end) | join(", ")) end) ] | join("; ")'
 }
 
-POLICY_NUDGE='Do the task you were given first; the recommended defaults apply meanwhile. When your user is there to answer (never in a headless or worker run), ask them four quick questions and save the answers with agent-bus init --set:
-  1. owner: a work item sent to everyone (@here) has no owner. refuse (make the sender pick a recipient; recommended) | lead (send to the user) | pm (send to a lane PM)
-  2. review: who accepts finished work? requester (whoever asked; recommended) | lead | none
-  3. ask_lead: when should agents stop and ask the user? any of scope,destructive,disagreement (recommended: scope,destructive) | never
-  4. decisions: record decisions and show them to later sessions? on (recommended) | off
-Example: agent-bus init --set owner=refuse,review=requester,ask_lead=scope,destructive,decisions=on
-Then remind the user to commit .agent-bus.json so the whole team shares the rules.'
+# Whether any agent has posted in this repo yet. A new repo gets a short intro
+# from /agent-bus and one tip at its first work item, instead of questions.
+repo_is_new() {
+  ! grep -qsF "\"repo_id\":\"$REPO_ID\"" "$LEDGER" "$BUS/ledger.archive.jsonl"
+}
 
 orient() {
   [ "$REPO" = - ] && return 0
-  if ! policy_configured; then
-    printf 'agent-bus: no team rules are set for %s yet. %s\n' "$REPO" "$POLICY_NUDGE"
-  fi
   orient_seat
-  policy_configured && printf 'agent-bus rules here: %s. Type /agent-bus for help.\n' "$(policy_summary)"
+  if policy_configured; then
+    printf 'agent-bus rules here: %s. Type /agent-bus for help.\n' "$(policy_summary)"
+  else
+    # Defaults are fine to work under. Asking a user about rules for things they
+    # haven't seen happen yet was the worst part of starting out.
+    printf 'agent-bus rules here (the defaults): %s. No need to raise them with your user; they can change them with agent-bus init.\n' "$(policy_summary)"
+  fi
   return 0
 }
 
@@ -2683,26 +2698,27 @@ cmd_init() {
   fi
 
   local owner review ask decisions a
-  a=$(ask_choice "1. A work item sent to everyone (@here) has no owner. What should happen?" \
-    "Refuse it and make the agent pick a recipient (recommended)" "Send it to me (the lead)" "Send it to the lane's PM agent")
+  printf '\nFour questions about how your agents work together. Press Enter to keep the\nrecommended answer; you can change any of them later with agent-bus init.\n' >&2
+  a=$(ask_choice "1. An agent sends a task to all the agents instead of one. Who does it?" \
+    "Nobody: tell the agent to pick one (recommended)" "Me" "The agent running the feature (its PM)")
   owner=$(printf 'refuse lead pm' | cut -d' ' -f"$a")
-  a=$(ask_choice "2. When an agent finishes work, who accepts it?" \
-    "Whoever asked for it (recommended)" "Me, always" "Nobody — done means done")
+  a=$(ask_choice "2. An agent finishes a task another agent gave it. Who checks the work?" \
+    "The agent that asked for it (recommended)" "Me, every time" "Nobody: done is done")
   review=$(printf 'requester lead none' | cut -d' ' -f"$a")
-  a=$(ask_choice "3. When should agents stop and ask you?" \
-    "Scope changes and destructive actions (recommended)" "Scope changes, destructive actions and agent disagreements" \
-    "Only scope changes" "Never — let them decide")
+  a=$(ask_choice "3. When should agents stop and check with you first?" \
+    "Before changing what was asked, or deleting anything hard to undo (recommended)" \
+    "Those, and also when two agents disagree" \
+    "Only before changing what was asked" "Never: let them decide")
   ask=$(printf 'scope,destructive scope,destructive,disagreement scope never' | cut -d' ' -f"$a")
-  a=$(ask_choice "4. Should agents record decisions so later sessions follow them?" "Yes (recommended)" "No")
+  a=$(ask_choice "4. Should agents write down decisions, so new sessions follow them without you repeating yourself?" \
+    "Yes (recommended)" "No")
   decisions=$(printf 'on off' | cut -d' ' -f"$a")
   pj=$(jq -nc --arg o "$owner" --arg r "$review" --arg a "$ask" --arg d "$decisions" \
     '{owner:$o, review:$r, ask_lead:$a, decisions:$d}')
   policy_write "$target" "$pj"
   printf '\nsaved to %s\n' "$target"
   ((personal)) || printf 'commit it so the whole team shares these rules: git add %s\n' "$(basename "$target")"
-  printf '\nThe rules: %s.\n\n' "$(policy_summary)"
-  cmd_guide worker
-  printf '\nIn any agent session, type /agent-bus to see where you stand and what to do next.\n'
+  printf '\nTry it: open two agent windows, type /agent-bus in one, and ask it to hand\nsomething to the other.\n'
 }
 
 # `agent-bus guide [worker|supervisor|reviewer]`: the patterns, short.
@@ -2769,7 +2785,8 @@ cmd_status() {
   fi
   [ "${sent:-0}" -gt 0 ] && printf '%s item(s) you sent are still open\n' "$sent"
   if policy_configured; then printf '\nrules here: %s\n' "$(policy_summary)"
-  else printf '\nno team rules set for %s yet — run agent-bus init (or ask your agent to set them up)\n' "$REPO"; fi
+  else printf '\nrules here (the defaults): %s. Change them: agent-bus init\n' "$(policy_summary)"; fi
+  repo_is_new && printf '\nnew here: no agent has sent anything in %s yet\n' "$REPO"
   printf '\nnext: agent-bus read · post --to <seat|@lead> … · resolve <id> --reason done · guide\n'
 }
 

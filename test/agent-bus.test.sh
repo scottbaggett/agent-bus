@@ -449,17 +449,29 @@ pol p1 who >/dev/null; pol p2 who >/dev/null
 RF="$BUS_HOME/repo-policy.json"; export AGENT_BUS_REPO_POLICY="$RF"
 # defaults, nudge, init --set
 assert_has "defaults refuse ownerless work" "owner = refuse" "$(pol p1 init --show)"
-assert_has "an unset repo nudges the agent to ask its user" "no team rules are set" "$(pol p3 digest)"
+out=$(pol p3 digest)
+assert_has "an unset repo works under the defaults" "rules here (the defaults)" "$out"
+assert_lacks "an unset repo doesn't send the agent to quiz its user" "ask them" "$out"
 out=$(pol p1 init --set owner=bogus 2>&1 || true)
 assert_has "init rejects bad values" "'bogus' is not a valid owner" "$out"
 out=$(pol p1 init --set owner=refuse,review=requester,ask_lead=scope,disagreement,decisions=on)
 assert_has "init --set saves the rules" "saved to" "$out"
 assert_eq "ask_lead keeps its commas" "scope,disagreement" "$(jq -r .policy.ask_lead "$RF")"
-assert_lacks "a set repo no longer nudges" "no team rules" "$(pol p4 digest)"
+assert_lacks "a set repo states its own rules" "(the defaults)" "$(pol p4 digest)"
 assert_has "orientation states the rules" "work items need a recipient" "$(pol p5 digest)"
 assert_has "AGENT_BUS_POLICY_* overrides the repo" "owner = lead" "$(PO=lead pol p1 init --show)"
 assert_has "guide teaches the patterns" "Hand work to someone specific" "$(pol p1 guide)"
 assert_has "status shows the rules" "rules here:" "$(pol p1 status)"
+# A new repo: an intro marker in status, and one tip at the first work item.
+newr() { AGENT_BUS_REPO_ID=fresh00000000001 AGENT_BUS_REPO_POLICY="$BUS_HOME/no-rules.json" pol "$@"; }
+N1=$(newr n1 whoami | awk '/^seat/{print $2}'); N2=$(newr n2 whoami | awk '/^seat/{print $2}'); newr n2 who >/dev/null
+assert_has "a new repo says so in status" "new here" "$(newr n1 status)"
+out=$(newr n1 post --to "$N2" --state handoff -m "# first job" 2>&1)
+assert_has "the first work item in a new repo explains the default" "tip: the first piece of work" "$out"
+assert_has "the tip says who checks the work" "comes back to you to check" "$out"
+out=$(newr n1 post --to "$N2" --state handoff -m "# second job" 2>&1)
+assert_lacks "the tip comes once per repo" "tip:" "$out"
+assert_lacks "status stops calling the repo new" "new here" "$(newr n1 status)"
 # ownerless work: refused with suggestions, or given to the lead
 out=$(pol p1 post --to @here --state needs-review -m '# nobody owns me' 2>&1 || true)
 assert_has "a broadcast work item with no supervisor is refused" "has no owner" "$out"

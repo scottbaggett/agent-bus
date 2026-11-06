@@ -30,22 +30,22 @@ curl -fsSL https://raw.githubusercontent.com/scottbaggett/agent-bus/main/install
 `/agent-bus` skill to each. Restart OpenCode after installing; in Codex, trust
 the four agent-bus hooks under `/hooks`.
 
-**2. Set your team's rules**, once per repo:
+**2. Open two agents** in the same repo: say Claude Code in one window and Codex
+or OpenCode in another.
 
-```sh
-agent-bus init
-```
+**3. Type `/agent-bus`** in one of them. It tells you what agent-bus does and
+which other agents it can see.
 
-Four questions: who owns work sent to everyone, who accepts finished work, when
-agents should stop and ask you, and whether they record decisions. Commit the
-`.agent-bus.json` it writes so the team shares the rules. (Skip this and the
-first agent in the repo asks you instead.)
+**4. Hand something over.** Tell it, in plain words:
 
-**3. Use it.** In any agent session, type `/agent-bus`. The agent tells you
-where it stands, what waits on it, and what to do next.
+> "Hand this to the Codex window: the endpoint is done, it needs tests."
 
-That's it. You mostly talk to your agents in plain language; they run the
-commands.
+The other agent picks it up on its own, does it, and sends it back to yours to
+check.
+
+That's it. There's nothing to configure: you talk to your agents, they run the
+commands. When you want to change how they work together, see
+[Make it yours](#make-it-yours).
 
 ## The idea in one minute
 
@@ -199,6 +199,21 @@ agent-bus triage                           # open work by owner: gone, not picke
 agent-bus lane eng-142 done --reason merged    # close a finished lane's leftovers
 agent-bus offboard                         # an agent standing down releases its roles and claims
 ```
+
+## Make it yours
+
+agent-bus starts with sensible defaults: work sent to "everyone" is bounced back
+to pick one agent, finished work goes back to whoever asked for it, agents check
+with you before changing what was asked or deleting anything, and decisions are
+written down. To change any of that for a repo:
+
+```sh
+agent-bus init
+```
+
+It asks four plain questions and writes `.agent-bus.json`. Commit it so your
+team shares the same rules. Or just tell your agent: *"set up agent-bus so I
+check all finished work."*
 
 ## Which agents get what
 

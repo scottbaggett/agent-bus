@@ -118,8 +118,13 @@ overrides both. `agent-bus init --show` prints what applies.
 | `ask_lead` | `scope,destructive` · any of `scope`, `destructive`, `disagreement` · `never` | When agents must stop and ask the lead; stated in every orientation |
 | `decisions` | `on` · `off` | Show the lane's decisions at session start |
 
-A repo with no rules makes the first digest of each session ask the agent to
-put the four questions to its user and save the answers. Once set, every
+A repo with no rules runs on the defaults, and nobody is asked about them up
+front: the orientation line states them and tells the agent not to raise them.
+Two moments introduce agent-bus instead. While no agent has posted in a repo,
+`status` says `new here`, and `/agent-bus` answers with a short intro rather
+than a status report. The first work item posted there prints one `tip:` line
+saying what the default just did (who checks the work) and that `agent-bus init`
+changes it; the agent passes it on in a sentence. Once rules are set, every
 orientation line carries a one-sentence summary of them.
 
 ## Review gates

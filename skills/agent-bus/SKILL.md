@@ -18,26 +18,43 @@ nothing after it, do **status**.
 
 ### status (default)
 
-Run `agent-bus status` and tell the user, briefly:
-- their seat and lane (the lane comes from the branch's ticket, e.g. `@eng-142`),
-- what waits on them, and anything they sent that is still open,
-- the team rules, or that none are set,
-- one or two concrete next steps, as `/agent-bus <word>` suggestions.
+Run `agent-bus status`.
 
-If it says no team rules are set, offer **setup**.
+**If it says `new here`**, your user hasn't used agent-bus in this repo yet.
+Don't recite the status. Introduce it in about four short lines, in plain words:
+- what it does: lets the agents in their other windows hand work to each other,
+  ask each other things, and bring them the decisions that are theirs;
+- the other agents it can see right now (from `agent-bus who`), or that there
+  are none yet and they can open another Claude Code, OpenCode or Codex window;
+- one thing to try, naming a real agent if there is one: *"Ask me to hand this
+  to the Codex window, and watch it pick it up."*
+- that it works with sensible defaults, so there's nothing to set up.
+
+Avoid the vocabulary (seat, lane, packet, work item, @here, PM) unless they ask.
+Don't bring up the team rules or ask setup questions.
+
+**Otherwise** tell them, briefly:
+- what waits on them, and anything they sent that is still open,
+- the agents working alongside them,
+- one or two concrete next steps, as `/agent-bus <word>` suggestions.
 
 ### setup
 
-The team's rules live in `.agent-bus.json` at the repo root. Ask the user these
-four questions with your question tool (one call, recommended option first):
+Only when the user asks to set up or change the rules. The rules live in
+`.agent-bus.json` at the repo root. Ask these four questions with your question
+tool (one call, recommended option first), worded like this:
 
-1. **A work item sent to everyone (`@here`) has no owner. What should happen?**
-   refuse — make the agent pick a recipient (recommended) · lead — send it to me · pm — send it to the lane's PM agent
-2. **When an agent finishes work, who accepts it?**
-   requester — whoever asked for it (recommended) · lead — me, always · none — done means done
-3. **When should agents stop and ask you?** (any of)
-   scope changes · destructive actions · agent disagreements · never — recommended: scope changes and destructive actions
-4. **Record decisions so later sessions follow them?** on (recommended) · off
+1. **An agent sends a task to all the agents instead of one. Who does it?**
+   Nobody: tell the agent to pick one (recommended) · Me · The agent running the feature (its PM)
+   → `owner=refuse|lead|pm`
+2. **An agent finishes a task another agent gave it. Who checks the work?**
+   The agent that asked for it (recommended) · Me, every time · Nobody: done is done
+   → `review=requester|lead|none`
+3. **When should agents stop and check with you first?** (any of)
+   Before changing what was asked · Before deleting anything hard to undo · When two agents disagree · Never
+   (recommended: the first two) → `ask_lead=scope,destructive,disagreement` or `never`
+4. **Should agents write down decisions, so new sessions follow them without you repeating yourself?**
+   Yes (recommended) · No → `decisions=on|off`
 
 Save the answers, e.g.:
 
@@ -46,8 +63,6 @@ agent-bus init --set owner=refuse,review=requester,ask_lead=scope,destructive,de
 ```
 
 Tell the user to commit `.agent-bus.json` so the whole team shares the rules.
-To install hooks too, the user can run `agent-bus init` in a terminal; it asks
-the same questions.
 
 ### check
 
@@ -84,6 +99,8 @@ agent-bus post --re <id> --close handed-off --to <seat> --state handoff --file h
 
 Whoever you hand work to will send it back to you for review when done (if the
 team's rules say so).
+
+If `post` prints a `tip:` line, pass it on to your user in one sentence.
 
 `post` prints a `delivery:` line for each owner: woken, sees it at its next
 prompt, queued, not running, or nobody. If it says nobody owns it, nobody will

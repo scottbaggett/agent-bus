@@ -86,7 +86,7 @@ agent-bus resolve <id> --reason done
 agent-bus release --all
 ```
 
-## T5 — v0.3.2 in the desktop apps
+## T5 — v0.3.2+ in the desktop apps
 
 Each row is one action from a sender seat and what the target must show.
 
@@ -97,6 +97,8 @@ Each row is one action from a sender seat and what the target must show.
 | OpenCode app idle | `agent-bus post --to <idle opencode TUI seat> --state question -m "nonce <n>"` | post prints `its plugin picks this up`; the TUI resumes and replies |
 | One inbox, two folders | in one Claude session, run `agent-bus who` from the main checkout and from a worktree; post to the main-checkout seat | `agent-bus read` from the worktree shows it |
 | Send as the user | in your own terminal: `agent-bus send --to <seat> -m "nonce <n>"`, answer `y` | the target's digest labels it "from your user"; from an agent's shell, `send` is refused |
+| First run, new repo | in a repo with no `.agent-bus.json` and no posts, type `/agent-bus` in an agent | a short plain-words intro naming the other agents and one thing to try; no setup questions, no jargon |
+| First handoff tip | then ask it to hand something to another agent | it tells you once who checks the finished work and that `agent-bus init` changes it; a second handoff says nothing |
 | Quieter digest | claim a file from one seat; prompt another seat that hasn't touched it | the digest doesn't list the claim; `agent-bus read` counts it |
 
 ## Record

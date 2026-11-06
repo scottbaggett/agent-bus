@@ -248,6 +248,25 @@ agent_pid() {
   done
 }
 
+# The shared server a session runs under (opencode serve), if any. Its exit
+# ends every session it served.
+server_pid() {
+  [ "$TOOL" = opencode ] || return 0
+  if [ -n "${AGENT_BUS_SERVER_PID:-}" ]; then
+    case "$AGENT_BUS_SERVER_PID" in *[!0-9]*) ;; *) echo "$AGENT_BUS_SERVER_PID" ;; esac; return 0
+  fi
+  local p=$PPID i c
+  for i in 1 2 3 4 5 6 7 8; do
+    case "$p" in ''|*[!0-9]*|0|1) return 0 ;; esac
+    c=$(ps -o comm= -p "$p" 2>/dev/null) || return 0
+    c=$(printf '%s' "${c##*/}" | tr '[:upper:]' '[:lower:]')
+    case "$c" in opencode*)
+      case " $(ps -o args= -p "$p" 2>/dev/null) " in *" serve "*) echo "$p"; return 0 ;; esac ;;
+    esac
+    p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
+  done
+}
+
 touch_seat() {
   local f="$BUS/seats/$SEAT.json" now last_hook=0 socket="" codex_queue=""
   local grok_webhook="" grok_secret_env="" pid="" old_pid="" old_session=""
@@ -262,6 +281,7 @@ touch_seat() {
   if [ -z "${AGENT_BUS_PID:-}" ] && [ -n "$old_pid" ] && [ "$old_session" = "$SESSION" ] \
      && kill -0 "$old_pid" 2>/dev/null; then pid=$old_pid
   else pid=$(agent_pid); fi
+  local spid; spid=$(server_pid)
   [ "$TOOL" = codex ] && codex_queue=$(state_get '.codex_queue // ""' | jq -r .)
   # Preserve webhook registration written by `grok register` so that a Grok Bot
   # calling normal bus commands (read, resolve, …) does not silently clear it.
@@ -278,21 +298,37 @@ touch_seat() {
     --arg wt "$WT" --arg branch "$BRANCH" --arg cwd "$TOP" --arg session "$SESSION" \
     --arg socket "$socket" --arg codex_queue "$codex_queue" --argjson epoch "$now" \
     --argjson last_hook "${last_hook:-0}" --arg lane "$LANE" --arg lane_src "${LANE_SRC:-unfiled}" \
-    --arg grok_webhook "$grok_webhook" --arg grok_secret_env "$grok_secret_env" --arg pid "$pid" \
+    --arg grok_webhook "$grok_webhook" --arg grok_secret_env "$grok_secret_env" --arg pid "$pid" --arg spid "${spid:-}" \
     '{addr:$addr,tool:$tool,repo:$repo,repo_id:$repo_id,wt:$wt,branch:$branch,cwd:$cwd,
       session:$session,socket:$socket,codex_queue:$codex_queue,epoch:$epoch,last_hook:$last_hook,lane:$lane,
       lane_src:$lane_src,pid:($pid | tonumber? // null)}
+     + (if $spid != "" then {server_pid:($spid | tonumber)} else {} end)
      + (if $grok_webhook != "" then {grok_webhook:$grok_webhook,grok_secret_env:$grok_secret_env} else {} end)' >"$tmpf" \
     && mv "$tmpf" "$f" || rm -f "$tmpf"
 }
 
 # Every seat row, one per line; a corrupt file drops out instead of failing.
-seat_rows() { cat "$BUS"/seats/*.json 2>/dev/null | jq -cR 'fromjson? // empty' || true; }
+# An OpenCode seat whose `opencode serve` process has exited (a restart) is
+# over, however recently it was seen: its rows come back with epoch 0.
+seat_rows() {
+  local rows dead='' p
+  rows=$(cat "$BUS"/seats/*.json 2>/dev/null | jq -cR 'fromjson? // empty' || true)
+  [ -n "$rows" ] || return 0
+  for p in $(jq -r 'select((.server_pid // null) != null) | .server_pid' <<<"$rows" | sort -u); do
+    kill -0 "$p" 2>/dev/null || dead="$dead,$p"
+  done
+  if [ -n "$dead" ]; then
+    jq -c --argjson d "[${dead#,}]" 'if ((.server_pid // null) != null and ($d | index(.server_pid)) != null)
+      then .epoch = 0 | .ended = "server exited" else . end' <<<"$rows"
+  else printf '%s\n' "$rows"; fi
+}
 
 seat_live() {
   local f now
   f="$BUS/seats/$(slugify "$1").json"
   [ -f "$f" ] || return 1
+  local sp; sp=$(jq -r '.server_pid // ""' "$f" 2>/dev/null)
+  [ -n "$sp" ] && ! kill -0 "$sp" 2>/dev/null && return 1
   now=$(now_epoch)
   jq -e --argjson cut "$(( now - SEAT_TTL ))" \
     --argjson codex_cut "$(( now - CODEX_MAX_IDLE_TTL ))" \
@@ -1584,8 +1620,13 @@ orient_seat() {
     --argjson cut "$(( $(now_epoch) - SEAT_TTL ))" --argjson codex_cut "$(codex_idle_cut)" \
     "$JQ_SEAT_LIVE"'[.[] | select(.lane == $l and .repo_id == $rid and .addr != $me and buslive($cut; $codex_cut)) | .addr] | join(", ")')
   pm=$(lane_pm_seat "$LANE")
+  # Alone in a lane named after a branch, the lane says nothing worth reading.
+  if [ -z "$peers" ] && [ -z "$pm" ] && [ "${n:-0}" = 0 ]; then
+    printf 'agent-bus: you are %s. No other agent is on this work.\n' "$ADDR"
+  else
   printf 'agent-bus: you are %s in lane @%s (from %s) · %s open item(s) in this lane%s%s. Wrong lane? agent-bus lane <name>\n' \
     "$ADDR" "$LANE" "$LANE_SRC" "${n:-0}" "${peers:+ · peers: $peers}" "${pm:+ · lane PM: $pm}" | sanitize
+  fi
   # Decisions settled for this lane (and repo-wide): follow them, or escalate.
   if [ "$(policy_get decisions)" = on ]; then
     decisions_rows '' | jq -rs --argjson now "$(now_epoch)" '

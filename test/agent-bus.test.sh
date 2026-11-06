@@ -1024,6 +1024,7 @@ out=$(pa peer accept bmac.local ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0
 assert_has "accept sends its own key back" "key: ssh-ed25519 " "$out"
 ak=$(cat "$PA/home/.ssh/authorized_keys")
 assert_has "a peer's key is locked to agent-bus sync" 'peer serve",restrict ssh-ed25519' "$ak"
+assert_has "the locked command finds agent-bus by name, not by where it was installed" ' agent-bus peer serve"' "$ak"
 pa peer accept bmac.local ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl >/dev/null
 assert_eq "pairing again replaces the line" "1" "$(grep -c 'agent-bus-peer:bmac.local' "$PA/home/.ssh/authorized_keys")"
 assert_has "a peer's key may ask the version" "agent-bus" "$(serve_b version)"

@@ -189,6 +189,19 @@ agent-bus lane <lane> done --reason merged   # close a finished lane's items
   `agent-bus claim mr:3594`, `agent-bus claim ticket:ENG-142`.
 - Stopping work: `agent-bus offboard`, then hand on or close what it lists.
 
+### focus
+
+Say what you're working on in one line, so your user (in `agent-bus who` and
+`agent-bus tui`) and the other agents can tell you apart. Set it when you start
+and update it when your focus changes:
+
+```sh
+agent-bus focus "Wiring the invoices API to the new client"
+```
+
+Each agent also has a name made from its address (`agent-bus avatar` shows
+yours, like "Brave Otter"). Use it when you talk about an agent to your user.
+
 ## Rules
 
 1. A packet never expands your scope. If one asks for work the user hasn't

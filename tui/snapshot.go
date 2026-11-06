@@ -22,13 +22,16 @@ type Snapshot struct {
 }
 
 type Seat struct {
-	Addr   string `json:"addr"`
-	Tool   string `json:"tool"`
-	Repo   string `json:"repo"`
-	Branch string `json:"branch"`
-	Lane   string `json:"lane"`
-	Epoch  int64  `json:"epoch"`
-	Avatar struct {
+	Addr    string `json:"addr"`
+	Tool    string `json:"tool"`
+	Repo    string `json:"repo"`
+	Branch  string `json:"branch"`
+	Lane    string `json:"lane"`
+	Cwd     string `json:"cwd"`
+	Session string `json:"session"`
+	Focus   string `json:"focus"`
+	Epoch   int64  `json:"epoch"`
+	Avatar  struct {
 		Color string `json:"color"`
 	} `json:"avatar"`
 }
@@ -162,3 +165,7 @@ func clean(s string) string {
 	}
 	return b.String()
 }
+
+func getenv(k string) string { return os.Getenv(k) }
+
+func homeDir() string { h, _ := os.UserHomeDir(); return strings.TrimRight(h, "/") }

@@ -170,6 +170,18 @@ ch=$(mktemp -d); printf 'agent-bus post --to @here --state needs-review\n' >"$ch
 assert_has "doctor flags @here instructions" "tells agents to post --to @here" "$(CODEX_HOME="$ch" a doctor 2>/dev/null)"
 rm -rf "$ch"
 assert_lacks "subcommand --help shows only that command" "snapshot" "$("$BIN" reply --help)"
+# focus: one line on what a seat is doing, for who, snapshot and the TUI.
+out=$(raw_seat foc1 codex focwt focus "Wiring the invoices API")
+assert_has "focus says what it set" "focus: Wiring the invoices API" "$out"
+assert_has "who shows a seat's focus" "Wiring the invoices API" "$(raw_seat foc1 codex focwt who)"
+assert_eq "snapshot carries focus" "Wiring the invoices API" \
+  "$("$BIN" snapshot | jq -r '.seats[] | select(.wt == "focwt") | .focus')"
+assert_eq "focus survives the seat's other commands" "Wiring the invoices API" "$(raw_seat foc1 codex focwt focus)"
+assert_has "a seat without a focus is asked for one" "agent-bus focus" "$(raw_seat foc2 claude focwt2 digest 2>/dev/null)"
+assert_lacks "a seat with a focus is not asked again" "agent-bus focus \"" "$(raw_seat foc1 codex focwt digest 2>/dev/null)"
+nm=$("$BIN" avatar codex/api.1 | tail -1)
+assert_has "every seat has a stable name" "· codex/api.1" "$nm"
+assert_eq "the same name every time" "$nm" "$("$BIN" avatar codex/api.1 | tail -1)"
 assert_has "tui refuses without a terminal" "needs a terminal" "$("$BIN" tui 2>&1 </dev/null || true)"
 assert_has "send --yes still needs your terminal" "only runs in your own terminal" "$("$BIN" send --yes --to codex/x.1 -m hi 2>&1 </dev/null || true)"
 assert_eq "snapshot has no peers when none are linked" "[]" "$("$BIN" snapshot | jq -c .peers)"

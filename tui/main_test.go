@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os/exec"
 	"strconv"
 	"strings"
 	"testing"
@@ -101,6 +102,18 @@ func TestWorkingOn(t *testing.T) {
 	} {
 		if got := workingOn(c.s); got != c.want {
 			t.Errorf("workingOn(%+v) = %q, want %q", c.s, got, c.want)
+		}
+	}
+}
+
+func TestNamesMatchTheCLI(t *testing.T) {
+	for _, a := range []string{"claude/salt-monorepo.44b1", "codex/api.1", "opencode/docs.2e7d"} {
+		out, err := exec.Command("../bin/agent-bus", "avatar", a).Output()
+		if err != nil {
+			t.Skip("bin/agent-bus not runnable here")
+		}
+		if !strings.Contains(string(out), friendlyName(a)+" · "+a) {
+			t.Errorf("CLI and TUI name %s differently: CLI said %q, TUI %q", a, strings.TrimSpace(string(out)), friendlyName(a))
 		}
 	}
 }

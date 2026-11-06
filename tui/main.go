@@ -34,6 +34,7 @@ const (
 	modeConfirm
 	modeHelp
 	modeChat
+	modeOpen
 )
 
 type model struct {
@@ -63,6 +64,14 @@ type model struct {
 	chatView    viewport.Model
 	chatSending bool
 	chatNote    string
+
+	titles     map[string]string // session titles, when an agent set no focus
+	titlesAt   time.Time
+	services   []service
+	servicesAt time.Time
+	scanning   bool
+	openItems  []openItem
+	openSel    int
 }
 
 type snapMsg struct {
@@ -100,10 +109,10 @@ func newModel() model {
 	ti := textinput.New()
 	ti.CharLimit = 4000
 	ti.Prompt = ""
-	return model{loading: true, input: ti, seen: map[string]time.Time{}, bodies: map[string]string{}}
+	return model{loading: true, input: ti, seen: map[string]time.Time{}, bodies: map[string]string{}, titles: map[string]string{}}
 }
 
-func (m model) Init() tea.Cmd { return tea.Batch(loadCmd(), tick()) }
+func (m model) Init() tea.Cmd { return tea.Batch(loadCmd(), tick(), scanServicesCmd()) }
 
 func (m model) needsCount() int {
 	n := 0
@@ -119,7 +128,7 @@ const panelMin = 44
 
 // panelW is the side panel's width when it is open, 0 otherwise.
 func (m model) panelW() int {
-	if m.mode != modePanel && m.mode != modeReply && m.mode != modeConfirm {
+	if m.mode != modePanel && m.mode != modeReply && m.mode != modeConfirm && m.mode != modeOpen {
 		return 0
 	}
 	w := m.w * 2 / 5
@@ -157,6 +166,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.MouseMsg:
 		return m.mouse(msg)
+
+	case titlesMsg:
+		m.titles = msg
+		return m, nil
+
+	case servicesMsg:
+		m.scanning = false
+		m.servicesAt = time.Now()
+		if msg.err == nil {
+			m.services = msg.list
+		}
+		return m, nil
 
 	case chatLoaded:
 		if m.mode == modeChat && msg.addr == m.chatSeat.Addr {
@@ -205,6 +226,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmd = tea.Batch(cmd, loadChat(m.snap.Bus, m.chatSeat.Addr))
 			}
 		}
+		if !m.scanning && time.Since(m.servicesAt) > 10*time.Second {
+			m.scanning = true
+			cmd = tea.Batch(cmd, scanServicesCmd())
+		}
 		if m.status != "" && time.Since(m.statusAt) > 6*time.Second {
 			m.status = ""
 		}
@@ -231,7 +256,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.clamp()
-		return m, m.loadPanelBody()
+		cmds := []tea.Cmd{m.loadPanelBody()}
+		if time.Since(m.titlesAt) > 30*time.Second {
+			m.titlesAt = time.Now()
+			cmds = append(cmds, loadTitlesCmd(msg.s.Seats))
+		}
+		return m, tea.Batch(cmds...)
 
 	case actionMsg:
 		if msg.err != nil {
@@ -352,6 +382,8 @@ func (m model) gridW() int { w, _ := m.gridSize(); return w }
 
 func (m model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch m.mode {
+	case modeOpen:
+		return m.openKey(k)
 	case modeChat:
 		return m.chatKey(k)
 	case modeHelp:
@@ -420,6 +452,8 @@ func (m model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "c", "enter":
 			return m, m.openChat(m.panel.seat, m.panel.peer)
+		case "o":
+			return m.startOpen(m.panel)
 		case "left", "right", "h", "l":
 			// Fall through to the grid: move and follow with the panel.
 		default:
@@ -449,6 +483,11 @@ func (m model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "enter", " ":
 		return m.openPanel()
+	case "o":
+		if t, ok := m.selectedTile(); ok {
+			mm, _ := m.openPanel()
+			return mm.(model).startOpen(t)
+		}
 	}
 	if m.mode == modePanel {
 		return m.openPanel() // the panel follows the selection
@@ -672,10 +711,12 @@ func (m model) footerView() string {
 	if m.err != nil {
 		return lipgloss.NewStyle().Foreground(cBad).Render(fit(" refresh failed: "+m.err.Error(), m.w))
 	}
-	keys := []string{"arrows or click: pick an agent", "enter: what it needs", "c: chat", "?: help", "q: quit"}
+	keys := []string{"arrows or click: pick an agent", "enter: details", "o: open in…", "c: chat", "?: help", "q: quit"}
 	switch m.mode {
+	case modeOpen:
+		keys = []string{"↑↓ or number: pick", "enter: open", "esc: back"}
 	case modePanel:
-		keys = []string{"↑↓ item", "r answer", "x close it", "c chat", "←→ next agent", "esc back"}
+		keys = []string{"↑↓ item", "r answer", "x close it", "c chat", "o open in…", "←→ next agent", "esc back"}
 	case modeReply:
 		keys = []string{"enter sends and closes it", "esc cancels"}
 	case modeConfirm:
@@ -694,6 +735,7 @@ func (m model) helpView() string {
 		"  arrows / click   pick an agent",
 		"  enter            open what it needs from you",
 		"  c                chat with it",
+		"  o                open its folder in Finder, Zed, Cursor… or its ports in a browser",
 		"",
 		"  in the panel:  ↑↓ item · r answer (and close) · x close · c chat",
 		"",

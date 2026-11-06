@@ -269,13 +269,17 @@ server_pid() {
 
 touch_seat() {
   local f="$BUS/seats/$SEAT.json" now last_hook=0 socket="" codex_queue=""
-  local grok_webhook="" grok_secret_env="" pid="" old_pid="" old_session=""
+  local grok_webhook="" grok_secret_env="" pid="" old_pid="" old_session="" focus="" focus_at=0
   now=$(now_epoch)
   if [ -f "$f" ]; then
     IFS=$'\t' read -r last_hook old_pid old_session < <(jq -r \
       '[(.last_hook // 0), (.pid // ""), (.session // "")] | map(tostring) | join("\t")' "$f" 2>/dev/null || echo 0)
   fi
   [ "${AGENT_BUS_VIA:-cli}" = hook ] && last_hook="$now"
+  # A seat's focus lasts as long as its session; a new session starts blank.
+  if [ -f "$f" ] && [ "$(jq -r '.session // ""' "$f" 2>/dev/null)" = "$SESSION" ]; then
+    focus=$(jq -r '.focus // ""' "$f" 2>/dev/null); focus_at=$(jq -r '.focus_at // 0' "$f" 2>/dev/null)
+  fi
   [ "$TOOL" = claude ] && socket="${CLAUDE_CODE_MESSAGING_SOCKET:-}"
   # The same session in a live process keeps its pid; anything else looks again.
   if [ -z "${AGENT_BUS_PID:-}" ] && [ -n "$old_pid" ] && [ "$old_session" = "$SESSION" ] \
@@ -299,10 +303,12 @@ touch_seat() {
     --arg socket "$socket" --arg codex_queue "$codex_queue" --argjson epoch "$now" \
     --argjson last_hook "${last_hook:-0}" --arg lane "$LANE" --arg lane_src "${LANE_SRC:-unfiled}" \
     --arg grok_webhook "$grok_webhook" --arg grok_secret_env "$grok_secret_env" --arg pid "$pid" --arg spid "${spid:-}" \
+    --arg focus "$focus" --arg focus_at "${focus_at:-0}" \
     '{addr:$addr,tool:$tool,repo:$repo,repo_id:$repo_id,wt:$wt,branch:$branch,cwd:$cwd,
       session:$session,socket:$socket,codex_queue:$codex_queue,epoch:$epoch,last_hook:$last_hook,lane:$lane,
       lane_src:$lane_src,pid:($pid | tonumber? // null)}
      + (if $spid != "" then {server_pid:($spid | tonumber)} else {} end)
+     + (if $focus != "" then {focus:$focus,focus_at:($focus_at | tonumber? // 0)} else {} end)
      + (if $grok_webhook != "" then {grok_webhook:$grok_webhook,grok_secret_env:$grok_secret_env} else {} end)' >"$tmpf" \
     && mv "$tmpf" "$f" || rm -f "$tmpf"
 }
@@ -1213,6 +1219,21 @@ cmd_uninstall() {
   else die "uninstall: no install.sh next to this CLI ($root)"; fi
 }
 
+# ------------------------------------------------------------------ names
+#
+# Every seat also gets a name you can say, from the same address: the same
+# seat is always "Brave Otter". The TUI (tui/names.go) uses the same lists.
+NAME_ADJ=(Amber Brave Calm Clever Cosmic Crisp Dusty Eager Fuzzy Gentle Happy Jolly Keen Lucky Mellow Misty
+  Nimble Noble Plucky Quiet Rapid Rusty Shiny Sly Snowy Spry Sunny Swift Tidy Witty Zesty Bold Brisk Cheery
+  Daring Frosty Grumpy Hasty Ionic Jazzy)
+NAME_NOUN=(Otter Falcon Badger Comet Pixel Quokka Raven Gecko Panda Lynx Heron Moose Newt Koala Bison Robin
+  Walrus Yak Ferret Puffin Marmot Orca Tapir Wombat Beetle Cobra Dingo Egret Finch Hare Ibis Jackal Lemur
+  Mantis Narwhal Ocelot Pika Quail Sloth Toucan)
+seat_name() { # addr
+  local h; h=$(printf '%s' "$1" | shasum | cut -c13-16)
+  printf '%s %s' "${NAME_ADJ[$((16#${h:0:2} % ${#NAME_ADJ[@]}))]}" "${NAME_NOUN[$((16#${h:2:2} % ${#NAME_NOUN[@]}))]}"
+}
+
 # ------------------------------------------------------------------ avatars
 #
 # Every seat gets a little bot, generated from its address and never picked:
@@ -1257,12 +1278,27 @@ avatar_art() { # addr tool color?
 }
 use_color() { [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-}" != dumb ]; }
 
+# `agent-bus focus "<one line>"`: what this seat is working on, for your user
+# and the other agents (who, the TUI). Shown until the session ends.
+cmd_focus() {
+  local f="$BUS/seats/$SEAT.json" text
+  if [ $# -eq 0 ]; then
+    jq -r '.focus // "(no focus set; agent-bus focus \"<one line>\")"' "$f" 2>/dev/null | sanitize; return 0
+  fi
+  text=$(printf '%s' "$*" | tr '\n\t' '  ' | tr -d '\000-\037' | cut -c1-120)
+  [ -n "${text// /}" ] || die "focus: say what you're working on in one line"
+  touch_seat
+  local tmpf; tmpf=$(mktemp "${f}.XXXXXX")
+  jq -c --arg t "$text" --argjson at "$(now_epoch)" '. + {focus: $t, focus_at: $at}' "$f" >"$tmpf" && mv "$tmpf" "$f"
+  printf 'focus: %s (%s)\n' "$text" "$(seat_name "$ADDR")"
+}
+
 # `agent-bus avatar [seat]`: a seat's bot (yours by default).
 cmd_avatar() {
   local addr="${1:-$ADDR}" tool
   tool=${addr%%/*}
   avatar_art "$addr" "$tool" "$(use_color && echo 1 || echo 0)" | while IFS= read -r line; do printf '  %s\n' "$line"; done
-  printf '  %s\n' "$addr"
+  printf '  %s · %s\n' "$(seat_name "$addr")" "$addr"
 }
 
 cmd_whoami() {
@@ -1297,16 +1333,17 @@ cmd_who() {
   rows=$(seat_rows | jq -r --argjson cut "$cut" \
     --argjson codex_cut "$(( now - CODEX_MAX_IDLE_TTL ))" \
     --arg me "$ADDR" --arg pm "$pm" --argjson lpms "$(lane_pms)" \
-    "$JQ_SEAT_LIVE"'select(buslive($cut; $codex_cut)) | .addr as $row | [(.addr // "?"), (.repo // "-"), (.branch // "-"), (.epoch // 0),
+    "$JQ_SEAT_LIVE"'select(buslive($cut; $codex_cut)) | .addr as $row | [(.addr // "?"), (.repo // "-"), (.branch // "-"), (.epoch // 0), (.focus // ""),
       (if (.lane // "") != "" then "  @\(.lane)" else "" end)
       + (if .addr == $pm then "  PM" else "" end)
       + ([$lpms | to_entries[] | select(.value == $row) | "  PM @\(.key)"] | join(""))
       + (if .addr == $me then "  <- you" else "" end)]
       | map(tostring | gsub("[\u0000-\u001f\u007f]"; "")) | join("\u001f")')
   if [ -z "$rows" ]; then printf '  (none)\n'; fi
-  while IFS=$'\037' read -r a r b e mark; do
+  while IFS=$'\037' read -r a r b e fo mark; do
     [ -n "$a" ] || continue
-    printf '  %-40s %-14s %-40s %s ago%s\n' "$a" "$r" "$b" "$(age "$e")" "$mark"
+    printf '  %-16s %-40s %-14s %-40s %s ago%s\n' "$(seat_name "$a")" "$a" "$r" "$b" "$(age "$e")" "$mark"
+    [ -n "$fo" ] && printf '  %-16s   %s\n' "" "$fo"
   done <<<"$rows"
   peer_who
   if [ -n "$pm" ]; then
@@ -1740,7 +1777,7 @@ peer_pull() { # host
 peer_seats_json() {
   local now; now=$(now_epoch)
   seat_rows | jq -c --argjson cut "$(( now - SEAT_TTL ))" --argjson codex_cut "$(( now - CODEX_MAX_IDLE_TTL ))" \
-    "$JQ_SEAT_LIVE"'select(buslive($cut; $codex_cut)) | {addr, tool, repo, branch, epoch, lane: (.lane // "")}' | jq -cs .
+    "$JQ_SEAT_LIVE"'select(buslive($cut; $codex_cut)) | {addr, tool, repo, branch, epoch, lane: (.lane // ""), focus: (.focus // "")}' | jq -cs .
 }
 peer_seats_file() { printf '%s/state/peer.%s.seats.json' "$BUS" "$1"; }
 peer_fetch_seats() { # host
@@ -1963,9 +2000,13 @@ orient() {
 }
 
 orient_seat() {
+  local me; me="$(seat_name "$ADDR") ($ADDR)"
+  if [ -z "$(jq -r '.focus // empty' "$BUS/seats/$SEAT.json" 2>/dev/null)" ]; then
+    printf 'agent-bus: tell your user and the other agents what you are working on, in one line: agent-bus focus "<what you are doing>". Update it when your focus changes.\n'
+  fi
   if [ -z "$LANE" ]; then
     printf 'agent-bus: you are %s, not in a lane (branch %s names no ticket). If this work has a ticket or feature name, run: agent-bus lane <name>\n' \
-      "$ADDR" "$BRANCH"
+      "$me" "$BRANCH"
     return 0
   fi
   local n peers pm
@@ -1976,10 +2017,10 @@ orient_seat() {
   pm=$(lane_pm_seat "$LANE")
   # Alone in a lane named after a branch, the lane says nothing worth reading.
   if [ -z "$peers" ] && [ -z "$pm" ] && [ "${n:-0}" = 0 ]; then
-    printf 'agent-bus: you are %s. No other agent is on this work.\n' "$ADDR"
+    printf 'agent-bus: you are %s. No other agent is on this work.\n' "$me"
   else
   printf 'agent-bus: you are %s in lane @%s (from %s) · %s open item(s) in this lane%s%s. Wrong lane? agent-bus lane <name>\n' \
-    "$ADDR" "$LANE" "$LANE_SRC" "${n:-0}" "${peers:+ · peers: $peers}" "${pm:+ · lane PM: $pm}" | sanitize
+    "$me" "$LANE" "$LANE_SRC" "${n:-0}" "${peers:+ · peers: $peers}" "${pm:+ · lane PM: $pm}" | sanitize
   fi
   # Decisions settled for this lane (and repo-wide): follow them, or escalate.
   if [ "$(policy_get decisions)" = on ]; then
@@ -2578,7 +2619,8 @@ snapshot_json() {
   now=$(now_epoch)
   seats=$(seat_rows | jq -sc --argjson cut "$((now - SEAT_TTL))" --argjson codex_cut "$(codex_idle_cut)" \
     "$JQ_SEAT_LIVE"'[.[] | select(buslive($cut; $codex_cut) and (.tool // "") != "lead")
-      | {addr, tool, repo, repo_id, wt, branch, cwd: (.cwd // ""), pid: (.pid // null),
+      | {addr, tool, repo, repo_id, wt, branch, cwd: (.cwd // ""), pid: (.pid // null), session: (.session // ""),
+         focus: (.focus // ""), focus_at: (.focus_at // 0),
          lane: (.lane // ""), lane_src: (.lane_src // ""),
          epoch: ((.epoch // 0) | tonumber? // 0), last_hook: ((.last_hook // 0) | tonumber? // 0),
          scope: ((.tool // "") + "/" + (.wt // "")),
@@ -2590,7 +2632,8 @@ snapshot_json() {
       f="$BUS/state/$(slugify "$(jq -r .addr <<<"$row")").json"
       av=$(avatar_art "$(jq -r .addr <<<"$row")" "$(jq -r .tool <<<"$row")" | jq -Rsc 'split("\n") | map(select(length > 0))')
       row=$(jq -c --argjson rows "$av" --arg col "$(avatar_color "$(jq -r .tool <<<"$row")")" \
-        '. + {avatar: {rows: $rows, color: $col}}' <<<"$row")
+        --arg name "$(seat_name "$(jq -r .addr <<<"$row")")" \
+        '. + {name: $name, avatar: {rows: $rows, color: $col}}' <<<"$row")
       if [ -f "$f" ]; then jq -c --slurpfile st "$f" '. + {read: ($st[0].read // []), wakes: ($st[0].wakes // 0)}' <<<"$row"
       else jq -c '. + {read: [], wakes: 0}' <<<"$row"; fi
     done | jq -sc '.')
@@ -3296,6 +3339,7 @@ agent-bus — handoff bus for coding agents sharing repos and worktrees.
   offboard                    stand down: PM role and claims released, open
                               items listed
   log [n]                     recent packets and closes
+  focus ["<one line>"]        say what you are working on (your user sees it in who and the TUI)
   tui                         live view: agents here and on linked Macs, what needs you,
                               open work, a live feed; reply and close from it
   snapshot                    machine-wide JSON: seats (with pid and worktree path), open work, lanes,
@@ -3362,6 +3406,7 @@ case "$cmd" in
   codex) cmd_codex "$@" ;;
   grok)  cmd_grok  "$@" ;;
   whoami) cmd_whoami ;;
+  focus) cmd_focus "$@" ;;
   avatar) cmd_avatar "$@" ;;
   who) touch_seat; cmd_who ;;
   post) touch_seat; cmd_post "$@" ;;

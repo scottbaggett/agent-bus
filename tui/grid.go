@@ -12,9 +12,9 @@ import (
 // Macs in the same lane as yours. An agent waiting on you gets a red border.
 
 const (
-	tileInner = 14 // avatar (8) centered, names truncated to this
+	tileInner = 18 // robot (10) centered; text wraps or truncates to this
 	tileW     = tileInner + 2
-	tileH     = 12 // border + robot(7) + name + what it is on + age
+	tileH     = 13 // border + robot(7) + name + focus(2) + ticket·age
 	tileGap   = 1
 )
 
@@ -343,7 +343,6 @@ func (m model) renderTile(t tile, selected bool, needs int) string {
 	if selected {
 		nameSt = lipgloss.NewStyle().Foreground(cAccent).Bold(true)
 	}
-	on := workingOn(s)
 	meta := ago(m.snap.Now, s.Epoch)
 	switch {
 	case t.gone:
@@ -351,11 +350,29 @@ func (m model) renderTile(t tile, selected bool, needs int) string {
 	case t.peer != "":
 		meta = t.peer + " · " + meta
 	}
+	if on := workingOn(s); on != "" && !t.gone {
+		meta = on + " · " + meta
+	}
 	center := func(st string) string { return lipgloss.PlaceHorizontal(tileInner, lipgloss.Center, st) }
+	shrink := func(st string) string { return fit(st, min(tileInner, lipgloss.Width(st))) }
+	// What it's doing, in up to two lines.
+	doing := wrapLines(m.doing(s), tileInner, 2)
+	for len(doing) < 2 {
+		doing = append(doing, "")
+	}
+	metaLine := sDim.Render(shrink(meta))
+	if svc := m.servicesFor(s); len(svc) > 0 {
+		p := ports(svc)
+		metaLine = lipgloss.NewStyle().Foreground(cGood).Render(shrink(p)) + sDim.Render(" · "+ago(m.snap.Now, s.Epoch))
+		if lipgloss.Width(metaLine) > tileInner {
+			metaLine = lipgloss.NewStyle().Foreground(cGood).Render(shrink(p))
+		}
+	}
 	body := art + "\n" +
-		center(nameSt.Render(fit(friendlyName(s.Addr), min(tileInner, len(friendlyName(s.Addr)))))) + "\n" +
-		center(sText.Render(fit(clean(on), min(tileInner, lipgloss.Width(clean(on)))))) + "\n" +
-		center(sDim.Render(fit(meta, min(tileInner, lipgloss.Width(meta)))))
+		center(nameSt.Render(shrink(friendlyName(s.Addr)))) + "\n" +
+		center(sText.Render(doing[0])) + "\n" +
+		center(sText.Render(doing[1])) + "\n" +
+		center(metaLine)
 
 	border := lipgloss.RoundedBorder()
 	bc := lipgloss.TerminalColor(cDim)
@@ -444,7 +461,13 @@ func (m model) selectedLine(w int) string {
 		return ""
 	}
 	s := t.seat
-	parts := []string{lipgloss.NewStyle().Foreground(lipgloss.Color(avatarColor(toolOf(s)))).Bold(true).Render(clean(s.Addr))}
+	parts := []string{lipgloss.NewStyle().Foreground(cAccent).Bold(true).Render(friendlyName(s.Addr)), sDim.Render(clean(s.Addr))}
+	if d := m.doing(s); d != "" {
+		parts = append(parts, d)
+	}
+	if svc := m.servicesFor(s); len(svc) > 0 {
+		parts = append(parts, lipgloss.NewStyle().Foreground(cGood).Render(ports(svc)))
+	}
 	if t.peer != "" {
 		parts = append(parts, "on "+t.peer)
 	}
@@ -463,4 +486,49 @@ func (m model) selectedLine(w int) string {
 		parts = append(parts, lipgloss.NewStyle().Foreground(cBad).Bold(true).Render(fmt.Sprintf("%d waiting on you", n)))
 	}
 	return fit(strings.Join(parts, sDim.Render(" · ")), w)
+}
+
+// doing is what an agent says it's on: its focus line, else its session title.
+func (m model) doing(s Seat) string {
+	if f := strings.TrimSpace(clean(s.Focus)); f != "" {
+		return f
+	}
+	return m.titles[s.Addr]
+}
+
+// wrapLines word-wraps s into at most n lines of width w, with … if cut.
+func wrapLines(s string, w, n int) []string {
+	words := strings.Fields(s)
+	var lines []string
+	cur := ""
+	for i, wd := range words {
+		if len([]rune(wd)) > w {
+			wd = string([]rune(wd)[:w-1]) + "…"
+		}
+		switch {
+		case cur == "":
+			cur = wd
+		case len([]rune(cur))+1+len([]rune(wd)) <= w:
+			cur += " " + wd
+		default:
+			lines = append(lines, cur)
+			cur = wd
+		}
+		if len(lines) == n {
+			last := []rune(lines[n-1])
+			if len(last) >= w {
+				last = last[:w-1]
+			}
+			lines[n-1] = string(last) + "…"
+			_ = i
+			return lines
+		}
+	}
+	if cur != "" {
+		lines = append(lines, cur)
+	}
+	if len(lines) > n {
+		lines = lines[:n]
+	}
+	return lines
 }

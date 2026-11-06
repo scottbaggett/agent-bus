@@ -21,7 +21,7 @@ func (m model) panelView(w, h int) string {
 		sDim.Render(fit(clean(s.Addr), inner-12)),
 	}
 	if on := workingOn(s); on != "" {
-		info = append(info, fit(clean(on), inner-12))
+		info = append(info, sDim.Render(fit(clean(on), inner-12)))
 	}
 	where := ""
 	switch {
@@ -37,6 +37,20 @@ func (m model) panelView(w, h int) string {
 	info = append(info, where)
 	head := lipgloss.JoinHorizontal(lipgloss.Top, avatar(s), "  ", strings.Join(info, "\n"))
 	b = append(b, head, "")
+	if d := m.doing(s); d != "" {
+		label := "Focus"
+		if strings.TrimSpace(s.Focus) == "" {
+			label = "Session"
+		}
+		b = append(b, sDim.Render(label), lipgloss.NewStyle().Width(inner).Render(d), "")
+	}
+	if svc := m.servicesFor(s); len(svc) > 0 {
+		b = append(b, sDim.Render("Running"))
+		for _, x := range svc {
+			b = append(b, lipgloss.NewStyle().Foreground(cGood).Render(fmt.Sprintf("  :%-6d", x.Port))+sDim.Render(fit(clean(x.Cmd)+"  pid "+fmt.Sprint(x.PID), inner-10)))
+		}
+		b = append(b, "")
+	}
 
 	ns := m.panelNeeds()
 	if len(ns) == 0 {
@@ -76,6 +90,16 @@ func (m model) panelView(w, h int) string {
 		foot = []string{sAccent.Render("Your answer to " + friendlyName(s.Addr)), m.input.View()}
 	case modeConfirm:
 		foot = []string{lipgloss.NewStyle().Foreground(cWarn).Render(fit("Close it?  y done · c canceled · n denied", inner))}
+	case modeOpen:
+		foot = append(foot, sAccent.Render("Open in…"))
+		for i, it := range m.openItems {
+			l := fmt.Sprintf("%d  %s", i+1, it.label)
+			if i == m.openSel {
+				foot = append(foot, sSel.Render(fit("› "+l, inner)))
+			} else {
+				foot = append(foot, "  "+fit(l, inner-2))
+			}
+		}
 	}
 	bodyH := h - 2 - len(foot)
 	if len(foot) > 0 {

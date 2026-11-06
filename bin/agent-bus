@@ -1606,7 +1606,8 @@ peer_cursor() { printf '%s/state/peer.%s.%s' "$BUS" "$1" "$2"; }
 # PATH through env ($HOME expands on the far side).
 peer_ssh() { # host args...
   local host="$1"; shift
-  ssh -o BatchMode=yes -o ConnectTimeout="${AGENT_BUS_PEER_TIMEOUT:-3}" "$host" \
+  local err=/dev/null; [ -n "${AGENT_BUS_PEER_DEBUG:-}" ] && err=/dev/stderr
+  ssh -o BatchMode=yes -o ConnectTimeout="${AGENT_BUS_PEER_TIMEOUT:-3}" "$host" 2>"$err" \
     env "PATH=\$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" agent-bus "$@"
 }
 LEDGER_DIRTY=0
@@ -1642,7 +1643,8 @@ peer_ingest() { # from-host
   rm -rf "$d"
   [ -n "$new" ] || { printf '%s: up to date\n' "$(peer_self)"; return 0; }
   printf '%s: took %s row(s) from %s\n' "$(peer_self)" "$(printf '%s\n' "$new" | wc -l | tr -d ' ')" "$from"
-  printf '%s\n' "$new" | jq -c 'select(.kind == "msg")' | while IFS= read -r row; do
+  # Wake only for fresh messages: a first sync carries the whole history.
+  printf '%s\n' "$new" | jq -c --argjson cut $(( $(now_epoch) - 900 )) 'select(.kind == "msg" and (.epoch // 0) >= $cut)' | while IFS= read -r row; do
     ( ADDR=$(jq -r .from <<<"$row"); deliver "$row" "from an agent on $from, not your user" 0 ) \
       | sed "s/^delivery: /delivery ($(peer_self)): /"
   done
@@ -1691,7 +1693,9 @@ cmd_peer() {
         || die "peer add: cannot run agent-bus on $1 over SSH. Turn on Remote Login there, run ssh-copy-id $1, and install agent-bus on it."
       peer_list | grep -qxF "$1" || printf '%s\n' "$1" >>"$PEERS_FILE"
       printf 'peer %s added. Posts here now reach agents there. Run agent-bus peer add %s on %s too.\n' "$1" "$(peer_self).local" "$1"
-      peer_push "$1"; peer_pull "$1" ;;
+      # History stays where it was made: only what happens from now on travels.
+      now_epoch >"$(peer_cursor "$1" pushed)"; now_epoch >"$(peer_cursor "$1" pulled)"
+      echo "from now on, new posts and closes travel both ways" ;;
     remove)
       [ -n "${1:-}" ] || die "peer remove <host>"
       [ -f "$PEERS_FILE" ] && { grep -vxF "$1" "$PEERS_FILE" >"$PEERS_FILE.tmp" || :; mv "$PEERS_FILE.tmp" "$PEERS_FILE"; }

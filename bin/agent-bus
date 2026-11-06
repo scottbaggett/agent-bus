@@ -343,6 +343,7 @@ ledger_append() {
   bus_lock "$LEDGER" 10
   printf '%s\n' "$1" >>"$LEDGER"
   bus_unlock "$LEDGER"
+  LEDGER_DIRTY=1
 }
 
 pm_file() { printf '%s/state/roles/%s.pm' "$BUS" "$(slugify "$REPO_ID")"; }
@@ -1508,6 +1509,10 @@ cmd_post() {
   fi
   [ "${USER_SENT:-0}" = 1 ] && src="from your user"
   deliver "$rec" "$src" "$resume"
+  if [ "${AGENT_BUS_NO_PEERS:-0}" != 1 ] && [ -n "$(peer_list)" ]; then
+    local h; for h in $(peer_list); do peer_push "$h" || :; done
+    LEDGER_DIRTY=0
+  fi
   return 0
 }
 
@@ -1533,7 +1538,8 @@ deliver() { # rec src resume
   if [ -z "$owners" ]; then
     case "$to" in
       @*) printf 'delivery: nobody owns this, so nobody is woken. Agents see it only if they run agent-bus read. To get it acted on, send it --to a seat (agent-bus who).\n' ;;
-      *) printf 'delivery: %s is not running; this waits until it is (or hand it to a live seat: agent-bus who)\n' "$to" ;;
+      *) if [ -n "$(peer_list)" ] && [ "${AGENT_BUS_NO_PEERS:-0}" != 1 ]; then printf 'delivery: %s is not on this machine; sending to peers\n' "$to"
+         else printf 'delivery: %s is not running; this waits until it is (or hand it to a live seat: agent-bus who)\n' "$to"; fi ;;
     esac
   fi
   while IFS= read -r row; do
@@ -1584,6 +1590,119 @@ check_closable() {
     *) printf 'agent-bus: %s — %s is not its sender, a recipient, the PM or the lead\n' "$1" "$ADDR" >&2 ;;
   esac
   return 1
+}
+
+# ------------------------------------------------------------------ peers
+#
+# Prototype: other machines on your network, each with its own bus, synced
+# over SSH. The ledger is append-only, so merging is "append the lines I don't
+# have". A shared folder would not work: the ledger lock trusts PIDs, and a PID
+# from another machine always looks dead.
+PEERS_FILE="$BUS/state/peers"
+peer_list() { [ -f "$PEERS_FILE" ] && sed '/^#/d;/^$/d' "$PEERS_FILE"; return 0; }
+peer_cursor() { printf '%s/state/peer.%s.%s' "$BUS" "$1" "$2"; }
+# Run agent-bus on a peer. Non-interactive SSH may not load the PATH that
+# Homebrew sets up, and the login shell may be fish, so pass PATH through env.
+peer_ssh() { # host args...
+  local host="$1"; shift
+  ssh -o BatchMode=yes -o ConnectTimeout="${AGENT_BUS_PEER_TIMEOUT:-3}" "$host" \
+    env PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin agent-bus "$@"
+}
+LEDGER_DIRTY=0
+
+# Rows from the live ledger since an epoch, and the bodies of their messages,
+# as a tar stream on stdout.
+peer_export() { # since
+  local since="${1:-0}" d; mkdir -p "$BUS/tmp"; d=$(mktemp -d "$BUS/tmp/peer.XXXXXX") || return 1
+  mkdir -p "$d/msg"
+  jq -c --argjson s "$since" 'select((.epoch // 0) >= $s)' "$LEDGER" >"$d/rows.jsonl" 2>/dev/null || :
+  jq -r 'select(.kind == "msg") | .id' "$d/rows.jsonl" | while IFS= read -r id; do
+    [ -f "$BUS/msg/$id.md" ] && cp "$BUS/msg/$id.md" "$d/msg/"
+  done
+  tar -C "$d" -cf - rows.jsonl msg
+  rm -rf "$d"
+}
+
+# Take a tar from peer_export on stdin: append the rows this bus lacks, copy
+# their bodies, then wake the agents here that own new messages.
+peer_ingest() { # from-host
+  local from="${1:-a peer}" d new row
+  mkdir -p "$BUS/tmp"; d=$(mktemp -d "$BUS/tmp/peer.XXXXXX") || return 1
+  tar -C "$d" -xf - || { rm -rf "$d"; die "peer ingest: bad payload"; }
+  [ -d "$d/msg" ] && for f in "$d"/msg/*.md; do
+    [ -f "$f" ] && [ ! -f "$BUS/msg/$(basename "$f")" ] && cp "$f" "$BUS/msg/"
+  done
+  bus_lock "$LEDGER" 10
+  local have=("$LEDGER"); [ -f "$BUS/ledger.archive.jsonl" ] && have+=("$BUS/ledger.archive.jsonl")
+  touch "$LEDGER"
+  new=$(awk 'FILENAME != ARGV[ARGC-1] { seen[$0]; next } !($0 in seen) { seen[$0]; print }' "${have[@]}" "$d/rows.jsonl")
+  [ -n "$new" ] && printf '%s\n' "$new" >>"$LEDGER"
+  bus_unlock "$LEDGER"
+  rm -rf "$d"
+  [ -n "$new" ] || { printf '%s: up to date\n' "$(peer_self)"; return 0; }
+  printf '%s: took %s row(s) from %s\n' "$(peer_self)" "$(printf '%s\n' "$new" | wc -l | tr -d ' ')" "$from"
+  printf '%s\n' "$new" | jq -c 'select(.kind == "msg")' | while IFS= read -r row; do
+    ( ADDR=$(jq -r .from <<<"$row"); deliver "$row" "from an agent on $from, not your user" 0 ) \
+      | sed "s/^delivery: /delivery ($(peer_self)): /"
+  done
+  return 0
+}
+# A seat this machine has never seen, while peers are linked, is taken to be on a peer.
+seat_on_peer() { [ -n "$(peer_list)" ] && [ ! -f "$BUS/seats/$(printf '%s' "$1" | tr / _).json" ]; }
+peer_self() { scutil --get LocalHostName 2>/dev/null || hostname -s; }
+
+peer_push() { # host
+  local host="$1" since now
+  since=$(cat "$(peer_cursor "$host" pushed)" 2>/dev/null || echo 0)
+  now=$(now_epoch)
+  # Overlap by five minutes: clocks differ, and the receiver drops duplicates.
+  if peer_export $((since > 300 ? since - 300 : 0)) | peer_ssh "$host" peer ingest "$(peer_self)"; then
+    printf '%s\n' "$now" >"$(peer_cursor "$host" pushed)"
+  else
+    printf 'peer: could not reach %s (asleep, off the network, or Remote Login is off); it catches up at the next sync\n' "$host" >&2
+    return 1
+  fi
+}
+peer_pull() { # host
+  local host="$1" since now
+  since=$(cat "$(peer_cursor "$host" pulled)" 2>/dev/null || echo 0)
+  now=$(now_epoch)
+  if peer_ssh "$host" peer export $((since > 300 ? since - 300 : 0)) | peer_ingest "$host"; then
+    printf '%s\n' "$now" >"$(peer_cursor "$host" pulled)"
+  else return 1; fi
+}
+
+# After a command that wrote to the ledger, push to every peer in the background.
+peer_autopush() {
+  [ "$LEDGER_DIRTY" = 1 ] && [ "${AGENT_BUS_NO_PEERS:-0}" != 1 ] || return 0
+  local h; peer_list | while IFS= read -r h; do
+    mkdir -p "$BUS/tmp"; ( peer_push "$h" >>"$BUS/tmp/peer-push.log" 2>&1 & )
+  done
+  return 0
+}
+
+cmd_peer() {
+  local sub="${1:-list}"; shift || :
+  case "$sub" in
+    add)
+      [ -n "${1:-}" ] || die "peer add <host>   (e.g. m1max.local)"
+      peer_ssh "$1" version >/dev/null 2>&1 \
+        || die "peer add: cannot run agent-bus on $1 over SSH. Turn on Remote Login there, run ssh-copy-id $1, and install agent-bus on it."
+      peer_list | grep -qxF "$1" || printf '%s\n' "$1" >>"$PEERS_FILE"
+      printf 'peer %s added. Posts here now reach agents there. Run agent-bus peer add %s on %s too.\n' "$1" "$(peer_self).local" "$1"
+      peer_push "$1"; peer_pull "$1" ;;
+    remove)
+      [ -n "${1:-}" ] || die "peer remove <host>"
+      [ -f "$PEERS_FILE" ] && { grep -vxF "$1" "$PEERS_FILE" >"$PEERS_FILE.tmp" || :; mv "$PEERS_FILE.tmp" "$PEERS_FILE"; }
+      rm -f "$(peer_cursor "$1" pushed)" "$(peer_cursor "$1" pulled)"
+      printf 'peer %s removed\n' "$1" ;;
+    list) [ -n "$(peer_list)" ] && peer_list || echo "no peers (agent-bus peer add <host>)" ;;
+    sync) local h; for h in ${1:-$(peer_list)}; do peer_push "$h"; peer_pull "$h"; done ;;
+    who)  local h; for h in ${1:-$(peer_list)}; do printf '== %s\n' "$h"; peer_ssh "$h" who || echo "(unreachable)"; done ;;
+    ingest) peer_ingest "${1:-}" ;;
+    export) peer_export "${1:-0}" ;;
+    *) die "peer add|remove|list|sync|who" ;;
+  esac
 }
 
 # ------------------------------------------------------------------ policy
@@ -1760,7 +1879,7 @@ base_subject() { sed -E 's/^((review|changes requested): )+//'; }
 # whose session has ended is replaced by the lead, so nothing waits on nobody.
 submit_review() { # id reviewer note
   local id="$1" target="$2" subj
-  [ "$target" = '@lead' ] || seat_live "$target" || target='@lead'
+  [ "$target" = '@lead' ] || seat_live "$target" || seat_on_peer "$target" || target='@lead'
   subj=$(item_field "$id" subject | base_subject)
   cmd_post --allow-claude --re "$id" --close handed-off --to "$target" --state needs-review --review none \
     --review-of "$id" -s "review: ${subj:0:180}" -m "${3:-Done and ready for review: $subj}" >/dev/null
@@ -2904,6 +3023,8 @@ agent-bus — handoff bus for coding agents sharing repos and worktrees.
   grok shell-init --name <n>  print export lines for running as a Grok seat
   whoami                      this seat's identity
   avatar [seat]               a seat's bot (yours by default)
+  peer add|remove|list|sync|who [host]
+                              (prototype) link another machine's bus over SSH
   who                         live seats, the PM, open-work count, claims
   post [flags]                send a packet
       --to <seat|scope|@role|@lane|@pm|@lead|@here|@repo|@all>     required
@@ -3010,7 +3131,9 @@ case " $* " in *" --help "*|*" -h "*)
   [ "$cmd" = help ] || [ "$cmd" = -h ] || [ "$cmd" = --help ] || { cmd_help "$cmd"; exit; } ;;
 esac
 resolve_identity
+trap peer_autopush EXIT
 case "$cmd" in
+  peer) cmd_peer "$@" ;;
   version|--version) cmd_version ;;
   codex) cmd_codex "$@" ;;
   grok)  cmd_grok  "$@" ;;

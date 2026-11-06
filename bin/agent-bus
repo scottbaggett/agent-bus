@@ -1689,6 +1689,8 @@ cmd_peer() {
   case "$sub" in
     add)
       [ -n "${1:-}" ] || die "peer add <host>   (e.g. m1max.local)"
+      case "$1" in "$(peer_self)"|"$(peer_self).local"|localhost|127.*|::1)
+        die "peer add: $1 is this machine. Run peer add on the other machine, naming this one ($(peer_self).local)" ;; esac
       peer_ssh "$1" version >/dev/null 2>&1 \
         || die "peer add: cannot run agent-bus on $1 over SSH. Turn on Remote Login there, run ssh-copy-id $1, and install agent-bus on it."
       peer_list | grep -qxF "$1" || printf '%s\n' "$1" >>"$PEERS_FILE"

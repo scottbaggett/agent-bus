@@ -54,7 +54,7 @@ func (m model) panelView(w, h int) string {
 
 	ns := m.panelNeeds()
 	if len(ns) == 0 {
-		b = append(b, sDim.Render("Nothing waiting on you."), "", sDim.Render("c or enter: chat with it"))
+		b = append(b, sDim.Render("Nothing waiting on you."), "", sDim.Render("c or enter: its timeline, and chat"))
 	} else {
 		title := fmt.Sprintf("Waiting on you · %d", len(ns))
 		b = append(b, lipgloss.NewStyle().Foreground(cBad).Bold(true).Render(title), "")

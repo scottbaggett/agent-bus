@@ -65,6 +65,8 @@ type model struct {
 	chatView    viewport.Model
 	chatSending bool
 	chatNote    string
+	chatSel     int
+	chatFollow  bool // keep the newest entry selected as new ones arrive
 
 	titles     map[string]string // session titles, when an agent set no focus
 	titlesAt   time.Time
@@ -186,7 +188,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.err != nil {
 				m.setStatus("✗ could not read the conversation: " + msg.err.Error())
 			} else {
+				var keep string
+				if !m.chatFollow && m.chatSel >= 0 && m.chatSel < len(m.chatMsgs) {
+					keep = m.chatMsgs[m.chatSel].ID + m.chatMsgs[m.chatSel].Kind
+				}
 				m.chatMsgs = msg.msgs
+				m.chatSel = len(m.chatMsgs) - 1
+				if keep != "" {
+					for i, c := range m.chatMsgs {
+						if c.ID+c.Kind == keep {
+							m.chatSel = i
+						}
+					}
+				}
 				m.renderChat()
 			}
 		}
@@ -729,7 +743,7 @@ func (m model) footerView() string {
 	if m.err != nil {
 		return lipgloss.NewStyle().Foreground(cBad).Render(fit(" refresh failed: "+m.err.Error(), m.w))
 	}
-	keys := []string{"arrows or click: pick an agent", "/: search", "enter: details", "o: open in…", "c: chat", "?: help", "q: quit"}
+	keys := []string{"arrows or click: pick an agent", "/: search", "enter: details", "o: open in…", "c: timeline & chat", "?: help", "q: quit"}
 	if m.query != "" {
 		keys = append([]string{sAccent.Render("/" + m.query), "esc: clear"}, keys[1:]...)
 	}
@@ -740,7 +754,7 @@ func (m model) footerView() string {
 	case modeOpen:
 		keys = []string{"↑↓ or number: pick", "enter: open", "esc: back"}
 	case modePanel:
-		keys = []string{"↑↓ item", "r answer", "x close it", "c chat", "o open in…", "←→ next agent", "esc back"}
+		keys = []string{"↑↓ item", "r answer", "x close it", "c timeline & chat", "o open in…", "←→ next agent", "esc back"}
 	case modeReply:
 		keys = []string{"enter sends and closes it", "esc cancels"}
 	case modeConfirm:
@@ -759,7 +773,8 @@ func (m model) helpView() string {
 		"  arrows / click   pick an agent",
 		"  enter            open what it needs from you",
 		"  /                search: name, focus, ticket, branch, port (fuzzy)",
-		"  c                chat with it",
+		"  c                its timeline: everything it sent, got, closed or decided;",
+		"                   ↑↓ moves through it, and you can message it from there",
 		"  o                open its folder in Finder, Zed, Cursor… or its ports in a browser",
 		"",
 		"  in the panel:  ↑↓ item · r answer (and close) · x close · c chat",

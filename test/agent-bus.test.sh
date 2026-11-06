@@ -993,6 +993,18 @@ assert_has "whoami warns for unregistered grok seat" "no seat file" "$out"
 out=$(PATH="$ROOT/bin:$PATH" a doctor 2>&1)
 assert_lacks "doctor: no stale-install warning for the same CLI" "possible stale install" "$out"
 
+# --- OpenCode seats end with their server; a lone seat's orientation is short ---
+sleep 300 & SRVPID=$!
+out=$(AGENT_BUS_SERVER_PID=$SRVPID raw_seat srv1 opencode wsrv whoami)
+OCS=$(awk '/^seat/{print $2}' <<<"$out")
+AGENT_BUS_SERVER_PID=$SRVPID raw_seat srv1 opencode wsrv who >/dev/null
+assert_has "a seat under a live opencode server is live" "$OCS" "$(a who)"
+kill "$SRVPID" 2>/dev/null; wait "$SRVPID" 2>/dev/null || true
+assert_lacks "its seat ends when the server exits" "$OCS" "$(a who)"
+out=$(AGENT_BUS_BRANCH=fix/solo-thing raw_seat solo1 opencode wsolo digest)
+assert_has "a seat alone on its work gets a short orientation" "No other agent is on this work" "$out"
+assert_lacks "and no lane jargon" "in lane @" "$out"
+
 # --- avatars: generated from the seat, stable, different per seat ---
 av1=$("$BIN" avatar codex/web.5f21); av2=$("$BIN" avatar codex/web.9e02)
 assert_eq "an avatar is the same every time" "$av1" "$("$BIN" avatar codex/web.5f21)"

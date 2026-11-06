@@ -33,6 +33,12 @@ inbox socket; other hosts are found by walking up from the CLI to the first
 process named after the tool. `pid` is null when none is found (shell seats);
 `AGENT_BUS_PID` overrides it.
 
+OpenCode serves every session from one `opencode serve` process, so its seats
+record that as `server_pid` instead of a pid of their own. When the server
+exits (OpenCode was restarted), its seats count as ended right away rather
+than lingering for the two-hour live window. `AGENT_BUS_SERVER_PID` overrides
+it.
+
 Every seat has a bot: four lines of half-block art made from its address,
 never picked. The tool sets the head, body and color (Claude orange, Codex
 blue, OpenCode yellow); a hash of the seat sets the antenna, eyes and legs, so

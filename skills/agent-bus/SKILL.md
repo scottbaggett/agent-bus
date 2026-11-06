@@ -40,6 +40,10 @@ Don't bring up the team rules or ask setup questions.
 - the agents working alongside them,
 - one or two concrete next steps, as `/agent-bus <word>` suggestions.
 
+Name a lane only when other agents share it, and then call it "the agents on
+this feature". A lane made from a branch name (like `@release-v0-3-4`) means
+nothing to your user.
+
 ### setup
 
 Only when the user asks to set up or change the rules. The rules live in
@@ -101,6 +105,9 @@ agent-bus post --re <id> --close handed-off --to <seat> --state handoff --file h
 
 Whoever you hand work to will send it back to you for review when done (if the
 team's rules say so).
+
+A digest that has nothing for you (only a "you are …" line) needs no comment:
+don't tell your user it arrived.
 
 If `post` prints a `tip:` line, pass it on to your user in one sentence.
 

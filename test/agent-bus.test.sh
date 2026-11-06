@@ -1039,6 +1039,14 @@ assert_has "and the owner there is told" "delivery (" "$out"
 assert_has "the agent there sees the handoff" "across the network" "$(PBT=opencode pb read --peek)"
 out=$(SSH_ORIGINAL_COMMAND="export 0" pa peer serve | serve_b "ingest amac.local")
 assert_has "syncing twice adds nothing" "up to date" "$out"
+# Catch-up runs from the hooks at most once a minute, in the background.
+pa peer accept bmac.local ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl >/dev/null
+mkdir -p "$PA/fakebin"; printf '#!/bin/sh\necho "ssh $*" >>"%s/ssh.calls"; exit 255\n' "$PA" >"$PA/fakebin/ssh"; chmod +x "$PA/fakebin/ssh"
+PATH="$PA/fakebin:$PATH" pa heartbeat; sleep 1
+assert_has "a hook starts a catch-up with each peer" "bmac.local" "$(cat "$PA/ssh.calls" 2>/dev/null)"
+n=$(wc -l <"$PA/ssh.calls"); PATH="$PA/fakebin:$PATH" pa heartbeat; sleep 1
+assert_eq "and not again within the minute" "$n" "$(wc -l <"$PA/ssh.calls")"
+assert_has "doctor says when a peer can't be reached" "UNREACHABLE" "$(PATH="$PA/fakebin:$PATH" pa doctor 2>&1)"
 out=$(pa peer remove bmac.local)
 assert_lacks "remove takes the key out" "agent-bus-peer:bmac.local" "$(cat "$PA/home/.ssh/authorized_keys")"
 out=$(pa peer add localhost 2>&1 || true)

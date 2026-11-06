@@ -1726,6 +1726,37 @@ peer_pull() { # host
   else return 1; fi
 }
 
+# At most once a minute, from the session hooks: catch up with every peer in
+# the background, so a Mac that was asleep or away gets what it missed. The
+# hook never waits on the network.
+peer_catchup() {
+  [ "${AGENT_BUS_NO_PEERS:-0}" != 1 ] && [ -n "$(peer_list)" ] || return 0
+  local stamp="$BUS/state/peer.lastsync" last
+  last=$(cat "$stamp" 2>/dev/null || echo 0)
+  (( $(now_epoch) - last >= ${AGENT_BUS_PEER_EVERY:-60} )) || return 0
+  now_epoch >"$stamp"; mkdir -p "$BUS/tmp"
+  ( nohup "$0" peer sync </dev/null >>"$BUS/tmp/peer-push.log" 2>&1 & ) 2>/dev/null
+  return 0
+}
+ago() { local d=$(( $(now_epoch) - $1 )); if ((d < 120)); then echo "${d}s ago"; elif ((d < 7200)); then echo "$((d / 60))m ago"; else echo "$((d / 3600))h ago"; fi; }
+peer_doctor() {
+  [ -n "$(peer_list)" ] || return 0
+  printf '\npeers:\n'
+  local h v pushed pulled
+  for h in $(peer_list); do
+    pushed=$(cat "$(peer_cursor "$h" pushed)" 2>/dev/null || echo 0)
+    pulled=$(cat "$(peer_cursor "$h" pulled)" 2>/dev/null || echo 0)
+    if v=$(peer_ssh "$h" version | head -1); then
+      v=$(awk '{print $2}' <<<"$v")
+      if [ "$v" = "$VERSION" ]; then printf '  %-20s ok (agent-bus %s, synced %s)\n' "$h" "$v" "$(ago $((pushed < pulled ? pushed : pulled)))"
+      else printf '  %-20s VERSION DIFFERS: %s there, %s here. Run agent-bus update on the older one\n' "$h" "$v" "$VERSION"; fi
+    else
+      printf '  %-20s UNREACHABLE: asleep, off the network, or Remote Login is off. Last synced %s; it catches up when back\n' "$h" "$(ago $((pushed < pulled ? pushed : pulled)))"
+      [ -f "$PEER_KEY" ] || printf '  %-20s no agent-bus key here: agent-bus peer add %s\n' '' "$h"
+    fi
+  done
+}
+
 # After a command that wrote to the ledger, push to every peer in the background.
 peer_autopush() {
   [ "$LEDGER_DIRTY" = 1 ] && [ "${AGENT_BUS_NO_PEERS:-0}" != 1 ] || return 0
@@ -2894,6 +2925,7 @@ cmd_doctor() {
     printf '\nCodex delivery:\n'
     cmd_codex status
   fi
+  peer_doctor
   printf '\nlive seats in %s:\n' "$REPO"
   local dr_now; dr_now=$(now_epoch)
   seat_rows | jq -r --arg rid "$REPO_ID" --argjson cut "$(( dr_now - SEAT_TTL ))" \
@@ -3226,8 +3258,8 @@ case "$cmd" in
   who) touch_seat; cmd_who ;;
   post) touch_seat; cmd_post "$@" ;;
   read) touch_seat; cmd_read "$@" ;;
-  digest) touch_seat; maybe_gc; cmd_read --digest ;;
-  heartbeat) touch_seat; maybe_gc ;;
+  digest) touch_seat; maybe_gc; peer_catchup; cmd_read --digest ;;
+  heartbeat) touch_seat; maybe_gc; peer_catchup ;;
   show) cmd_show "$@" ;;
   resolve) touch_seat; cmd_resolve "$@" ;;
   reply) touch_seat; cmd_reply "$@" ;;

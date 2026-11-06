@@ -21,7 +21,7 @@
 #   claims/<hash>.json  advisory file claims
 set -euo pipefail
 
-VERSION="0.4.0"
+VERSION="0.4.1"
 
 BUS="${AGENT_BUS_HOME:-$HOME/.agents/bus}"
 LEDGER="$BUS/ledger.jsonl"

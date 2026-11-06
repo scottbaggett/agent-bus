@@ -1,7 +1,7 @@
 # agent-bus
 
 <p align="center">
-  <img src="assets/agent-bus.svg" width="760" alt="A yellow school bus labeled AGENT BUS with robot agents in the windows, a PM robot driving, a roof sign reading @here to @repo, and a handoff packet flying out behind.">
+  <img src="assets/agent-bus.svg" width="900" alt="agent-bus as a terminal dashboard. A Claude Code agent hands the client work to a Codex agent; Codex claims src/client.ts, does it and sends it back; Claude checks and approves it. An OpenCode agent keeps out of the claimed file and asks you before dropping a table. A live bus log lists each step.">
 </p>
 
 Run several coding agents at once, in different windows and worktrees, and let

@@ -1,125 +1,234 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 400" role="img" aria-label="A yellow school bus labeled AGENT BUS with robot agents in the windows, a PM robot driving, a roof sign reading @here to @repo, and a handoff packet flying out behind.">
-  <title>agent-bus — a school bus full of coding agents</title>
-
-  <!-- ground shadow -->
-  <ellipse cx="440" cy="374" rx="340" ry="14" fill="#888888" opacity="0.22"/>
-
-  <!-- exhaust puffs -->
-  <circle cx="46" cy="326" r="10" fill="#9aa0a6" opacity="0.5"/>
-  <circle cx="26" cy="318" r="7" fill="#9aa0a6" opacity="0.35"/>
-  <circle cx="12" cy="310" r="5" fill="#9aa0a6" opacity="0.25"/>
-
-  <!-- handoff packet flying out the back -->
-  <g>
-    <line x1="-6" y1="176" x2="8" y2="176" stroke="#9aa0a6" stroke-width="3" stroke-linecap="round" opacity="0.6"/>
-    <line x1="-2" y1="190" x2="10" y2="190" stroke="#9aa0a6" stroke-width="3" stroke-linecap="round" opacity="0.4"/>
-    <rect x="18" y="164" width="38" height="28" rx="4" fill="#ffffff" stroke="#262a31" stroke-width="2.5"/>
-    <path d="M18 168 L37 184 L56 168" fill="none" stroke="#262a31" stroke-width="2.5" stroke-linejoin="round"/>
-  </g>
-
-  <!-- roof route sign -->
-  <rect x="560" y="64" width="220" height="40" rx="8" fill="#1c1f26" stroke="#5a6470" stroke-width="2.5"/>
-  <text x="670" y="91" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="19" font-weight="700" fill="#ffb01f">@here &#8594; @repo</text>
-
-  <!-- roof marker lights -->
-  <rect x="116" y="98" width="26" height="12" rx="6" fill="#ffb01f" stroke="#262a31" stroke-width="2.5"/>
-  <rect x="446" y="98" width="26" height="12" rx="6" fill="#ffb01f" stroke="#262a31" stroke-width="2.5"/>
-
-  <!-- bus body -->
-  <rect x="80" y="108" width="710" height="200" rx="22" fill="#ffc42e" stroke="#262a31" stroke-width="4"/>
-
-  <!-- bumpers -->
-  <rect x="62" y="280" width="24" height="26" rx="6" fill="#3c434d" stroke="#262a31" stroke-width="2.5"/>
-  <rect x="784" y="280" width="24" height="26" rx="6" fill="#3c434d" stroke="#262a31" stroke-width="2.5"/>
-
-  <!-- passenger windows -->
-  <rect x="104" y="138" width="96" height="74" rx="10" fill="#bee3f8" stroke="#262a31" stroke-width="3"/>
-  <rect x="222" y="138" width="96" height="74" rx="10" fill="#bee3f8" stroke="#262a31" stroke-width="3"/>
-  <rect x="340" y="138" width="96" height="74" rx="10" fill="#bee3f8" stroke="#262a31" stroke-width="3"/>
-  <rect x="458" y="138" width="96" height="74" rx="10" fill="#bee3f8" stroke="#262a31" stroke-width="3"/>
-  <!-- driver window + windshield -->
-  <rect x="576" y="138" width="96" height="74" rx="10" fill="#bee3f8" stroke="#262a31" stroke-width="3"/>
-  <rect x="694" y="128" width="66" height="92" rx="10" fill="#bee3f8" stroke="#262a31" stroke-width="3"/>
-
-  <!-- robot passengers (generic bots, harness-hinted colors) -->
-  <!-- coral bot -->
-  <g>
-    <line x1="152" y1="162" x2="152" y2="150" stroke="#262a31" stroke-width="3"/>
-    <circle cx="152" cy="147" r="5" fill="#e07a5f" stroke="#262a31" stroke-width="2.5"/>
-    <rect x="126" y="162" width="52" height="50" rx="10" fill="#e07a5f" stroke="#262a31" stroke-width="3"/>
-    <circle cx="141" cy="184" r="7" fill="#ffffff"/><circle cx="141" cy="184" r="3" fill="#1c1f26"/>
-    <circle cx="163" cy="184" r="7" fill="#ffffff"/><circle cx="163" cy="184" r="3" fill="#1c1f26"/>
-    <rect x="145" y="198" width="14" height="4" rx="2" fill="#1c1f26" opacity="0.75"/>
-  </g>
-  <!-- teal bot -->
-  <g>
-    <line x1="270" y1="162" x2="270" y2="150" stroke="#262a31" stroke-width="3"/>
-    <circle cx="270" cy="147" r="5" fill="#17a385" stroke="#262a31" stroke-width="2.5"/>
-    <rect x="244" y="162" width="52" height="50" rx="10" fill="#17a385" stroke="#262a31" stroke-width="3"/>
-    <circle cx="259" cy="184" r="7" fill="#ffffff"/><circle cx="259" cy="184" r="3" fill="#1c1f26"/>
-    <circle cx="281" cy="184" r="7" fill="#ffffff"/><circle cx="281" cy="184" r="3" fill="#1c1f26"/>
-    <rect x="263" y="198" width="14" height="4" rx="2" fill="#1c1f26" opacity="0.75"/>
-  </g>
-  <!-- charcoal bot -->
-  <g>
-    <line x1="388" y1="162" x2="388" y2="150" stroke="#262a31" stroke-width="3"/>
-    <circle cx="388" cy="147" r="5" fill="#2d333b" stroke="#262a31" stroke-width="2.5"/>
-    <rect x="362" y="162" width="52" height="50" rx="10" fill="#2d333b" stroke="#262a31" stroke-width="3"/>
-    <circle cx="377" cy="184" r="7" fill="#ffffff"/><circle cx="377" cy="184" r="3" fill="#1c1f26"/>
-    <circle cx="399" cy="184" r="7" fill="#ffffff"/><circle cx="399" cy="184" r="3" fill="#1c1f26"/>
-    <rect x="381" y="198" width="14" height="4" rx="2" fill="#ffffff" opacity="0.75"/>
-  </g>
-  <!-- terminal-green bot -->
-  <g>
-    <line x1="506" y1="162" x2="506" y2="150" stroke="#262a31" stroke-width="3"/>
-    <circle cx="506" cy="147" r="5" fill="#3fb950" stroke="#262a31" stroke-width="2.5"/>
-    <rect x="480" y="162" width="52" height="50" rx="10" fill="#3fb950" stroke="#262a31" stroke-width="3"/>
-    <circle cx="495" cy="184" r="7" fill="#ffffff"/><circle cx="495" cy="184" r="3" fill="#1c1f26"/>
-    <circle cx="517" cy="184" r="7" fill="#ffffff"/><circle cx="517" cy="184" r="3" fill="#1c1f26"/>
-    <rect x="499" y="198" width="14" height="4" rx="2" fill="#1c1f26" opacity="0.75"/>
-  </g>
-  <!-- PM driver -->
-  <g>
-    <rect x="598" y="166" width="52" height="46" rx="10" fill="#8b949e" stroke="#262a31" stroke-width="3"/>
-    <path d="M598 170 a26 18 0 0 1 52 0 v4 h-52 z" fill="#1c1f26"/>
-    <rect x="644" y="168" width="16" height="6" rx="3" fill="#1c1f26"/>
-    <text x="624" y="179" text-anchor="middle" font-family="ui-sans-serif, -apple-system, 'Segoe UI', sans-serif" font-size="13" font-weight="800" fill="#ffffff">PM</text>
-    <circle cx="613" cy="192" r="6" fill="#ffffff"/><circle cx="613" cy="192" r="3" fill="#1c1f26"/>
-    <circle cx="635" cy="192" r="6" fill="#ffffff"/><circle cx="635" cy="192" r="3" fill="#1c1f26"/>
-    <rect x="617" y="202" width="14" height="4" rx="2" fill="#1c1f26" opacity="0.75"/>
-  </g>
-
-  <!-- lettering -->
-  <text x="330" y="248" text-anchor="middle" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Arial, sans-serif" font-size="31" font-weight="900" letter-spacing="8" fill="#1c1f26">AGENT BUS</text>
-
-  <!-- stop arm -->
-  <g>
-    <polygon points="705,226 719,226 729,236 729,250 719,260 705,260 695,250 695,236" fill="#d93025" stroke="#262a31" stroke-width="2.5"/>
-    <text x="712" y="248" text-anchor="middle" font-family="ui-sans-serif, -apple-system, 'Segoe UI', sans-serif" font-size="11" font-weight="800" fill="#ffffff">STOP</text>
-  </g>
-
-  <!-- rub rails -->
-  <rect x="80" y="258" width="710" height="10" rx="5" fill="#262a31" opacity="0.9"/>
-  <rect x="80" y="276" width="710" height="6" rx="3" fill="#262a31" opacity="0.9"/>
-
-  <!-- rear plate -->
-  <rect x="94" y="286" width="62" height="20" rx="4" fill="#ffffff" stroke="#262a31" stroke-width="2"/>
-  <text x="125" y="301" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="700" fill="#1c1f26">BASH+JQ</text>
-
-  <!-- headlight -->
-  <circle cx="774" cy="250" r="9" fill="#ffe8a3" stroke="#262a31" stroke-width="2.5"/>
-
-  <!-- wheels -->
-  <g>
-    <circle cx="208" cy="308" r="50" fill="#1c1f26" stroke="#5a6470" stroke-width="3"/>
-    <circle cx="208" cy="308" r="42" fill="#262a31" stroke="#000000" stroke-width="2"/>
-    <circle cx="208" cy="308" r="17" fill="#8b949e" stroke="#000000" stroke-width="2"/>
-    <circle cx="208" cy="308" r="5" fill="#1c1f26"/>
-  </g>
-  <g>
-    <circle cx="648" cy="308" r="50" fill="#1c1f26" stroke="#5a6470" stroke-width="3"/>
-    <circle cx="648" cy="308" r="42" fill="#262a31" stroke="#000000" stroke-width="2"/>
-    <circle cx="648" cy="308" r="17" fill="#8b949e" stroke="#000000" stroke-width="2"/>
-    <circle cx="648" cy="308" r="5" fill="#1c1f26"/>
-  </g>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 700" role="img" aria-label="agent-bus shown as a terminal dashboard. A Claude Code agent hands the client work to a Codex agent. Codex claims src/client.ts, does the work and sends it back; Claude checks it and approves. An OpenCode agent keeps out of the claimed file and asks you before dropping a table. A live bus log lists each step.">
+<title>agent-bus: Claude Code, Codex and OpenCode working together on one bus</title>
+<!-- Font: IBM Plex Mono, subset and embedded under the SIL Open Font License 1.1. -->
+<style>
+    @font-face { font-family: 'PM'; src: url(data:font/woff2;base64,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) format('woff2'); }
+    @font-face { font-family: 'PSB'; src: url(data:font/woff2;base64,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) format('woff2'); }
+.m{font-family:'PM',Menlo,monospace;font-size:14px}.b{font-family:'PSB',Menlo,monospace;font-weight:600}.s{font-family:'PM',Menlo,monospace;font-size:12.5px}</style>
+<rect width="1200" height="700" rx="12" fill="#12110F"/>
+<text x="24" y="36" class="m" xml:space="preserve"><tspan fill="#5BC8E8" class="b">AGENT BUS</tspan><tspan fill="#7D766A">  3 agents · 3 harnesses · lane eng-142</tspan><tspan fill="#3A352E">  |  </tspan><tspan fill="#E8E3D8">6 packets</tspan><tspan fill="#3A352E">  |  </tspan><tspan fill="#F2A51F" class="b">! 1 needs you</tspan></text>
+<rect x="24" y="58" width="207" height="22" fill="#1F6F64"/>
+<text x="35" y="74" class="m b" fill="#EAF6F2" text-anchor="start">checkout-api · eng-142</text>
+<rect x="24" y="84" width="372" height="132" fill="#16140F" stroke="#E0855F" stroke-width="1.5"/>
+<g shape-rendering="crispEdges">
+<rect x="58" y="106" width="9" height="9" fill="#E0855F"/>
+<rect x="67" y="106" width="9" height="9" fill="#E0855F"/>
+<rect x="76" y="106" width="9" height="9" fill="#E0855F"/>
+<rect x="85" y="106" width="9" height="9" fill="#E0855F"/>
+<rect x="49" y="115" width="9" height="9" fill="#E0855F"/>
+<rect x="58" y="115" width="9" height="9" fill="#12110F"/>
+<rect x="67" y="115" width="9" height="9" fill="#E0855F"/>
+<rect x="76" y="115" width="9" height="9" fill="#E0855F"/>
+<rect x="85" y="115" width="9" height="9" fill="#12110F"/>
+<rect x="94" y="115" width="9" height="9" fill="#E0855F"/>
+<rect x="49" y="124" width="9" height="9" fill="#E0855F"/>
+<rect x="58" y="124" width="9" height="9" fill="#E0855F"/>
+<rect x="67" y="124" width="9" height="9" fill="#E0855F"/>
+<rect x="76" y="124" width="9" height="9" fill="#E0855F"/>
+<rect x="85" y="124" width="9" height="9" fill="#E0855F"/>
+<rect x="94" y="124" width="9" height="9" fill="#E0855F"/>
+<rect x="40" y="133" width="9" height="9" fill="#F3C2A6"/>
+<rect x="49" y="133" width="9" height="9" fill="#E0855F"/>
+<rect x="58" y="133" width="9" height="9" fill="#E0855F"/>
+<rect x="67" y="133" width="9" height="9" fill="#E0855F"/>
+<rect x="76" y="133" width="9" height="9" fill="#E0855F"/>
+<rect x="85" y="133" width="9" height="9" fill="#E0855F"/>
+<rect x="94" y="133" width="9" height="9" fill="#E0855F"/>
+<rect x="103" y="133" width="9" height="9" fill="#F3C2A6"/>
+<rect x="40" y="142" width="9" height="9" fill="#F3C2A6"/>
+<rect x="58" y="142" width="9" height="9" fill="#E0855F"/>
+<rect x="67" y="142" width="9" height="9" fill="#E0855F"/>
+<rect x="76" y="142" width="9" height="9" fill="#E0855F"/>
+<rect x="85" y="142" width="9" height="9" fill="#E0855F"/>
+<rect x="103" y="142" width="9" height="9" fill="#F3C2A6"/>
+<rect x="58" y="151" width="9" height="9" fill="#E0855F"/>
+<rect x="67" y="151" width="9" height="9" fill="#E0855F"/>
+<rect x="76" y="151" width="9" height="9" fill="#E0855F"/>
+<rect x="85" y="151" width="9" height="9" fill="#E0855F"/>
+<rect x="58" y="160" width="9" height="9" fill="#E0855F"/>
+<rect x="85" y="160" width="9" height="9" fill="#E0855F"/>
+<rect x="49" y="169" width="9" height="9" fill="#E0855F"/>
+<rect x="58" y="169" width="9" height="9" fill="#E0855F"/>
+<rect x="85" y="169" width="9" height="9" fill="#E0855F"/>
+<rect x="94" y="169" width="9" height="9" fill="#E0855F"/>
+</g>
+<text x="132" y="114" class="m" xml:space="preserve"><tspan fill="#E0855F" class="b">* </tspan><tspan fill="#E8E3D8" class="b">Claude Code</tspan><tspan fill="#7D766A">  claude/api.3f1a</tspan></text>
+<text x="132" y="136" class="m" xml:space="preserve"><tspan fill="#5FD38D">reviewing</tspan></text>
+<text x="132" y="162" class="s" xml:space="preserve"><tspan fill="#7D766A">↳ </tspan><tspan fill="#E8E3D8">codex/web sent it back</tspan></text>
+<text x="132" y="182" class="s" xml:space="preserve"><tspan fill="#E8E3D8">  14 tests pass. </tspan><tspan fill="#5FD38D">approved ✓</tspan></text>
+<text x="132" y="205" class="s" fill="#7D766A" text-anchor="start">cpu</text>
+<rect x="166" y="196" width="80" height="10" fill="#1E1C18"/>
+<rect x="166" y="196" width="10" height="10" fill="#5FD38D"/>
+<text x="260" y="205" class="s" fill="#7D766A" text-anchor="start">mem</text>
+<rect x="294" y="196" width="80" height="10" fill="#1E1C18"/>
+<rect x="294" y="196" width="24" height="10" fill="#E8C547"/>
+<rect x="414" y="58" width="207" height="22" fill="#1F6F64"/>
+<text x="425" y="74" class="m b" fill="#EAF6F2" text-anchor="start">checkout-web · eng-142</text>
+<rect x="414" y="84" width="372" height="132" fill="#16140F" stroke="#79AEFF" stroke-width="1.5"/>
+<g shape-rendering="crispEdges">
+<rect x="457" y="106" width="9" height="9" fill="#CFE0FF"/>
+<rect x="466" y="106" width="9" height="9" fill="#CFE0FF"/>
+<rect x="457" y="115" width="9" height="9" fill="#79AEFF"/>
+<rect x="466" y="115" width="9" height="9" fill="#79AEFF"/>
+<rect x="439" y="124" width="9" height="9" fill="#79AEFF"/>
+<rect x="448" y="124" width="9" height="9" fill="#79AEFF"/>
+<rect x="457" y="124" width="9" height="9" fill="#79AEFF"/>
+<rect x="466" y="124" width="9" height="9" fill="#79AEFF"/>
+<rect x="475" y="124" width="9" height="9" fill="#79AEFF"/>
+<rect x="484" y="124" width="9" height="9" fill="#79AEFF"/>
+<rect x="439" y="133" width="9" height="9" fill="#79AEFF"/>
+<rect x="448" y="133" width="9" height="9" fill="#12110F"/>
+<rect x="457" y="133" width="9" height="9" fill="#12110F"/>
+<rect x="466" y="133" width="9" height="9" fill="#12110F"/>
+<rect x="475" y="133" width="9" height="9" fill="#12110F"/>
+<rect x="484" y="133" width="9" height="9" fill="#79AEFF"/>
+<rect x="439" y="142" width="9" height="9" fill="#79AEFF"/>
+<rect x="448" y="142" width="9" height="9" fill="#79AEFF"/>
+<rect x="457" y="142" width="9" height="9" fill="#79AEFF"/>
+<rect x="466" y="142" width="9" height="9" fill="#79AEFF"/>
+<rect x="475" y="142" width="9" height="9" fill="#79AEFF"/>
+<rect x="484" y="142" width="9" height="9" fill="#79AEFF"/>
+<rect x="430" y="151" width="9" height="9" fill="#CFE0FF"/>
+<rect x="439" y="151" width="9" height="9" fill="#79AEFF"/>
+<rect x="448" y="151" width="9" height="9" fill="#79AEFF"/>
+<rect x="457" y="151" width="9" height="9" fill="#79AEFF"/>
+<rect x="466" y="151" width="9" height="9" fill="#79AEFF"/>
+<rect x="475" y="151" width="9" height="9" fill="#79AEFF"/>
+<rect x="484" y="151" width="9" height="9" fill="#79AEFF"/>
+<rect x="493" y="151" width="9" height="9" fill="#CFE0FF"/>
+<rect x="448" y="160" width="9" height="9" fill="#79AEFF"/>
+<rect x="475" y="160" width="9" height="9" fill="#79AEFF"/>
+<rect x="448" y="169" width="9" height="9" fill="#79AEFF"/>
+<rect x="475" y="169" width="9" height="9" fill="#79AEFF"/>
+</g>
+<text x="522" y="114" class="m" xml:space="preserve"><tspan fill="#79AEFF" class="b">* </tspan><tspan fill="#E8E3D8" class="b">Codex</tspan><tspan fill="#7D766A">  codex/web.5f21</tspan></text>
+<text x="522" y="136" class="m" xml:space="preserve"><tspan fill="#79AEFF">working</tspan></text>
+<text x="522" y="162" class="s" xml:space="preserve"><tspan fill="#7D766A">↳ </tspan><tspan fill="#E8E3D8">handoff from claude/api</tspan></text>
+<text x="522" y="182" class="s" xml:space="preserve"><tspan fill="#E8E3D8">  claimed </tspan><tspan fill="#79AEFF">src/client.ts</tspan></text>
+<text x="522" y="205" class="s" fill="#7D766A" text-anchor="start">cpu</text>
+<rect x="556" y="196" width="80" height="10" fill="#1E1C18"/>
+<rect x="556" y="196" width="46" height="10" fill="#5FD38D"/>
+<text x="650" y="205" class="s" fill="#7D766A" text-anchor="start">mem</text>
+<rect x="684" y="196" width="80" height="10" fill="#1E1C18"/>
+<rect x="684" y="196" width="36" height="10" fill="#E8C547"/>
+<rect x="804" y="58" width="165" height="22" fill="#1F6F64"/>
+<text x="815" y="74" class="m b" fill="#EAF6F2" text-anchor="start">billing · eng-142</text>
+<rect x="804" y="84" width="372" height="132" fill="#16140F" stroke="#F2C94C" stroke-width="1.5"/>
+<g shape-rendering="crispEdges">
+<rect x="829" y="106" width="9" height="9" fill="#F2C94C"/>
+<rect x="838" y="106" width="9" height="9" fill="#F2C94C"/>
+<rect x="847" y="106" width="9" height="9" fill="#F2C94C"/>
+<rect x="856" y="106" width="9" height="9" fill="#F2C94C"/>
+<rect x="865" y="106" width="9" height="9" fill="#F2C94C"/>
+<rect x="874" y="106" width="9" height="9" fill="#F2C94C"/>
+<rect x="820" y="115" width="9" height="9" fill="#F2C94C"/>
+<rect x="829" y="115" width="9" height="9" fill="#F2C94C"/>
+<rect x="838" y="115" width="9" height="9" fill="#12110F"/>
+<rect x="847" y="115" width="9" height="9" fill="#F2C94C"/>
+<rect x="856" y="115" width="9" height="9" fill="#F2C94C"/>
+<rect x="865" y="115" width="9" height="9" fill="#12110F"/>
+<rect x="874" y="115" width="9" height="9" fill="#F2C94C"/>
+<rect x="883" y="115" width="9" height="9" fill="#F2C94C"/>
+<rect x="820" y="124" width="9" height="9" fill="#F2C94C"/>
+<rect x="829" y="124" width="9" height="9" fill="#F2C94C"/>
+<rect x="838" y="124" width="9" height="9" fill="#F2C94C"/>
+<rect x="847" y="124" width="9" height="9" fill="#F2C94C"/>
+<rect x="856" y="124" width="9" height="9" fill="#F2C94C"/>
+<rect x="865" y="124" width="9" height="9" fill="#F2C94C"/>
+<rect x="874" y="124" width="9" height="9" fill="#F2C94C"/>
+<rect x="883" y="124" width="9" height="9" fill="#F2C94C"/>
+<rect x="829" y="133" width="9" height="9" fill="#F2C94C"/>
+<rect x="838" y="133" width="9" height="9" fill="#F2C94C"/>
+<rect x="847" y="133" width="9" height="9" fill="#FFF0B8"/>
+<rect x="856" y="133" width="9" height="9" fill="#FFF0B8"/>
+<rect x="865" y="133" width="9" height="9" fill="#F2C94C"/>
+<rect x="874" y="133" width="9" height="9" fill="#F2C94C"/>
+<rect x="838" y="142" width="9" height="9" fill="#F2C94C"/>
+<rect x="847" y="142" width="9" height="9" fill="#F2C94C"/>
+<rect x="856" y="142" width="9" height="9" fill="#F2C94C"/>
+<rect x="865" y="142" width="9" height="9" fill="#F2C94C"/>
+<rect x="829" y="151" width="9" height="9" fill="#F2C94C"/>
+<rect x="838" y="151" width="9" height="9" fill="#F2C94C"/>
+<rect x="847" y="151" width="9" height="9" fill="#F2C94C"/>
+<rect x="856" y="151" width="9" height="9" fill="#F2C94C"/>
+<rect x="865" y="151" width="9" height="9" fill="#F2C94C"/>
+<rect x="874" y="151" width="9" height="9" fill="#F2C94C"/>
+<rect x="829" y="160" width="9" height="9" fill="#F2C94C"/>
+<rect x="847" y="160" width="9" height="9" fill="#F2C94C"/>
+<rect x="856" y="160" width="9" height="9" fill="#F2C94C"/>
+<rect x="874" y="160" width="9" height="9" fill="#F2C94C"/>
+<rect x="829" y="169" width="9" height="9" fill="#F2C94C"/>
+<rect x="874" y="169" width="9" height="9" fill="#F2C94C"/>
+</g>
+<text x="912" y="114" class="m" xml:space="preserve"><tspan fill="#F2C94C" class="b">* </tspan><tspan fill="#E8E3D8" class="b">OpenCode</tspan><tspan fill="#7D766A">  opencode/billing</tspan></text>
+<text x="912" y="136" class="m" xml:space="preserve"><tspan fill="#F2A51F">waiting on you</tspan></text>
+<text x="912" y="162" class="s" xml:space="preserve"><tspan fill="#7D766A">↳ </tspan><tspan fill="#E8E3D8">keeping out of src/client.ts</tspan></text>
+<text x="912" y="182" class="s" xml:space="preserve"><tspan fill="#E8E3D8">  asked you: drop a table?</tspan></text>
+<text x="912" y="205" class="s" fill="#7D766A" text-anchor="start">cpu</text>
+<rect x="946" y="196" width="80" height="10" fill="#1E1C18"/>
+<rect x="946" y="196" width="3" height="10" fill="#5FD38D"/>
+<text x="1040" y="205" class="s" fill="#7D766A" text-anchor="start">mem</text>
+<rect x="1074" y="196" width="80" height="10" fill="#1E1C18"/>
+<rect x="1074" y="196" width="18" height="10" fill="#E8C547"/>
+<defs><marker id="ao" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" fill="#E0855F"/></marker><marker id="ag" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" fill="#5FD38D"/></marker><marker id="ay" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" fill="#F2A51F"/></marker></defs>
+<path d="M300 218 C300 288 520 288 520 226" fill="none" stroke="#E0855F" stroke-width="2.5" marker-end="url(#ao)"/>
+<path d="M490 218 C490 254 330 254 330 226" fill="none" stroke="#5FD38D" stroke-width="2.5" marker-end="url(#ag)"/>
+<path d="M690 218 C690 270 910 270 910 222" fill="none" stroke="#79AEFF" stroke-width="2.5" stroke-dasharray="6 5"/>
+<rect x="374" y="260" width="71" height="22" fill="#E0855F"/>
+<text x="410" y="275.5" class="s b" fill="#12110F" text-anchor="middle">handoff</text>
+<rect x="344" y="234" width="132" height="22" fill="#5FD38D"/>
+<text x="410" y="249.5" class="s b" fill="#12110F" text-anchor="middle">done · check it</text>
+<rect x="719" y="246" width="162" height="22" fill="#79AEFF"/>
+<text x="800" y="261.5" class="s b" fill="#12110F" text-anchor="middle">claim src/client.ts</text>
+<path d="M1110 218 V344" fill="none" stroke="#F2A51F" stroke-width="2.5" marker-end="url(#ay)"/>
+<rect x="1090" y="253" width="41" height="22" fill="#F2A51F"/>
+<text x="1110" y="268.5" class="s b" fill="#12110F" text-anchor="middle">ask</text>
+<rect x="24" y="318" width="160" height="22" fill="#F2A51F"/>
+<text x="34" y="334" class="m b" fill="#12110F" text-anchor="start">! Needs you · 1</text>
+<rect x="24" y="344" width="1152" height="46" fill="#1A160E" stroke="#F2A51F" stroke-width="1.5"/>
+<text x="40" y="373" class="m" xml:space="preserve"><tspan fill="#F2C94C" class="b">opencode/billing</tspan><tspan fill="#7D766A"> asks: </tspan><tspan fill="#E8E3D8">drop the legacy invoices table?</tspan><tspan fill="#7D766A">   every other step, the agents settled themselves</tspan></text>
+<rect x="24" y="420" width="118" height="22" fill="#1F6F64"/>
+<text x="35" y="436" class="m b" fill="#EAF6F2" text-anchor="start">Bus · live</text>
+<rect x="24" y="446" width="1152" height="214" fill="#16140F" stroke="#3A352E" stroke-width="1.5"/>
+<text x="42" y="478" class="m" fill="#7D766A" text-anchor="start">14:02:11</text>
+<text x="130" y="478" class="m" fill="#E0855F" text-anchor="start">claude/api</text>
+<text x="292" y="478" class="m b" fill="#E0855F" text-anchor="start">handoff</text>
+<text x="398" y="478" class="m" fill="#7D766A" text-anchor="start">→</text>
+<text x="424" y="478" class="m" fill="#E8E3D8" text-anchor="start">codex/web</text>
+<text x="560" y="478" class="m" fill="#E8E3D8" text-anchor="start">wire the client to /checkout</text>
+<text x="1158" y="478" class="m" fill="#5FD38D" text-anchor="end">woken</text>
+<text x="42" y="508" class="m" fill="#7D766A" text-anchor="start">14:02:14</text>
+<text x="130" y="508" class="m" fill="#79AEFF" text-anchor="start">codex/web</text>
+<text x="292" y="508" class="m b" fill="#79AEFF" text-anchor="start">claim</text>
+<text x="398" y="508" class="m" fill="#7D766A" text-anchor="start">→</text>
+<text x="424" y="508" class="m" fill="#E8E3D8" text-anchor="start">src/client.ts</text>
+<text x="560" y="508" class="m" fill="#E8E3D8" text-anchor="start">keep out until this lands</text>
+<text x="42" y="538" class="m" fill="#7D766A" text-anchor="start">14:05:40</text>
+<text x="130" y="538" class="m" fill="#F2C94C" text-anchor="start">opencode/billing</text>
+<text x="292" y="538" class="m b" fill="#79AEFF" text-anchor="start">sees claim</text>
+<text x="398" y="538" class="m" fill="#7D766A" text-anchor="start">→</text>
+<text x="424" y="538" class="m" fill="#E8E3D8" text-anchor="start">src/client.ts</text>
+<text x="560" y="538" class="m" fill="#E8E3D8" text-anchor="start">works on invoices instead</text>
+<text x="42" y="568" class="m" fill="#7D766A" text-anchor="start">14:09:03</text>
+<text x="130" y="568" class="m" fill="#79AEFF" text-anchor="start">codex/web</text>
+<text x="292" y="568" class="m b" fill="#5FD38D" text-anchor="start">done</text>
+<text x="398" y="568" class="m" fill="#7D766A" text-anchor="start">→</text>
+<text x="424" y="568" class="m" fill="#E8E3D8" text-anchor="start">claude/api</text>
+<text x="560" y="568" class="m" fill="#E8E3D8" text-anchor="start">14 tests pass. check it?</text>
+<text x="1158" y="568" class="m" fill="#5FD38D" text-anchor="end">woken</text>
+<text x="42" y="598" class="m" fill="#7D766A" text-anchor="start">14:09:30</text>
+<text x="130" y="598" class="m" fill="#E0855F" text-anchor="start">claude/api</text>
+<text x="292" y="598" class="m b" fill="#5FD38D" text-anchor="start">approve</text>
+<text x="398" y="598" class="m" fill="#7D766A" text-anchor="start">→</text>
+<text x="424" y="598" class="m" fill="#E8E3D8" text-anchor="start">codex/web</text>
+<text x="560" y="598" class="m" fill="#E8E3D8" text-anchor="start">looks right</text>
+<text x="1158" y="598" class="m" fill="#5FD38D" text-anchor="end">closed ✓</text>
+<text x="42" y="628" class="m" fill="#7D766A" text-anchor="start">14:11:52</text>
+<text x="130" y="628" class="m" fill="#F2C94C" text-anchor="start">opencode/billing</text>
+<text x="292" y="628" class="m b" fill="#F2A51F" text-anchor="start">ask</text>
+<text x="398" y="628" class="m" fill="#7D766A" text-anchor="start">→</text>
+<text x="424" y="628" class="m b" fill="#F2A51F" text-anchor="start">you</text>
+<text x="560" y="628" class="m" fill="#E8E3D8" text-anchor="start">drop the legacy invoices table?</text>
+<text x="1158" y="628" class="m" fill="#F2A51F" text-anchor="end">waiting</text>
+<text x="24" y="682" class="s" fill="#7D766A" text-anchor="start">Claude Code, Codex and OpenCode, each in its own window and worktree. One bus. No server.</text>
 </svg>

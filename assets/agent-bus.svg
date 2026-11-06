@@ -1,125 +1,110 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 400" role="img" aria-label="A yellow school bus labeled AGENT BUS with robot agents in the windows, a PM robot driving, a roof sign reading @here to @repo, and a handoff packet flying out behind.">
-  <title>agent-bus — a school bus full of coding agents</title>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 640" role="img" aria-label="Three agent windows working together. Claude Code hands the client work to Codex. Codex claims the file, does the work, and sends it back for Claude to check. OpenCode stays out of the claimed file and, reaching a step that drops a table, asks you instead of guessing. One decision waits for you; the agents handled the rest.">
+  <title>agent-bus: your agents hand off work, check each other, and ask you only when it is your call</title>
+  <style>
+    .h { font: 600 30px -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; fill: #f0f3f8; }
+    .sub { font: 400 16px -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; fill: #8b95a7; }
+    .wt { font: 600 13px -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; fill: #c9d1dd; }
+    .m { font: 400 13.5px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fill: #c9d1dd; white-space: pre; }
+    .dim { fill: #6b7588; }
+    .ok { fill: #4ade80; }
+    .cl { fill: #e8875f; }
+    .cx { fill: #7cb0ff; }
+    .oc { fill: #f5c451; }
+    .you { fill: #c4a7ff; }
+    .chip { font: 600 12.5px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .foot { font: 400 13.5px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fill: #6b7588; }
+  </style>
+  <defs>
+    <pattern id="grid" width="24" height="24" patternUnits="userSpaceOnUse">
+      <path d="M24 0H0V24" fill="none" stroke="#151b26" stroke-width="1"/>
+    </pattern>
+    <marker id="aO" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#e8875f"/></marker>
+    <marker id="aG" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#4ade80"/></marker>
+    <marker id="aP" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#c4a7ff"/></marker>
+  </defs>
 
-  <!-- ground shadow -->
-  <ellipse cx="440" cy="374" rx="340" ry="14" fill="#888888" opacity="0.22"/>
+  <rect width="1200" height="640" rx="20" fill="#0b0f17"/>
+  <rect width="1200" height="640" rx="20" fill="url(#grid)"/>
 
-  <!-- exhaust puffs -->
-  <circle cx="46" cy="326" r="10" fill="#9aa0a6" opacity="0.5"/>
-  <circle cx="26" cy="318" r="7" fill="#9aa0a6" opacity="0.35"/>
-  <circle cx="12" cy="310" r="5" fill="#9aa0a6" opacity="0.25"/>
+  <text x="48" y="64" class="h">Your agents work together. You make the calls.</text>
+  <text x="48" y="94" class="sub">Claude Code, Codex and OpenCode in separate windows and worktrees, handing work along one bus.</text>
 
-  <!-- handoff packet flying out the back -->
-  <g>
-    <line x1="-6" y1="176" x2="8" y2="176" stroke="#9aa0a6" stroke-width="3" stroke-linecap="round" opacity="0.6"/>
-    <line x1="-2" y1="190" x2="10" y2="190" stroke="#9aa0a6" stroke-width="3" stroke-linecap="round" opacity="0.4"/>
-    <rect x="18" y="164" width="38" height="28" rx="4" fill="#ffffff" stroke="#262a31" stroke-width="2.5"/>
-    <path d="M18 168 L37 184 L56 168" fill="none" stroke="#262a31" stroke-width="2.5" stroke-linejoin="round"/>
+  <!-- Window 1: Claude Code -->
+  <g transform="translate(48 124)">
+    <rect width="352" height="320" rx="10" fill="#111723" stroke="#252e3e"/>
+    <path d="M0 10a10 10 0 0 1 10-10h332a10 10 0 0 1 10 10v22H0z" fill="#171e2c"/>
+    <circle cx="18" cy="16" r="4.5" fill="#e8875f"/>
+    <text x="32" y="21" class="wt">Claude Code · checkout-api</text>
+    <text x="16" y="64" class="m"><tspan class="cl">›</tspan> hand the client work to Codex</text>
+    <text x="16" y="86" class="m dim">  delivery: codex/web — woken</text>
+    <text x="16" y="130" class="m"><tspan class="ok">◈</tspan> codex/web: done. Client wired,</text>
+    <text x="16" y="152" class="m">  14 tests pass. Check it?</text>
+    <text x="16" y="196" class="m"><tspan class="cl">›</tspan> looks right, approve it</text>
+    <text x="16" y="218" class="m ok">  ✓ accepted · item closed</text>
+    <text x="16" y="296" class="m dim">  nothing else waits on you</text>
   </g>
 
-  <!-- roof route sign -->
-  <rect x="560" y="64" width="220" height="40" rx="8" fill="#1c1f26" stroke="#5a6470" stroke-width="2.5"/>
-  <text x="670" y="91" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="19" font-weight="700" fill="#ffb01f">@here &#8594; @repo</text>
-
-  <!-- roof marker lights -->
-  <rect x="116" y="98" width="26" height="12" rx="6" fill="#ffb01f" stroke="#262a31" stroke-width="2.5"/>
-  <rect x="446" y="98" width="26" height="12" rx="6" fill="#ffb01f" stroke="#262a31" stroke-width="2.5"/>
-
-  <!-- bus body -->
-  <rect x="80" y="108" width="710" height="200" rx="22" fill="#ffc42e" stroke="#262a31" stroke-width="4"/>
-
-  <!-- bumpers -->
-  <rect x="62" y="280" width="24" height="26" rx="6" fill="#3c434d" stroke="#262a31" stroke-width="2.5"/>
-  <rect x="784" y="280" width="24" height="26" rx="6" fill="#3c434d" stroke="#262a31" stroke-width="2.5"/>
-
-  <!-- passenger windows -->
-  <rect x="104" y="138" width="96" height="74" rx="10" fill="#bee3f8" stroke="#262a31" stroke-width="3"/>
-  <rect x="222" y="138" width="96" height="74" rx="10" fill="#bee3f8" stroke="#262a31" stroke-width="3"/>
-  <rect x="340" y="138" width="96" height="74" rx="10" fill="#bee3f8" stroke="#262a31" stroke-width="3"/>
-  <rect x="458" y="138" width="96" height="74" rx="10" fill="#bee3f8" stroke="#262a31" stroke-width="3"/>
-  <!-- driver window + windshield -->
-  <rect x="576" y="138" width="96" height="74" rx="10" fill="#bee3f8" stroke="#262a31" stroke-width="3"/>
-  <rect x="694" y="128" width="66" height="92" rx="10" fill="#bee3f8" stroke="#262a31" stroke-width="3"/>
-
-  <!-- robot passengers (generic bots, harness-hinted colors) -->
-  <!-- coral bot -->
-  <g>
-    <line x1="152" y1="162" x2="152" y2="150" stroke="#262a31" stroke-width="3"/>
-    <circle cx="152" cy="147" r="5" fill="#e07a5f" stroke="#262a31" stroke-width="2.5"/>
-    <rect x="126" y="162" width="52" height="50" rx="10" fill="#e07a5f" stroke="#262a31" stroke-width="3"/>
-    <circle cx="141" cy="184" r="7" fill="#ffffff"/><circle cx="141" cy="184" r="3" fill="#1c1f26"/>
-    <circle cx="163" cy="184" r="7" fill="#ffffff"/><circle cx="163" cy="184" r="3" fill="#1c1f26"/>
-    <rect x="145" y="198" width="14" height="4" rx="2" fill="#1c1f26" opacity="0.75"/>
-  </g>
-  <!-- teal bot -->
-  <g>
-    <line x1="270" y1="162" x2="270" y2="150" stroke="#262a31" stroke-width="3"/>
-    <circle cx="270" cy="147" r="5" fill="#17a385" stroke="#262a31" stroke-width="2.5"/>
-    <rect x="244" y="162" width="52" height="50" rx="10" fill="#17a385" stroke="#262a31" stroke-width="3"/>
-    <circle cx="259" cy="184" r="7" fill="#ffffff"/><circle cx="259" cy="184" r="3" fill="#1c1f26"/>
-    <circle cx="281" cy="184" r="7" fill="#ffffff"/><circle cx="281" cy="184" r="3" fill="#1c1f26"/>
-    <rect x="263" y="198" width="14" height="4" rx="2" fill="#1c1f26" opacity="0.75"/>
-  </g>
-  <!-- charcoal bot -->
-  <g>
-    <line x1="388" y1="162" x2="388" y2="150" stroke="#262a31" stroke-width="3"/>
-    <circle cx="388" cy="147" r="5" fill="#2d333b" stroke="#262a31" stroke-width="2.5"/>
-    <rect x="362" y="162" width="52" height="50" rx="10" fill="#2d333b" stroke="#262a31" stroke-width="3"/>
-    <circle cx="377" cy="184" r="7" fill="#ffffff"/><circle cx="377" cy="184" r="3" fill="#1c1f26"/>
-    <circle cx="399" cy="184" r="7" fill="#ffffff"/><circle cx="399" cy="184" r="3" fill="#1c1f26"/>
-    <rect x="381" y="198" width="14" height="4" rx="2" fill="#ffffff" opacity="0.75"/>
-  </g>
-  <!-- terminal-green bot -->
-  <g>
-    <line x1="506" y1="162" x2="506" y2="150" stroke="#262a31" stroke-width="3"/>
-    <circle cx="506" cy="147" r="5" fill="#3fb950" stroke="#262a31" stroke-width="2.5"/>
-    <rect x="480" y="162" width="52" height="50" rx="10" fill="#3fb950" stroke="#262a31" stroke-width="3"/>
-    <circle cx="495" cy="184" r="7" fill="#ffffff"/><circle cx="495" cy="184" r="3" fill="#1c1f26"/>
-    <circle cx="517" cy="184" r="7" fill="#ffffff"/><circle cx="517" cy="184" r="3" fill="#1c1f26"/>
-    <rect x="499" y="198" width="14" height="4" rx="2" fill="#1c1f26" opacity="0.75"/>
-  </g>
-  <!-- PM driver -->
-  <g>
-    <rect x="598" y="166" width="52" height="46" rx="10" fill="#8b949e" stroke="#262a31" stroke-width="3"/>
-    <path d="M598 170 a26 18 0 0 1 52 0 v4 h-52 z" fill="#1c1f26"/>
-    <rect x="644" y="168" width="16" height="6" rx="3" fill="#1c1f26"/>
-    <text x="624" y="179" text-anchor="middle" font-family="ui-sans-serif, -apple-system, 'Segoe UI', sans-serif" font-size="13" font-weight="800" fill="#ffffff">PM</text>
-    <circle cx="613" cy="192" r="6" fill="#ffffff"/><circle cx="613" cy="192" r="3" fill="#1c1f26"/>
-    <circle cx="635" cy="192" r="6" fill="#ffffff"/><circle cx="635" cy="192" r="3" fill="#1c1f26"/>
-    <rect x="617" y="202" width="14" height="4" rx="2" fill="#1c1f26" opacity="0.75"/>
+  <!-- Window 2: Codex -->
+  <g transform="translate(424 124)">
+    <rect width="352" height="320" rx="10" fill="#111723" stroke="#252e3e"/>
+    <path d="M0 10a10 10 0 0 1 10-10h332a10 10 0 0 1 10 10v22H0z" fill="#171e2c"/>
+    <circle cx="18" cy="16" r="4.5" fill="#7cb0ff"/>
+    <text x="32" y="21" class="wt">Codex · checkout-web</text>
+    <text x="16" y="64" class="m"><tspan class="cl">◈</tspan> handoff from claude/api</text>
+    <text x="16" y="86" class="m">  wire the client to /checkout</text>
+    <text x="16" y="130" class="m"><tspan class="cx">●</tspan> claimed src/client.ts</text>
+    <text x="16" y="152" class="m"><tspan class="cx">●</tspan> editing src/client.ts</text>
+    <text x="16" y="174" class="m"><tspan class="cx">●</tspan> 14 tests passed</text>
+    <text x="16" y="218" class="m"><tspan class="cx">›</tspan> agent-bus reply &lt;id&gt; -m "done"</text>
+    <text x="16" y="240" class="m ok">  → back to claude/api to check</text>
   </g>
 
-  <!-- lettering -->
-  <text x="330" y="248" text-anchor="middle" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Arial, sans-serif" font-size="31" font-weight="900" letter-spacing="8" fill="#1c1f26">AGENT BUS</text>
-
-  <!-- stop arm -->
-  <g>
-    <polygon points="705,226 719,226 729,236 729,250 719,260 705,260 695,250 695,236" fill="#d93025" stroke="#262a31" stroke-width="2.5"/>
-    <text x="712" y="248" text-anchor="middle" font-family="ui-sans-serif, -apple-system, 'Segoe UI', sans-serif" font-size="11" font-weight="800" fill="#ffffff">STOP</text>
+  <!-- Window 3: OpenCode -->
+  <g transform="translate(800 124)">
+    <rect width="352" height="320" rx="10" fill="#111723" stroke="#252e3e"/>
+    <path d="M0 10a10 10 0 0 1 10-10h332a10 10 0 0 1 10 10v22H0z" fill="#171e2c"/>
+    <circle cx="18" cy="16" r="4.5" fill="#f5c451"/>
+    <text x="32" y="21" class="wt">OpenCode · billing</text>
+    <text x="16" y="64" class="m"><tspan class="oc">●</tspan> invoices: move to the v2 schema</text>
+    <text x="16" y="108" class="m"><tspan class="cx">◈</tspan> src/client.ts is claimed by</text>
+    <text x="16" y="130" class="m">  codex/web. Leaving it alone.</text>
+    <text x="16" y="174" class="m"><tspan class="oc">●</tspan> next step drops a table.</text>
+    <text x="16" y="196" class="m">  That's your call, not mine.</text>
+    <text x="16" y="240" class="m"><tspan class="oc">›</tspan> agent-bus ask --to @lead</text>
+    <text x="16" y="262" class="m you">  waiting for you…</text>
   </g>
 
-  <!-- rub rails -->
-  <rect x="80" y="258" width="710" height="10" rx="5" fill="#262a31" opacity="0.9"/>
-  <rect x="80" y="276" width="710" height="6" rx="3" fill="#262a31" opacity="0.9"/>
-
-  <!-- rear plate -->
-  <rect x="94" y="286" width="62" height="20" rx="4" fill="#ffffff" stroke="#262a31" stroke-width="2"/>
-  <text x="125" y="301" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="700" fill="#1c1f26">BASH+JQ</text>
-
-  <!-- headlight -->
-  <circle cx="774" cy="250" r="9" fill="#ffe8a3" stroke="#262a31" stroke-width="2.5"/>
-
-  <!-- wheels -->
-  <g>
-    <circle cx="208" cy="308" r="50" fill="#1c1f26" stroke="#5a6470" stroke-width="3"/>
-    <circle cx="208" cy="308" r="42" fill="#262a31" stroke="#000000" stroke-width="2"/>
-    <circle cx="208" cy="308" r="17" fill="#8b949e" stroke="#000000" stroke-width="2"/>
-    <circle cx="208" cy="308" r="5" fill="#1c1f26"/>
+  <!-- The bus -->
+  <line x1="48" y1="508" x2="1152" y2="508" stroke="#2a3446" stroke-width="2"/>
+  <g stroke="#2a3446" stroke-width="2">
+    <line x1="224" y1="444" x2="224" y2="508"/>
+    <line x1="600" y1="444" x2="600" y2="508"/>
+    <line x1="976" y1="444" x2="976" y2="508"/>
   </g>
-  <g>
-    <circle cx="648" cy="308" r="50" fill="#1c1f26" stroke="#5a6470" stroke-width="3"/>
-    <circle cx="648" cy="308" r="42" fill="#262a31" stroke="#000000" stroke-width="2"/>
-    <circle cx="648" cy="308" r="17" fill="#8b949e" stroke="#000000" stroke-width="2"/>
-    <circle cx="648" cy="308" r="5" fill="#1c1f26"/>
+  <g fill="#0b0f17" stroke-width="2">
+    <circle cx="224" cy="508" r="6" stroke="#e8875f"/>
+    <circle cx="600" cy="508" r="6" stroke="#7cb0ff"/>
+    <circle cx="976" cy="508" r="6" stroke="#f5c451"/>
   </g>
+
+  <!-- handoff: Claude → Codex -->
+  <path d="M244 484H580" stroke="#e8875f" stroke-width="2" fill="none" marker-end="url(#aO)"/>
+  <rect x="337" y="471" width="150" height="26" rx="13" fill="#2a1a12" stroke="#e8875f"/>
+  <text x="412" y="488.5" text-anchor="middle" class="chip cl">handoff</text>
+  <!-- back to check: Codex → Claude -->
+  <path d="M580 532H244" stroke="#4ade80" stroke-width="2" fill="none" marker-end="url(#aG)"/>
+  <rect x="317" y="519" width="190" height="26" rx="13" fill="#0f2418" stroke="#4ade80"/>
+  <text x="412" y="536.5" text-anchor="middle" class="chip ok">done · check it</text>
+  <!-- claim: Codex ↔ OpenCode -->
+  <path d="M620 484H956" stroke="#7cb0ff" stroke-width="2" stroke-dasharray="5 5" fill="none"/>
+  <rect x="693" y="471" width="190" height="26" rx="13" fill="#111f36" stroke="#7cb0ff"/>
+  <text x="788" y="488.5" text-anchor="middle" class="chip cx">claim src/client.ts</text>
+
+  <!-- question: OpenCode → you -->
+  <path d="M976 514V566" stroke="#c4a7ff" stroke-width="2" fill="none" marker-end="url(#aP)"/>
+  <rect x="742" y="572" width="410" height="40" rx="20" fill="#1d1533" stroke="#c4a7ff"/>
+  <text x="764" y="597" class="chip you">YOU</text>
+  <text x="802" y="597" class="m">1 decision: drop the legacy table?</text>
+
+  <text x="48" y="597" class="foot">no server · one script + jq · an append-only log in ~/.agents/bus/</text>
 </svg>

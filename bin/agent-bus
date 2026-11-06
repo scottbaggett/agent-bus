@@ -1602,11 +1602,12 @@ PEERS_FILE="$BUS/state/peers"
 peer_list() { [ -f "$PEERS_FILE" ] && sed '/^#/d;/^$/d' "$PEERS_FILE"; return 0; }
 peer_cursor() { printf '%s/state/peer.%s.%s' "$BUS" "$1" "$2"; }
 # Run agent-bus on a peer. Non-interactive SSH may not load the PATH that
-# Homebrew sets up, and the login shell may be fish, so pass PATH through env.
+# the installer or Homebrew sets up, and the login shell may be fish, so pass
+# PATH through env ($HOME expands on the far side).
 peer_ssh() { # host args...
   local host="$1"; shift
   ssh -o BatchMode=yes -o ConnectTimeout="${AGENT_BUS_PEER_TIMEOUT:-3}" "$host" \
-    env PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin agent-bus "$@"
+    env "PATH=\$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" agent-bus "$@"
 }
 LEDGER_DIRTY=0
 

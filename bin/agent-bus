@@ -1608,7 +1608,7 @@ peer_ssh() { # host args...
   local host="$1"; shift
   local err=/dev/null; [ -n "${AGENT_BUS_PEER_DEBUG:-}" ] && err=/dev/stderr
   ssh -o BatchMode=yes -o ConnectTimeout="${AGENT_BUS_PEER_TIMEOUT:-3}" "$host" 2>"$err" \
-    env "PATH=\$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" agent-bus "$@"
+    env "PATH=\$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" agent-bus "$@"
 }
 LEDGER_DIRTY=0
 
@@ -1652,7 +1652,7 @@ peer_ingest() { # from-host
 }
 # A seat this machine has never seen, while peers are linked, is taken to be on a peer.
 seat_on_peer() { [ -n "$(peer_list)" ] && [ ! -f "$BUS/seats/$(printf '%s' "$1" | tr / _).json" ]; }
-peer_self() { scutil --get LocalHostName 2>/dev/null || hostname -s; }
+peer_self() { /usr/sbin/scutil --get LocalHostName 2>/dev/null || hostname -s; }
 
 peer_push() { # host
   local host="$1" since now

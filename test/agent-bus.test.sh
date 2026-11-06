@@ -1014,5 +1014,36 @@ assert_lacks "no color codes outside a terminal" $'\033' "$av1"
 assert_eq "an avatar is four lines of art" "4" "$("$BIN" snapshot | jq '[.seats[] | .avatar.rows | length] | first')"
 assert_has "snapshot carries the tool's color" "#" "$("$BIN" snapshot | jq -r '.seats[0].avatar.color')"
 
+
+# --- peers: linking two Macs over SSH (no network here: serve is driven directly) ---
+PA=$(mktemp -d); PB=$(mktemp -d); mkdir -p "$PA/home" "$PB/home"
+pa() { HOME="$PA/home" AGENT_BUS_HOME="$PA/bus" AGENT_BUS_SESSION=pa AGENT_BUS_TOOL=shell "$BIN" "$@"; }
+pb() { HOME="$PB/home" AGENT_BUS_HOME="$PB/bus" AGENT_BUS_SESSION=pb AGENT_BUS_TOOL=${PBT:-shell} "$BIN" "$@"; }
+serve_b() { SSH_ORIGINAL_COMMAND="$1" pb peer serve; }
+out=$(pa peer accept bmac.local ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl)
+assert_has "accept sends its own key back" "key: ssh-ed25519 " "$out"
+ak=$(cat "$PA/home/.ssh/authorized_keys")
+assert_has "a peer's key is locked to agent-bus sync" 'peer serve",restrict ssh-ed25519' "$ak"
+pa peer accept bmac.local ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl >/dev/null
+assert_eq "pairing again replaces the line" "1" "$(grep -c 'agent-bus-peer:bmac.local' "$PA/home/.ssh/authorized_keys")"
+assert_has "a peer's key may ask the version" "agent-bus" "$(serve_b version)"
+for c in 'sh' 'rm -rf /' 'version; sh' 'export abc' 'ingest' 'check nobody.local'; do
+  if serve_b "$c" >/dev/null 2>&1; then bad "serve refuses: $c" "it ran"; else ok "serve refuses: $c"; fi
+done
+PBT=opencode pb who >/dev/null; oc=$(jq -r .addr "$PB/bus"/seats/*.json)
+pa peer accept bmac.local ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl >/dev/null
+AGENT_BUS_NO_PEERS=1 pa post --to "$oc" --state handoff -m "# across the network" >/dev/null
+out=$(SSH_ORIGINAL_COMMAND="export 0" pa peer serve | serve_b "ingest amac.local")
+assert_has "rows from a peer are taken in" "took" "$out"
+assert_has "and the owner there is told" "delivery (" "$out"
+assert_has "the agent there sees the handoff" "across the network" "$(PBT=opencode pb read --peek)"
+out=$(SSH_ORIGINAL_COMMAND="export 0" pa peer serve | serve_b "ingest amac.local")
+assert_has "syncing twice adds nothing" "up to date" "$out"
+out=$(pa peer remove bmac.local)
+assert_lacks "remove takes the key out" "agent-bus-peer:bmac.local" "$(cat "$PA/home/.ssh/authorized_keys")"
+out=$(pa peer add localhost 2>&1 || true)
+assert_has "a Mac can't link to itself" "is this machine" "$out"
+rm -rf "$PA" "$PB"
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 ((fail == 0))

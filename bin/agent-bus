@@ -1601,15 +1601,66 @@ check_closable() {
 PEERS_FILE="$BUS/state/peers"
 peer_list() { [ -f "$PEERS_FILE" ] && sed '/^#/d;/^$/d' "$PEERS_FILE"; return 0; }
 peer_cursor() { printf '%s/state/peer.%s.%s' "$BUS" "$1" "$2"; }
-# Run agent-bus on a peer. Non-interactive SSH may not load the PATH that
-# the installer or Homebrew sets up, and the login shell may be fish, so pass
-# PATH through env ($HOME expands on the far side).
-peer_ssh() { # host args...
+# Peers talk over SSH with agent-bus's own key, never your personal ones: hooks
+# run without your ssh-agent, and which key ssh-copy-id picks is a guess. On
+# the far side that key is locked to `agent-bus peer serve`, so it can sync and
+# nothing else: no shell, no forwarding.
+PEER_KEY="$BUS/peer_key"
+PEER_PATH='$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'
+peer_key_ensure() {
+  [ -f "$PEER_KEY" ] && return 0
+  ssh-keygen -q -t ed25519 -N '' -C "agent-bus@$(peer_self)" -f "$PEER_KEY" </dev/null >/dev/null \
+    || die "peer: could not make an SSH key at $PEER_KEY"
+}
+peer_pub() { cut -d' ' -f1,2 "$PEER_KEY.pub"; }
+peer_ssh() { # host args...   (args reach `peer serve` as SSH_ORIGINAL_COMMAND)
   local host="$1"; shift
   local err=/dev/null; [ -n "${AGENT_BUS_PEER_DEBUG:-}" ] && err=/dev/stderr
-  ssh -o BatchMode=yes -o ConnectTimeout="${AGENT_BUS_PEER_TIMEOUT:-3}" "$host" 2>"$err" \
-    env "PATH=\$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" agent-bus "$@"
+  ssh -i "$PEER_KEY" -o IdentitiesOnly=yes -o BatchMode=yes \
+    -o ConnectTimeout="${AGENT_BUS_PEER_TIMEOUT:-3}" "$host" "$@" 2>"$err"
 }
+valid_host() { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$ ]]; }
+
+# Let a peer's key in, for agent-bus sync only. One line per peer, replaced on
+# re-pairing.
+peer_authorize() { # name pubkey
+  local name="$1" pub="$2" ak="$HOME/.ssh/authorized_keys" self
+  [[ "$pub" =~ ^ssh-ed25519\ [A-Za-z0-9+/]+=*$ ]] || die "peer: not an ed25519 public key"
+  valid_host "$name" || die "peer: bad host name: $name"
+  self=$(command -v agent-bus 2>/dev/null || printf '%s' "$0")
+  mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
+  touch "$ak" && chmod 600 "$ak"
+  { grep -vF " agent-bus-peer:$name" "$ak" || :; } >"$ak.agent-bus.tmp"
+  printf 'command="env PATH=%s %s peer serve",restrict %s agent-bus-peer:%s\n' "$PEER_PATH" "$self" "$pub" "$name" >>"$ak.agent-bus.tmp"
+  mv "$ak.agent-bus.tmp" "$ak"
+}
+peer_unauthorize() { # name
+  local ak="$HOME/.ssh/authorized_keys"
+  [ -f "$ak" ] || return 0
+  { grep -vF " agent-bus-peer:$1" "$ak" || :; } >"$ak.agent-bus.tmp" && mv "$ak.agent-bus.tmp" "$ak"
+}
+peer_record() { # host: add to peers; history stays where it was made
+  peer_list | grep -qxF "$1" || printf '%s\n' "$1" >>"$PEERS_FILE"
+  now_epoch >"$(peer_cursor "$1" pushed)"; now_epoch >"$(peer_cursor "$1" pulled)"
+}
+
+# What a peer's key may run here. Anything else is refused.
+peer_serve() {
+  local -a a=(); read -r -a a <<<"${SSH_ORIGINAL_COMMAND:-}"
+  local w; for w in "${a[@]+"${a[@]}"}"; do valid_host "$w" || die "peer serve: refused"; done
+  local n=${#a[@]}
+  case "${a[0]:-}" in
+    version) cmd_version ;;
+    who) cmd_who ;;
+    ingest) [ "$n" -eq 2 ] || die "peer serve: refused"; peer_ingest "${a[1]}" ;;
+    export) [ "$n" -eq 2 ] && [[ "${a[1]}" =~ ^[0-9]+$ ]] || die "peer serve: refused"; peer_export "${a[1]}" ;;
+    # Prove the way back works: this machine reaches the asker with its own key.
+    check) [ "$n" -eq 2 ] && peer_list | grep -qxF "${a[1]}" || die "peer serve: refused"
+           peer_ssh "${a[1]}" version >/dev/null && echo "back: ok" ;;
+    *) die "peer serve: refused" ;;
+  esac
+}
+
 LEDGER_DIRTY=0
 
 # Rows from the live ledger since an epoch, and the bodies of their messages,
@@ -1659,7 +1710,7 @@ peer_push() { # host
   since=$(cat "$(peer_cursor "$host" pushed)" 2>/dev/null || echo 0)
   now=$(now_epoch)
   # Overlap by five minutes: clocks differ, and the receiver drops duplicates.
-  if peer_export $((since > 300 ? since - 300 : 0)) | peer_ssh "$host" peer ingest "$(peer_self)"; then
+  if peer_export $((since > 300 ? since - 300 : 0)) | peer_ssh "$host" ingest "$(peer_self).local"; then
     printf '%s\n' "$now" >"$(peer_cursor "$host" pushed)"
   else
     printf 'peer: could not reach %s (asleep, off the network, or Remote Login is off); it catches up at the next sync\n' "$host" >&2
@@ -1670,7 +1721,7 @@ peer_pull() { # host
   local host="$1" since now
   since=$(cat "$(peer_cursor "$host" pulled)" 2>/dev/null || echo 0)
   now=$(now_epoch)
-  if peer_ssh "$host" peer export $((since > 300 ? since - 300 : 0)) | peer_ingest "$host"; then
+  if peer_ssh "$host" export $((since > 300 ? since - 300 : 0)) | peer_ingest "$host"; then
     printf '%s\n' "$now" >"$(peer_cursor "$host" pulled)"
   else return 1; fi
 }
@@ -1688,26 +1739,51 @@ cmd_peer() {
   local sub="${1:-list}"; shift || :
   case "$sub" in
     add)
-      [ -n "${1:-}" ] || die "peer add <host>   (e.g. m1max.local)"
-      case "$1" in "$(peer_self)"|"$(peer_self).local"|localhost|127.*|::1)
-        die "peer add: $1 is this machine. Run peer add on the other machine, naming this one ($(peer_self).local)" ;; esac
-      peer_ssh "$1" version >/dev/null 2>&1 \
-        || die "peer add: cannot run agent-bus on $1 over SSH. Turn on Remote Login there, run ssh-copy-id $1, and install agent-bus on it."
-      peer_list | grep -qxF "$1" || printf '%s\n' "$1" >>"$PEERS_FILE"
-      printf 'peer %s added. Posts here now reach agents there. Run agent-bus peer add %s on %s too.\n' "$1" "$(peer_self).local" "$1"
-      # History stays where it was made: only what happens from now on travels.
-      now_epoch >"$(peer_cursor "$1" pushed)"; now_epoch >"$(peer_cursor "$1" pulled)"
-      echo "from now on, new posts and closes travel both ways" ;;
+      local host="${1:-}" out code theirs name
+      [ -n "$host" ] || die "peer add <host>   (the other Mac, e.g. m1max.local)"
+      valid_host "$host" || die "peer add: bad host name: $host"
+      case "$host" in "$(peer_self)"|"$(peer_self).local"|localhost|127.*|::1)
+        die "peer add: $host is this machine. Name the other Mac (this one is $(peer_self).local)" ;; esac
+      if command -v nc >/dev/null && ! nc -z -G 2 localhost 22 2>/dev/null; then
+        die "peer add: Remote Login is off on this Mac, so $host can't reach back. Turn it on: System Settings > General > Sharing > Remote Login"
+      fi
+      peer_key_ensure
+      printf 'linking with %s. ssh may ask for your password on %s, once.\n' "$host" "$host"
+      # Your own ssh login (password or key), once: install our key there, get theirs.
+      out=$(ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 "$host" \
+              env "PATH=$PEER_PATH" agent-bus peer accept "$(peer_self).local" $(peer_pub) 2>/dev/null); code=$?
+      case "$code" in
+        0) ;;
+        127) die "peer add: agent-bus isn't installed on $host. Install it there: brew install scottbaggett/tap/agent-bus" ;;
+        255) die "peer add: can't log in to $host. Is Remote Login on there (System Settings > General > Sharing)?" ;;
+        *) die "peer add: $host refused to pair (exit $code). It may run an older agent-bus: agent-bus update there" ;;
+      esac
+      theirs=$(sed -n 's/^key: //p' <<<"$out"); name=$(sed -n 's/^name: //p' <<<"$out")
+      [ -n "$theirs" ] || die "peer add: $host sent no key back. Update agent-bus there."
+      peer_authorize "$host" "$theirs"
+      peer_record "$host"
+      peer_ssh "$host" version >/dev/null || die "peer add: paired, but $host won't take agent-bus's key. Run: AGENT_BUS_PEER_DEBUG=1 agent-bus peer sync"
+      if peer_ssh "$host" check "$(peer_self).local" | grep -q 'back: ok'; then
+        printf 'linked: %s <-> %s. Posts on either reach agents on both.\n' "$(peer_self)" "${name:-$host}"
+      else
+        printf 'linked %s -> %s, but %s cannot reach this Mac yet. Is Remote Login on here?\n' "$(peer_self)" "${name:-$host}" "$host"
+      fi ;;
+    accept) # the far half of add: <name> <keytype> <key>
+      [ $# -eq 3 ] || die "peer accept: run by peer add on the other Mac"
+      peer_key_ensure
+      peer_authorize "$1" "$2 $3"
+      peer_record "$1"
+      printf 'key: %s\nname: %s\n' "$(peer_pub)" "$(peer_self)" ;;
+    serve) peer_serve ;;
     remove)
       [ -n "${1:-}" ] || die "peer remove <host>"
       [ -f "$PEERS_FILE" ] && { grep -vxF "$1" "$PEERS_FILE" >"$PEERS_FILE.tmp" || :; mv "$PEERS_FILE.tmp" "$PEERS_FILE"; }
       rm -f "$(peer_cursor "$1" pushed)" "$(peer_cursor "$1" pulled)"
-      printf 'peer %s removed\n' "$1" ;;
+      peer_unauthorize "$1"
+      printf 'peer %s removed, and its key no longer gets in here. Run peer remove %s.local on %s too.\n' "$1" "$(peer_self)" "$1" ;;
     list) [ -n "$(peer_list)" ] && peer_list || echo "no peers (agent-bus peer add <host>)" ;;
     sync) local h; for h in ${1:-$(peer_list)}; do peer_push "$h"; peer_pull "$h"; done ;;
     who)  local h; for h in ${1:-$(peer_list)}; do printf '== %s\n' "$h"; peer_ssh "$h" who || echo "(unreachable)"; done ;;
-    ingest) peer_ingest "${1:-}" ;;
-    export) peer_export "${1:-0}" ;;
     *) die "peer add|remove|list|sync|who" ;;
   esac
 }
@@ -3030,8 +3106,9 @@ agent-bus — handoff bus for coding agents sharing repos and worktrees.
   grok shell-init --name <n>  print export lines for running as a Grok seat
   whoami                      this seat's identity
   avatar [seat]               a seat's bot (yours by default)
-  peer add|remove|list|sync|who [host]
-                              (prototype) link another machine's bus over SSH
+  peer add <host>             link another Mac on your network, both ways
+                              (asks for its password once; needs Remote Login)
+  peer remove|list|sync|who [host]   manage linked Macs (prototype)
   who                         live seats, the PM, open-work count, claims
   post [flags]                send a packet
       --to <seat|scope|@role|@lane|@pm|@lead|@here|@repo|@all>     required

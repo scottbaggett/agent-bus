@@ -118,6 +118,15 @@ func (m model) tiles() ([]tile, []laneGroup) {
 		}
 		all = append(all, tile{seat: Seat{Addr: addr, Tool: strings.SplitN(addr, "/", 2)[0], Epoch: ep}, gone: true})
 	}
+	if q := strings.TrimSpace(m.query); q != "" {
+		var keep []tile
+		for _, t := range all {
+			if m.matches(t, q) {
+				keep = append(keep, t)
+			}
+		}
+		all = keep
+	}
 	byLane := map[string]*laneGroup{}
 	var order []string
 	for i, t := range all {

@@ -35,6 +35,7 @@ const (
 	modeHelp
 	modeChat
 	modeOpen
+	modeSearch
 )
 
 type model struct {
@@ -72,6 +73,7 @@ type model struct {
 	scanning   bool
 	openItems  []openItem
 	openSel    int
+	query      string // "/" search over the grid
 }
 
 type snapMsg struct {
@@ -382,6 +384,8 @@ func (m model) gridW() int { w, _ := m.gridSize(); return w }
 
 func (m model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch m.mode {
+	case modeSearch:
+		return m.searchKey(k)
 	case modeOpen:
 		return m.openKey(k)
 	case modeChat:
@@ -464,6 +468,13 @@ func (m model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch k.String() {
 	case "q", "ctrl+c":
 		return m, tea.Quit
+	case "/":
+		return m.startSearch()
+	case "esc":
+		if m.query != "" {
+			m.query = ""
+			m.cursor[paneAgents] = 0
+		}
 	case "?":
 		m.mode = modeHelp
 	case "left", "h":
@@ -493,6 +504,13 @@ func (m model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.openPanel() // the panel follows the selection
 	}
 	return m, nil
+}
+
+func matchCount(n int) string {
+	if n == 1 {
+		return "1 match"
+	}
+	return fmt.Sprintf("%d matches", n)
 }
 
 func plural(n int, word string) string {
@@ -711,8 +729,14 @@ func (m model) footerView() string {
 	if m.err != nil {
 		return lipgloss.NewStyle().Foreground(cBad).Render(fit(" refresh failed: "+m.err.Error(), m.w))
 	}
-	keys := []string{"arrows or click: pick an agent", "enter: details", "o: open in…", "c: chat", "?: help", "q: quit"}
+	keys := []string{"arrows or click: pick an agent", "/: search", "enter: details", "o: open in…", "c: chat", "?: help", "q: quit"}
+	if m.query != "" {
+		keys = append([]string{sAccent.Render("/" + m.query), "esc: clear"}, keys[1:]...)
+	}
 	switch m.mode {
+	case modeSearch:
+		tiles, _ := m.tiles()
+		return " " + sAccent.Render("/") + m.input.View() + sDim.Render(fmt.Sprintf("  %s · arrows move · enter opens · esc clears", matchCount(len(tiles))))
 	case modeOpen:
 		keys = []string{"↑↓ or number: pick", "enter: open", "esc: back"}
 	case modePanel:
@@ -734,6 +758,7 @@ func (m model) helpView() string {
 		"",
 		"  arrows / click   pick an agent",
 		"  enter            open what it needs from you",
+		"  /                search: name, focus, ticket, branch, port (fuzzy)",
 		"  c                chat with it",
 		"  o                open its folder in Finder, Zed, Cursor… or its ports in a browser",
 		"",

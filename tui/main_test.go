@@ -117,3 +117,33 @@ func TestNamesMatchTheCLI(t *testing.T) {
 		}
 	}
 }
+
+func TestFuzzySearch(t *testing.T) {
+	for _, c := range []struct {
+		hay, term string
+		want      bool
+	}{
+		{"bold mantis", "bm", true},
+		{"bold mantis", "mant", true},
+		{"wiring the invoices api", "inv", true},
+		{"bold mantis", "ae", false},
+		{"salt-9473", "9473", true},
+	} {
+		if got := fuzzy(c.hay, c.term); got != c.want {
+			t.Errorf("fuzzy(%q, %q) = %v", c.hay, c.term, got)
+		}
+	}
+	m := newModel()
+	m.snap = &Snapshot{Seats: []Seat{
+		{Addr: "codex/api.1", Tool: "codex", Focus: "Wiring the invoices API", Branch: "feature/salt-1234"},
+		{Addr: "claude/web.2", Tool: "claude", Focus: "Landing page copy"},
+	}}
+	m.query = "invoice 1234"
+	if tiles, _ := m.tiles(); len(tiles) != 1 || tiles[0].seat.Addr != "codex/api.1" {
+		t.Fatalf("search: %+v", tiles)
+	}
+	m.query = friendlyName("claude/web.2")
+	if tiles, _ := m.tiles(); len(tiles) != 1 || tiles[0].seat.Addr != "claude/web.2" {
+		t.Fatalf("search by name: %+v", tiles)
+	}
+}

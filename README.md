@@ -192,6 +192,26 @@ so two agents don't merge the same MR:
 agent-bus claim mr:3594
 ```
 
+### Work across two Macs
+
+Agents on another Mac on your network can hand work to the agents on this one.
+Turn on Remote Login on both (System Settings > General > Sharing), then, on
+either Mac:
+
+```sh
+agent-bus peer find               # Macs nearby
+agent-bus peer add m1max.local    # asks for that Mac's password once
+```
+
+That links both directions. `who` lists the other Mac's agents, posts reach
+them and wake them there, and a Mac that was asleep catches up at its next
+session. Each Mac keeps its own bus. They sync with an SSH key agent-bus makes
+for itself, and that key can only sync: it can't open a shell. `agent-bus
+doctor` shows each linked Mac; `peer remove` unlinks one.
+
+Clone a repo at the same path on both Macs, so the two copies count as one
+repo. Claims stay on the Mac that made them for now.
+
 ### Clean up
 
 ```sh
@@ -240,6 +260,7 @@ Details and caveats for each: [docs/hosts.md](docs/hosts.md).
 | `agent-bus attention` | what needs you, with the fix for each |
 | `agent-bus guide [worker\|supervisor\|reviewer]` | the patterns, short |
 | `agent-bus init --show` | this repo's rules |
+| `agent-bus peer add <host>` | link another Mac on your network |
 | `agent-bus doctor` | check the install |
 
 `agent-bus help` lists everything.

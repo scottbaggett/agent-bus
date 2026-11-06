@@ -343,6 +343,7 @@ ledger_append() {
   bus_lock "$LEDGER" 10
   printf '%s\n' "$1" >>"$LEDGER"
   bus_unlock "$LEDGER"
+  LEDGER_DIRTY=1
 }
 
 pm_file() { printf '%s/state/roles/%s.pm' "$BUS" "$(slugify "$REPO_ID")"; }
@@ -1193,6 +1194,12 @@ cmd_update() {
 # `agent-bus uninstall`: hooks, skills, the link and the install dir. Never the bus.
 cmd_uninstall() {
   local root; root=$(self_root)
+  # Linked Macs' keys come out with the install: nothing keeps a way in.
+  local h; for h in $(peer_list); do peer_unauthorize "$h"; done
+  if [ -f "$HOME/.ssh/authorized_keys" ] && grep -q ' agent-bus-peer:' "$HOME/.ssh/authorized_keys"; then
+    { grep -v ' agent-bus-peer:' "$HOME/.ssh/authorized_keys" || :; } >"$HOME/.ssh/authorized_keys.agent-bus.tmp" \
+      && mv "$HOME/.ssh/authorized_keys.agent-bus.tmp" "$HOME/.ssh/authorized_keys"
+  fi
   if is_brew; then
     "$root/install-hooks.sh" --uninstall --claude --opencode --codex || true
     printf 'hooks removed; finish with: brew uninstall agent-bus\n'; return 0
@@ -1301,6 +1308,7 @@ cmd_who() {
     [ -n "$a" ] || continue
     printf '  %-40s %-14s %-40s %s ago%s\n' "$a" "$r" "$b" "$(age "$e")" "$mark"
   done <<<"$rows"
+  peer_who
   if [ -n "$pm" ]; then
     printf '\nPM for %s: %s%s\n' "$REPO" "$pm" "$(seat_live "$pm" || echo '  (not live)')"
   fi
@@ -1508,6 +1516,10 @@ cmd_post() {
   fi
   [ "${USER_SENT:-0}" = 1 ] && src="from your user"
   deliver "$rec" "$src" "$resume"
+  if [ "${AGENT_BUS_NO_PEERS:-0}" != 1 ] && [ -n "$(peer_list)" ]; then
+    local h; for h in $(peer_list); do peer_push "$h" || :; done
+    LEDGER_DIRTY=0
+  fi
   return 0
 }
 
@@ -1533,7 +1545,8 @@ deliver() { # rec src resume
   if [ -z "$owners" ]; then
     case "$to" in
       @*) printf 'delivery: nobody owns this, so nobody is woken. Agents see it only if they run agent-bus read. To get it acted on, send it --to a seat (agent-bus who).\n' ;;
-      *) printf 'delivery: %s is not running; this waits until it is (or hand it to a live seat: agent-bus who)\n' "$to" ;;
+      *) if [ -n "$(peer_list)" ] && [ "${AGENT_BUS_NO_PEERS:-0}" != 1 ]; then local on_; on_=$(peer_of_seat "$to" || :); printf 'delivery: %s is %s; sending it there\n' "$to" "$(if [ -n "$on_" ]; then echo "on ${on_%.local}"; else echo "not on this Mac"; fi)"
+         else printf 'delivery: %s is not running; this waits until it is (or hand it to a live seat: agent-bus who)\n' "$to"; fi ;;
     esac
   fi
   while IFS= read -r row; do
@@ -1584,6 +1597,294 @@ check_closable() {
     *) printf 'agent-bus: %s — %s is not its sender, a recipient, the PM or the lead\n' "$1" "$ADDR" >&2 ;;
   esac
   return 1
+}
+
+# ------------------------------------------------------------------ peers
+#
+# Other Macs on your network, each with its own bus, synced
+# over SSH. The ledger is append-only, so merging is "append the lines I don't
+# have". A shared folder would not work: the ledger lock trusts PIDs, and a PID
+# from another machine always looks dead.
+PEERS_FILE="$BUS/state/peers"
+peer_list() { [ -f "$PEERS_FILE" ] && sed '/^#/d;/^$/d' "$PEERS_FILE"; return 0; }
+peer_cursor() { printf '%s/state/peer.%s.%s' "$BUS" "$1" "$2"; }
+# Peers talk over SSH with agent-bus's own key, never your personal ones: hooks
+# run without your ssh-agent, and which key ssh-copy-id picks is a guess. On
+# the far side that key is locked to `agent-bus peer serve`, so it can sync and
+# nothing else: no shell, no forwarding.
+PEER_KEY="$BUS/peer_key"
+PEER_PATH='$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'
+peer_key_ensure() {
+  [ -f "$PEER_KEY" ] && return 0
+  ssh-keygen -q -t ed25519 -N '' -C "agent-bus@$(peer_self)" -f "$PEER_KEY" </dev/null >/dev/null \
+    || die "peer: could not make an SSH key at $PEER_KEY"
+}
+peer_pub() { cut -d' ' -f1,2 "$PEER_KEY.pub"; }
+peer_ssh() { # host args...   (args reach `peer serve` as SSH_ORIGINAL_COMMAND)
+  local host="$1"; shift
+  local err=/dev/null; [ -n "${AGENT_BUS_PEER_DEBUG:-}" ] && err=/dev/stderr
+  ssh -i "$PEER_KEY" -o IdentitiesOnly=yes -o BatchMode=yes \
+    -o ConnectTimeout="${AGENT_BUS_PEER_TIMEOUT:-3}" "$host" "$@" 2>"$err"
+}
+valid_host() { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$ ]]; }
+
+# Let a peer's key in, for agent-bus sync only. One line per peer, replaced on
+# re-pairing.
+peer_authorize() { # name pubkey
+  local name="$1" pub="$2" ak="$HOME/.ssh/authorized_keys" self
+  [[ "$pub" =~ ^ssh-ed25519\ [A-Za-z0-9+/]+=*$ ]] || die "peer: not an ed25519 public key"
+  valid_host "$name" || die "peer: bad host name: $name"
+  self=$(command -v agent-bus 2>/dev/null || printf '%s' "$0")
+  mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
+  touch "$ak" && chmod 600 "$ak"
+  { grep -vF " agent-bus-peer:$name" "$ak" || :; } >"$ak.agent-bus.tmp"
+  printf 'command="env PATH=%s %s peer serve",restrict %s agent-bus-peer:%s\n' "$PEER_PATH" "$self" "$pub" "$name" >>"$ak.agent-bus.tmp"
+  mv "$ak.agent-bus.tmp" "$ak"
+}
+peer_unauthorize() { # name
+  local ak="$HOME/.ssh/authorized_keys"
+  [ -f "$ak" ] || return 0
+  { grep -vF " agent-bus-peer:$1" "$ak" || :; } >"$ak.agent-bus.tmp" && mv "$ak.agent-bus.tmp" "$ak"
+}
+peer_record() { # host: add to peers; history stays where it was made
+  peer_list | grep -qxF "$1" || printf '%s\n' "$1" >>"$PEERS_FILE"
+  now_epoch >"$(peer_cursor "$1" pushed)"; now_epoch >"$(peer_cursor "$1" pulled)"
+}
+
+# What a peer's key may run here. Anything else is refused.
+peer_serve() {
+  local -a a=(); read -r -a a <<<"${SSH_ORIGINAL_COMMAND:-}"
+  local w; for w in "${a[@]+"${a[@]}"}"; do valid_host "$w" || die "peer serve: refused"; done
+  local n=${#a[@]}
+  case "${a[0]:-}" in
+    version) cmd_version ;;
+    who) cmd_who ;;
+    seats) peer_seats_json ;;
+    ingest) [ "$n" -eq 2 ] || die "peer serve: refused"; peer_ingest "${a[1]}" ;;
+    export) [ "$n" -eq 2 ] && [[ "${a[1]}" =~ ^[0-9]+$ ]] || die "peer serve: refused"; peer_export "${a[1]}" ;;
+    # Prove the way back works: this machine reaches the asker with its own key.
+    check) [ "$n" -eq 2 ] && peer_list | grep -qxF "${a[1]}" || die "peer serve: refused"
+           peer_ssh "${a[1]}" version >/dev/null && echo "back: ok" ;;
+    *) die "peer serve: refused" ;;
+  esac
+}
+
+LEDGER_DIRTY=0
+
+# Rows from the live ledger since an epoch, and the bodies of their messages,
+# as a tar stream on stdout.
+peer_export() { # since
+  local since="${1:-0}" d; mkdir -p "$BUS/tmp"; d=$(mktemp -d "$BUS/tmp/peer.XXXXXX") || return 1
+  mkdir -p "$d/msg"
+  jq -c --argjson s "$since" 'select((.epoch // 0) >= $s)' "$LEDGER" >"$d/rows.jsonl" 2>/dev/null || :
+  jq -r 'select(.kind == "msg") | .id' "$d/rows.jsonl" | while IFS= read -r id; do
+    [ -f "$BUS/msg/$id.md" ] && cp "$BUS/msg/$id.md" "$d/msg/"
+  done
+  tar -C "$d" -cf - rows.jsonl msg
+  rm -rf "$d"
+}
+
+# Take a tar from peer_export on stdin: append the rows this bus lacks, copy
+# their bodies, then wake the agents here that own new messages.
+peer_ingest() { # from-host
+  local from="${1:-a peer}" d new row
+  mkdir -p "$BUS/tmp"; d=$(mktemp -d "$BUS/tmp/peer.XXXXXX") || return 1
+  tar -C "$d" -xf - || { rm -rf "$d"; die "peer ingest: bad payload"; }
+  [ -d "$d/msg" ] && for f in "$d"/msg/*.md; do
+    [ -f "$f" ] && [ ! -f "$BUS/msg/$(basename "$f")" ] && cp "$f" "$BUS/msg/"
+  done
+  bus_lock "$LEDGER" 10
+  local have=("$LEDGER"); [ -f "$BUS/ledger.archive.jsonl" ] && have+=("$BUS/ledger.archive.jsonl")
+  touch "$LEDGER"
+  new=$(awk 'FILENAME != ARGV[ARGC-1] { seen[$0]; next } !($0 in seen) { seen[$0]; print }' "${have[@]}" "$d/rows.jsonl")
+  [ -n "$new" ] && printf '%s\n' "$new" >>"$LEDGER"
+  bus_unlock "$LEDGER"
+  rm -rf "$d"
+  [ -n "$new" ] || { printf '%s: up to date\n' "$(peer_self)"; return 0; }
+  printf '%s: took %s row(s) from %s\n' "$(peer_self)" "$(printf '%s\n' "$new" | wc -l | tr -d ' ')" "$from"
+  # Wake only for fresh messages: a first sync carries the whole history.
+  printf '%s\n' "$new" | jq -c --argjson cut $(( $(now_epoch) - 900 )) 'select(.kind == "msg" and (.epoch // 0) >= $cut)' | while IFS= read -r row; do
+    ( ADDR=$(jq -r .from <<<"$row"); deliver "$row" "from an agent on $from, not your user" 0 ) \
+      | sed "s/^delivery: /delivery ($(peer_self)): /"
+  done
+  return 0
+}
+# A seat this machine has never seen, while peers are linked, is taken to be on a peer.
+seat_on_peer() { peer_of_seat "$1" >/dev/null || { [ -n "$(peer_list)" ] && [ ! -f "$BUS/seats/$(printf '%s' "$1" | tr / _).json" ]; }; }
+peer_self() { /usr/sbin/scutil --get LocalHostName 2>/dev/null || hostname -s; }
+
+peer_push() { # host
+  local host="$1" since now
+  since=$(cat "$(peer_cursor "$host" pushed)" 2>/dev/null || echo 0)
+  now=$(now_epoch)
+  # Overlap by five minutes: clocks differ, and the receiver drops duplicates.
+  if peer_export $((since > 300 ? since - 300 : 0)) | peer_ssh "$host" ingest "$(peer_self).local"; then
+    printf '%s\n' "$now" >"$(peer_cursor "$host" pushed)"
+  else
+    printf 'peer: could not reach %s (asleep, off the network, or Remote Login is off); it catches up at the next sync\n' "$host" >&2
+    return 1
+  fi
+}
+peer_pull() { # host
+  local host="$1" since now
+  since=$(cat "$(peer_cursor "$host" pulled)" 2>/dev/null || echo 0)
+  now=$(now_epoch)
+  if peer_ssh "$host" export $((since > 300 ? since - 300 : 0)) | peer_ingest "$host"; then
+    printf '%s\n' "$now" >"$(peer_cursor "$host" pulled)"
+    peer_fetch_seats "$host"
+  else return 1; fi
+}
+
+# The live seats here, for a peer's `who`. Local seats only, never ones
+# learned from another peer.
+peer_seats_json() {
+  local now; now=$(now_epoch)
+  seat_rows | jq -c --argjson cut "$(( now - SEAT_TTL ))" --argjson codex_cut "$(( now - CODEX_MAX_IDLE_TTL ))" \
+    "$JQ_SEAT_LIVE"'select(buslive($cut; $codex_cut)) | {addr, tool, repo, branch, epoch}' | jq -cs .
+}
+peer_seats_file() { printf '%s/state/peer.%s.seats.json' "$BUS" "$1"; }
+peer_fetch_seats() { # host
+  local f; f=$(peer_seats_file "$1")
+  peer_ssh "$1" seats >"$f.tmp" && jq -e 'type == "array"' "$f.tmp" >/dev/null 2>&1 && mv "$f.tmp" "$f" || rm -f "$f.tmp"
+}
+# The peer a seat was last seen on, if any.
+peer_of_seat() { # addr
+  local h; for h in $(peer_list); do
+    jq -e --arg a "$1" 'any(.[]; .addr == $a)' "$(peer_seats_file "$h")" >/dev/null 2>&1 && { printf '%s' "$h"; return 0; }
+  done; return 1
+}
+peer_who() { # the other Macs' agents, from the last sync
+  [ "${AGENT_BUS_NO_PEERS:-0}" != 1 ] || return 0
+  local h f
+  for h in $(peer_list); do
+    f=$(peer_seats_file "$h"); [ -f "$f" ] || continue
+    printf '\non %s (as of %s):\n' "${h%.local}" "$(ago "$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f")")"
+    jq -r '.[] | [.addr, (.repo // "-"), (.branch // "-"), (.epoch // 0 | tostring)] | join("\u001f")' "$f" \
+      | while IFS=$'\037' read -r a r b e; do
+          printf '  %-40s %-14s %-40s %s ago\n' "$a" "$r" "$b" "$(age "$e")"
+        done | sanitize
+    [ "$(jq length "$f")" = 0 ] && printf '  (none)\n'
+  done
+  return 0
+}
+# Macs on this network that accept SSH (Bonjour), other than this one and
+# those already linked.
+peer_find() {
+  command -v dns-sd >/dev/null || { echo "peer find: needs macOS (dns-sd)"; return 0; }
+  local t; t=$(mktemp "$BUS/tmp/find.XXXXXX")
+  dns-sd -B _ssh._tcp local. >"$t" 2>/dev/null & local pid=$!
+  sleep "${AGENT_BUS_PEER_FIND_WAIT:-3}"; kill "$pid" 2>/dev/null || :; wait "$pid" 2>/dev/null || :
+  local names; names=$(awk '$2 == "Add" { $1=$2=$3=$4=$5=$6=""; sub(/^ +/, ""); print }' "$t" | sort -u)
+  rm -f "$t"
+  local n found=0
+  while IFS= read -r n; do
+    [ -n "$n" ] || continue
+    case "$n" in "$(peer_self)"|"$(/usr/sbin/scutil --get ComputerName 2>/dev/null)") continue ;; esac
+    local h; h="$(printf '%s' "$n" | tr ' ' '-').local"
+    if peer_list | grep -qxF "$h"; then printf '  %-24s linked\n' "$h"
+    else printf '  %-24s agent-bus peer add %s\n' "$h" "$h"; fi
+    found=1
+  done <<<"$names"
+  ((found)) || printf '  none found. The other Mac needs Remote Login on (System Settings > General > Sharing).\n'
+  return 0
+}
+
+# At most once a minute, from the session hooks: catch up with every peer in
+# the background, so a Mac that was asleep or away gets what it missed. The
+# hook never waits on the network.
+peer_catchup() {
+  [ "${AGENT_BUS_NO_PEERS:-0}" != 1 ] && [ -n "$(peer_list)" ] || return 0
+  local stamp="$BUS/state/peer.lastsync" last
+  last=$(cat "$stamp" 2>/dev/null || echo 0)
+  (( $(now_epoch) - last >= ${AGENT_BUS_PEER_EVERY:-60} )) || return 0
+  now_epoch >"$stamp"; mkdir -p "$BUS/tmp"
+  ( nohup "$0" peer sync </dev/null >>"$BUS/tmp/peer-push.log" 2>&1 & ) 2>/dev/null
+  return 0
+}
+ago() { local d=$(( $(now_epoch) - $1 )); if ((d < 120)); then echo "${d}s ago"; elif ((d < 7200)); then echo "$((d / 60))m ago"; else echo "$((d / 3600))h ago"; fi; }
+peer_doctor() {
+  [ -n "$(peer_list)" ] || return 0
+  printf '\npeers:\n'
+  local h v pushed pulled
+  for h in $(peer_list); do
+    pushed=$(cat "$(peer_cursor "$h" pushed)" 2>/dev/null || echo 0)
+    pulled=$(cat "$(peer_cursor "$h" pulled)" 2>/dev/null || echo 0)
+    if v=$(peer_ssh "$h" version | head -1); then
+      v=$(awk '{print $2}' <<<"$v")
+      if [ "$v" = "$VERSION" ]; then printf '  %-20s ok (agent-bus %s, synced %s)\n' "$h" "$v" "$(ago $((pushed < pulled ? pushed : pulled)))"
+      else printf '  %-20s VERSION DIFFERS: %s there, %s here. Run agent-bus update on the older one\n' "$h" "$v" "$VERSION"; fi
+    else
+      printf '  %-20s UNREACHABLE: asleep, off the network, or Remote Login is off. Last synced %s; it catches up when back\n' "$h" "$(ago $((pushed < pulled ? pushed : pulled)))"
+      [ -f "$PEER_KEY" ] || printf '  %-20s no agent-bus key here: agent-bus peer add %s\n' '' "$h"
+    fi
+  done
+}
+
+# After a command that wrote to the ledger, push to every peer in the background.
+peer_autopush() {
+  [ "$LEDGER_DIRTY" = 1 ] && [ "${AGENT_BUS_NO_PEERS:-0}" != 1 ] || return 0
+  local h; peer_list | while IFS= read -r h; do
+    mkdir -p "$BUS/tmp"; ( peer_push "$h" >>"$BUS/tmp/peer-push.log" 2>&1 & )
+  done
+  return 0
+}
+
+cmd_peer() {
+  local sub="${1:-list}"; shift || :
+  case "$sub" in
+    add)
+      local host="${1:-}" out code theirs name
+      [ -n "$host" ] || die "peer add <host>   (the other Mac, e.g. m1max.local)"
+      valid_host "$host" || die "peer add: bad host name: $host"
+      case "$host" in "$(peer_self)"|"$(peer_self).local"|localhost|127.*|::1)
+        die "peer add: $host is this machine. Name the other Mac (this one is $(peer_self).local)" ;; esac
+      if command -v nc >/dev/null && ! nc -z -G 2 localhost 22 2>/dev/null; then
+        die "peer add: Remote Login is off on this Mac, so $host can't reach back. Turn it on: System Settings > General > Sharing > Remote Login"
+      fi
+      peer_key_ensure
+      printf 'linking with %s. ssh may ask for your password on %s, once.\n' "$host" "$host"
+      # Your own ssh login (password or key), once: install our key there, get theirs.
+      # shellcheck disable=SC2046 # the key is two words on purpose: type and body
+      out=$(ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 "$host" \
+              env "PATH=$PEER_PATH" agent-bus peer accept "$(peer_self).local" $(peer_pub) 2>/dev/null); code=$?
+      case "$code" in
+        0) ;;
+        127) die "peer add: agent-bus isn't installed on $host. Install it there: brew install scottbaggett/tap/agent-bus" ;;
+        255) die "peer add: can't log in to $host. Is Remote Login on there (System Settings > General > Sharing)?" ;;
+        *) die "peer add: $host refused to pair (exit $code). It may run an older agent-bus: agent-bus update there" ;;
+      esac
+      theirs=$(sed -n 's/^key: //p' <<<"$out"); name=$(sed -n 's/^name: //p' <<<"$out")
+      [ -n "$theirs" ] || die "peer add: $host sent no key back. Update agent-bus there."
+      peer_authorize "$host" "$theirs"
+      peer_record "$host"
+      peer_ssh "$host" version >/dev/null || die "peer add: paired, but $host won't take agent-bus's key. Run: AGENT_BUS_PEER_DEBUG=1 agent-bus peer sync"
+      if peer_ssh "$host" check "$(peer_self).local" | grep -q 'back: ok'; then
+        printf 'linked: %s <-> %s. Posts on either reach agents on both.\n' "$(peer_self)" "${name:-$host}"
+        peer_fetch_seats "$host"
+      else
+        printf 'linked %s -> %s, but %s cannot reach this Mac yet. Is Remote Login on here?\n' "$(peer_self)" "${name:-$host}" "$host"
+      fi ;;
+    accept) # the far half of add: <name> <keytype> <key>
+      [ $# -eq 3 ] || die "peer accept: run by peer add on the other Mac"
+      peer_key_ensure
+      peer_authorize "$1" "$2 $3"
+      peer_record "$1"
+      printf 'key: %s\nname: %s\n' "$(peer_pub)" "$(peer_self)" ;;
+    serve) peer_serve ;;
+    remove)
+      [ -n "${1:-}" ] || die "peer remove <host>"
+      [ -f "$PEERS_FILE" ] && { grep -vxF "$1" "$PEERS_FILE" >"$PEERS_FILE.tmp" || :; mv "$PEERS_FILE.tmp" "$PEERS_FILE"; }
+      rm -f "$(peer_cursor "$1" pushed)" "$(peer_cursor "$1" pulled)"
+      peer_unauthorize "$1"
+      printf 'peer %s removed, and its key no longer gets in here. Run peer remove %s.local on %s too.\n' "$1" "$(peer_self)" "$1" ;;
+    list)
+      if [ -n "$(peer_list)" ]; then peer_list
+      else echo "no linked Macs. Nearby:"; peer_find; fi ;;
+    find) echo "Macs nearby:"; peer_find ;;
+    sync) local h; for h in ${1:-$(peer_list)}; do peer_push "$h"; peer_pull "$h"; done ;;
+    who)  local h; for h in ${1:-$(peer_list)}; do printf '== %s\n' "$h"; peer_ssh "$h" who || echo "(unreachable)"; done ;;
+    *) die "peer add|remove|list|sync|who" ;;
+  esac
 }
 
 # ------------------------------------------------------------------ policy
@@ -1760,7 +2061,7 @@ base_subject() { sed -E 's/^((review|changes requested): )+//'; }
 # whose session has ended is replaced by the lead, so nothing waits on nobody.
 submit_review() { # id reviewer note
   local id="$1" target="$2" subj
-  [ "$target" = '@lead' ] || seat_live "$target" || target='@lead'
+  [ "$target" = '@lead' ] || seat_live "$target" || seat_on_peer "$target" || target='@lead'
   subj=$(item_field "$id" subject | base_subject)
   cmd_post --allow-claude --re "$id" --close handed-off --to "$target" --state needs-review --review none \
     --review-of "$id" -s "review: ${subj:0:180}" -m "${3:-Done and ready for review: $subj}" >/dev/null
@@ -2692,6 +2993,7 @@ cmd_doctor() {
     printf '\nCodex delivery:\n'
     cmd_codex status
   fi
+  peer_doctor
   printf '\nlive seats in %s:\n' "$REPO"
   local dr_now; dr_now=$(now_epoch)
   seat_rows | jq -r --arg rid "$REPO_ID" --argjson cut "$(( dr_now - SEAT_TTL ))" \
@@ -2904,6 +3206,10 @@ agent-bus — handoff bus for coding agents sharing repos and worktrees.
   grok shell-init --name <n>  print export lines for running as a Grok seat
   whoami                      this seat's identity
   avatar [seat]               a seat's bot (yours by default)
+  peer add <host>             link another Mac on your network, both ways
+                              (asks for its password once; needs Remote Login)
+  peer [find]                 linked Macs, or Macs nearby to link
+  peer remove|sync|who [host] manage linked Macs
   who                         live seats, the PM, open-work count, claims
   post [flags]                send a packet
       --to <seat|scope|@role|@lane|@pm|@lead|@here|@repo|@all>     required
@@ -3010,7 +3316,9 @@ case " $* " in *" --help "*|*" -h "*)
   [ "$cmd" = help ] || [ "$cmd" = -h ] || [ "$cmd" = --help ] || { cmd_help "$cmd"; exit; } ;;
 esac
 resolve_identity
+trap peer_autopush EXIT
 case "$cmd" in
+  peer) cmd_peer "$@" ;;
   version|--version) cmd_version ;;
   codex) cmd_codex "$@" ;;
   grok)  cmd_grok  "$@" ;;
@@ -3019,8 +3327,8 @@ case "$cmd" in
   who) touch_seat; cmd_who ;;
   post) touch_seat; cmd_post "$@" ;;
   read) touch_seat; cmd_read "$@" ;;
-  digest) touch_seat; maybe_gc; cmd_read --digest ;;
-  heartbeat) touch_seat; maybe_gc ;;
+  digest) touch_seat; maybe_gc; peer_catchup; cmd_read --digest ;;
+  heartbeat) touch_seat; maybe_gc; peer_catchup ;;
   show) cmd_show "$@" ;;
   resolve) touch_seat; cmd_resolve "$@" ;;
   reply) touch_seat; cmd_reply "$@" ;;

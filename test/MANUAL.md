@@ -100,6 +100,10 @@ Each row is one action from a sender seat and what the target must show.
 | First run, new repo | in a repo with no `.agent-bus.json` and no posts, type `/agent-bus` in an agent | a short plain-words intro naming the other agents and one thing to try; no setup questions, no jargon |
 | First handoff tip | then ask it to hand something to another agent | it tells you once who checks the finished work and that `agent-bus init` changes it; a second handoff says nothing |
 | Quieter digest | claim a file from one seat; prompt another seat that hasn't touched it | the digest doesn't list the claim; `agent-bus read` counts it |
+| Link two Macs | Remote Login on both; on one: `agent-bus peer add <other>.local` | one password prompt at most, then `linked: a <-> b`; `doctor` lists the peer as ok on both |
+| Peer key is sync-only | `ssh -i ~/.agents/bus/peer_key -o IdentitiesOnly=yes <other>.local whoami` | `peer serve: refused` |
+| Handoff across Macs | open an agent on the other Mac; here, `agent-bus who` and post to it | post prints `delivery (<other>): … woken` (or plugin); it answers, and the reply arrives here |
+| Asleep Mac catches up | sleep the other Mac, post to it, wake it, open an agent | the packet is in its digest within a minute |
 
 ## Record
 

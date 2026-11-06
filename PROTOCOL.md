@@ -429,6 +429,36 @@ Packets are still treated as hostile input: bodies are capped at 64KB, control
 characters are stripped from everything rendered, and ids are shape-checked
 before they become paths.
 
+## Peers
+
+Each machine keeps its own bus. Machines on one network link with
+`agent-bus peer add <host>` and sync over SSH; a shared folder can't work,
+because the ledger lock trusts PIDs and a PID from another machine always
+looks dead.
+
+- **Pairing.** `peer add` logs in once with the user's own SSH (password or
+  key) and runs `peer accept` there. Each side makes its own key
+  (`~/.agents/bus/peer_key`) and adds the other's to `~/.ssh/authorized_keys`
+  as `command="… agent-bus peer serve",restrict … agent-bus-peer:<host>`.
+  `peer serve` reads `SSH_ORIGINAL_COMMAND` and runs only `version`, `who`,
+  `seats`, `ingest <from>`, `export <epoch>` and `check <host>`, each word
+  shape-checked. `peer remove` deletes the line.
+- **Sync.** The ledger is append-only, so a merge appends the lines the
+  receiver lacks (checked against the ledger and its archive). Message bodies
+  travel with their rows. `post` pushes in the foreground and prints the far
+  side's delivery lines; other writes push in the background. Linking starts
+  at the current time: history stays on the machine that made it.
+- **Delivery.** The receiver wakes its own owners of new messages less than
+  15 minutes old, the same way a local post does.
+- **Catch-up.** The `digest` and `heartbeat` hooks start a background
+  `peer sync` (push and pull) at most once a minute
+  (`AGENT_BUS_PEER_EVERY`). A pull also caches the peer's live seats in
+  `state/peer.<host>.seats.json`, which `who` lists and `post` uses to name
+  the machine a recipient is on.
+- **Repo identity** comes from the path of the git common dir, so a repo
+  counts as the same on two machines only at the same path. Claims are files
+  and stay local.
+
 ## Locking
 
 The ledger and per-seat state files are protected by cross-platform advisory

@@ -50,13 +50,6 @@ type row struct {
 	stale                                bool
 }
 
-type agentRow struct {
-	header bool
-	text   string
-	seat   Seat
-	peer   string
-}
-
 type model struct {
 	w, h      int
 	snap      *Snapshot
@@ -121,7 +114,7 @@ func newModel() model {
 	ti := textinput.New()
 	ti.CharLimit = 4000
 	ti.Prompt = ""
-	return model{loading: true, input: ti, seen: map[string]time.Time{}, pane: paneWork}
+	return model{loading: true, input: ti, seen: map[string]time.Time{}, pane: paneAgents}
 }
 
 func (m model) Init() tea.Cmd { return tea.Batch(loadCmd(), tick()) }
@@ -174,29 +167,6 @@ func (m model) workRows() []row {
 			}
 		}
 		rows = keep
-	}
-	return rows
-}
-
-func (m model) agentRows() []agentRow {
-	if m.snap == nil {
-		return nil
-	}
-	rows := []agentRow{{header: true, text: "this Mac"}}
-	for _, s := range m.snap.Seats {
-		rows = append(rows, agentRow{seat: s})
-	}
-	if len(m.snap.Seats) == 0 {
-		rows = append(rows, agentRow{header: true, text: "  (none)"})
-	}
-	for _, p := range m.snap.Peers {
-		rows = append(rows, agentRow{header: true, text: p.Name + " · synced " + ago(m.snap.Now, p.Synced) + " ago"})
-		for _, s := range p.Seats {
-			rows = append(rows, agentRow{seat: s, peer: p.Name})
-		}
-		if len(p.Seats) == 0 {
-			rows = append(rows, agentRow{header: true, text: "  (none)"})
-		}
 	}
 	return rows
 }
@@ -336,7 +306,8 @@ func firstLine(s string) string {
 }
 
 func (m *model) clamp() {
-	n := [2]int{len(m.agentRows()), len(m.workRows())}
+	tiles, _ := m.tiles()
+	n := [2]int{len(tiles), len(m.workRows())}
 	for p := 0; p < 2; p++ {
 		if m.cursor[p] >= n[p] {
 			m.cursor[p] = n[p] - 1
@@ -428,8 +399,16 @@ func (m model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case "?":
 		m.mode = modeHelp
-	case "tab", "left", "right", "h", "l":
+	case "tab", "shift+tab":
 		m.pane = 1 - m.pane
+	case "left", "h":
+		if m.pane == paneAgents {
+			m.moveGrid(-1, 0, m.w-4)
+		}
+	case "right", "l":
+		if m.pane == paneAgents {
+			m.moveGrid(1, 0, m.w-4)
+		}
 	case "1":
 		m.tab, m.pane, m.cursor[paneWork], m.offset[paneWork] = tabNeeds, paneWork, 0, 0
 	case "2":
@@ -474,9 +453,8 @@ func (m model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "enter":
 		if m.pane == paneAgents {
-			rows := m.agentRows()
-			if c := m.agentCursor(); c >= 0 && c < len(rows) && !rows[c].header {
-				return m, m.openChat(rows[c].seat, rows[c].peer)
+			if t, ok := m.selectedTile(); ok {
+				return m, m.openChat(t.seat, t.peer)
 			}
 			return m, nil
 		}
@@ -515,23 +493,17 @@ func (m model) startReply() (tea.Model, tea.Cmd) {
 }
 
 func (m *model) move(d int) {
-	rows := m.agentRows()
 	if m.pane == paneWork {
 		m.cursor[paneWork] += d
 		m.clamp()
 		return
 	}
-	c := m.cursor[paneAgents] + d
-	// Skip headers in the agents list.
-	for c >= 0 && c < len(rows) && rows[c].header {
-		if d < 0 {
-			c--
-		} else {
-			c++
-		}
+	dy := 1
+	if d < 0 {
+		dy = -1
 	}
-	if c >= 0 && c < len(rows) {
-		m.cursor[paneAgents] = c
+	for i := 0; i < d*dy && i < 3; i++ {
+		m.moveGrid(0, dy, m.w-4)
 	}
 }
 
@@ -540,29 +512,6 @@ func plural(n int, word string) string {
 		return "1 " + word
 	}
 	return fmt.Sprintf("%d %ss", n, word)
-}
-
-// agentCursor is the selected agent row, skipping a header the cursor rests on.
-func (m model) agentCursor() int {
-	rows := m.agentRows()
-	cur := m.cursor[paneAgents]
-	if cur < len(rows) && rows[cur].header {
-		for i := range rows {
-			if !rows[i].header {
-				return i
-			}
-		}
-	}
-	return cur
-}
-
-func (m model) findSeat(addr string) (Seat, string, bool) {
-	for _, r := range m.agentRows() {
-		if !r.header && r.seat.Addr == addr {
-			return r.seat, r.peer, true
-		}
-	}
-	return Seat{}, "", false
 }
 
 func short(id string) string {
@@ -653,27 +602,29 @@ func (m model) View() string {
 	header := m.headerView()
 	footer := m.footerView()
 	feedH := 7
-	if m.h < 24 {
+	if m.h < 30 {
 		feedH = 4
 	}
-	mainH := m.h - lipgloss.Height(header) - lipgloss.Height(footer) - feedH
-	if mainH < 5 {
-		mainH = 5
+	avail := m.h - lipgloss.Height(header) - lipgloss.Height(footer) - feedH
+	// The grid takes what it needs, leaving the work list at least 8 lines.
+	gridH := m.gridNeeded(m.w-4) + 3
+	if maxG := avail - 8; gridH > maxG {
+		gridH = maxG
 	}
-	leftW := m.w / 3
-	if leftW > 46 {
-		leftW = 46
+	if gridH < 8 {
+		gridH = 8
 	}
-	if leftW < 24 {
-		leftW = 24
+	workH := avail - gridH
+	if workH < 4 {
+		workH = 4
 	}
-	rightW := m.w - leftW
-
-	left := m.box("AGENTS", m.agentsBody(leftW-4, mainH-2), leftW, mainH, m.pane == paneAgents)
-	right := m.box(m.workTitle(), m.workBody(rightW-4, mainH-2), rightW, mainH, m.pane == paneWork)
+	gridInner := gridH - 2
+	agents := m.gridBody(m.w-4, gridInner-1) + "\n" + m.selectedLine(m.w-4)
+	grid := m.box("AGENTS", agents, m.w, gridH, m.pane == paneAgents)
+	work := m.box(m.workTitle(), m.workBody(m.w-4, workH-2), m.w, workH, m.pane == paneWork)
 	feed := m.box("LIVE", m.feedBody(m.w-4, feedH-2), m.w, feedH, false)
 
-	return lipgloss.JoinVertical(lipgloss.Left, header, lipgloss.JoinHorizontal(lipgloss.Top, left, right), feed, footer)
+	return lipgloss.JoinVertical(lipgloss.Left, header, grid, work, feed, footer)
 }
 
 func (m model) box(title, body string, w, h int, focus bool) string {
@@ -750,41 +701,6 @@ func (m model) workTitle() string {
 		t += "  +stale"
 	}
 	return t
-}
-
-func (m model) agentsBody(w, h int) string {
-	rows := m.agentRows()
-	cur := m.agentCursor()
-	off := scroll(m.offset[paneAgents], cur, h, len(rows))
-	var b []string
-	for i := off; i < len(rows) && len(b) < h; i++ {
-		r := rows[i]
-		if r.header {
-			b = append(b, sHeader.Render(fit(r.text, w)))
-			continue
-		}
-		dot := lipgloss.NewStyle().Foreground(colorFor(r.seat)).Render("●")
-		age := ago(m.snap.Now, r.seat.Epoch)
-		name := clean(r.seat.Addr)
-		line := " " + dot + " " + fit(name, w-3-len(age)-1) + " " + sDim.Render(age)
-		if m.pane == paneAgents && i == cur {
-			line = sSel.Render(fit(ansi.Strip(line), w))
-		}
-		b = append(b, line)
-	}
-	// Selected seat's branch underneath, if room.
-	if cur < len(rows) && !rows[cur].header && len(b) < h-1 {
-		s := rows[cur].seat
-		info := strings.TrimSpace(clean(s.Repo + " · " + s.Branch))
-		if s.Lane != "" {
-			info += " · lane " + clean(s.Lane)
-		}
-		for len(b) < h-1 {
-			b = append(b, "")
-		}
-		b = append(b, sDim.Render(fit(info, w)))
-	}
-	return strings.Join(b, "\n")
 }
 
 func scroll(off, cur, h, n int) int {
@@ -917,7 +833,7 @@ func (m model) footerView() string {
 	}
 	keys := []string{"↑↓ move", "tab pane", "1/2 list", "enter show", "c chat", "r reply", "x close", "/ filter", "s stale", "? help", "q quit"}
 	if m.pane == paneAgents {
-		keys = []string{"↑↓ move", "enter chat", "tab pane", "1/2 list", "? help", "q quit"}
+		keys = []string{"←↑↓→ move", "enter chat", "tab work list", "1/2 list", "? help", "q quit"}
 	}
 	return sDim.Render(fit(" "+strings.Join(keys, " · "), m.w))
 }
@@ -937,7 +853,7 @@ func (m model) helpView() string {
 		"A live view of the bus. It refreshes whenever the ledger changes.",
 		"Actions run agent-bus as you (@lead).",
 		"",
-		"  ↑↓ / j k     move           tab         switch pane",
+		"  arrows / hjkl  move         tab         agents ↔ work list",
 		"  1            what needs you 2           open work",
 		"  enter        show the item, or chat with the selected agent",
 		"  c            chat with whoever sent the item",

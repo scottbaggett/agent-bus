@@ -161,9 +161,11 @@ You see it in `agent-bus attention`, answer, and close it.
 agent-bus tui
 ```
 
-A live view: every agent on this Mac and on linked Macs, what needs you, open
-work, and a feed of what's happening. Pick an agent and press Enter to chat with
-it: what you type is sent as you, and its answers appear as they come in. On a
+A live view: every agent on this Mac and on linked Macs as a grid of their
+bots, grouped by lane, with a red border on any agent waiting on you. Below it,
+what needs you, open work, and a feed of what's happening. Pick an agent and
+press Enter to chat with it: what you type is sent as you, and its answers
+appear as they come in. On a
 work item, Enter shows it, `r` replies, `x` closes it, and `c` opens a chat with
 whoever sent it. `?` lists the keys.
 

@@ -1740,7 +1740,7 @@ peer_pull() { # host
 peer_seats_json() {
   local now; now=$(now_epoch)
   seat_rows | jq -c --argjson cut "$(( now - SEAT_TTL ))" --argjson codex_cut "$(( now - CODEX_MAX_IDLE_TTL ))" \
-    "$JQ_SEAT_LIVE"'select(buslive($cut; $codex_cut)) | {addr, tool, repo, branch, epoch}' | jq -cs .
+    "$JQ_SEAT_LIVE"'select(buslive($cut; $codex_cut)) | {addr, tool, repo, branch, epoch, lane: (.lane // "")}' | jq -cs .
 }
 peer_seats_file() { printf '%s/state/peer.%s.seats.json' "$BUS" "$1"; }
 peer_fetch_seats() { # host

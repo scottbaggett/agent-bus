@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -52,4 +53,36 @@ func TestWorkRowsHideStaleUntilAsked(t *testing.T) {
 	if rows := m.workRows(); len(rows) != 1 || rows[0].id != "b" {
 		t.Fatalf("filter: got %+v", rows)
 	}
+}
+
+func TestMidFitKeepsTheInstance(t *testing.T) {
+	if got := midFit("salt-monorepo.0b81", 14); got != "salt-mon….0b81" {
+		t.Fatalf("got %q", got)
+	}
+	if got := midFit("main.8e66", 14); got != "main.8e66" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestAvatarMatchesTheCLI(t *testing.T) {
+	// agent-bus avatar codex/api.628b, from bin/agent-bus.
+	got := strings.Join(avatarRows("codex/api.628b", "codex"), "\n")
+	if want := cliAvatar(t, "codex/api.628b"); want != "" && got != want {
+		t.Fatalf("TUI and CLI draw different bots:\n%s\n---\n%s", got, want)
+	}
+}
+
+func cliAvatar(t *testing.T, addr string) string {
+	out, err := exec.Command("../bin/agent-bus", "avatar", addr).Output()
+	if err != nil {
+		t.Skip("bin/agent-bus not runnable here")
+	}
+	var rows []string
+	for _, l := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+		l = strings.TrimPrefix(l, "  ")
+		if l != addr {
+			rows = append(rows, l)
+		}
+	}
+	return strings.Join(rows, "\n")
 }

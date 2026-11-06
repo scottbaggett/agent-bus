@@ -14,13 +14,14 @@ import (
 const (
 	tileInner = 14 // avatar (8) centered, names truncated to this
 	tileW     = tileInner + 2
-	tileH     = 8 // border + avatar(4) + name + age
+	tileH     = 12 // border + robot(7) + name + what it is on + age
 	tileGap   = 1
 )
 
 type tile struct {
 	seat Seat
 	peer string // the Mac it's on, "" for this one
+	gone bool   // not running, but still waiting on you
 }
 
 type laneGroup struct {
@@ -30,26 +31,54 @@ type laneGroup struct {
 	latest int64
 }
 
-// needsYou counts, per agent, what it is waiting on you for: questions to
-// @lead and the attention items that name it.
-func (m model) needsYou() map[string]int {
-	out := map[string]int{}
+// need is one thing an agent is waiting on you for.
+type need struct {
+	ID, From, State, Subject string
+	Epoch                    int64
+}
+
+// needs lists, per agent, what it is waiting on you for: questions and work
+// sent to you, and the items agent-bus flags as needing you. Newest first.
+func (m model) needs() map[string][]need {
+	out := map[string][]need{}
 	if m.snap == nil {
 		return out
 	}
 	seen := map[string]bool{}
+	subj := map[string]Item{}
+	for _, it := range m.snap.Open {
+		subj[it.ID] = it
+	}
 	for _, a := range m.snap.Attention {
-		if a.Kind == "needs-you" && a.From != "" && !seen[a.ID] {
-			seen[a.ID] = true
-			out[a.From]++
+		if a.Kind != "needs-you" || a.From == "" || a.ID == "" || seen[a.ID] {
+			continue
 		}
+		seen[a.ID] = true
+		n := need{ID: a.ID, From: a.From, State: "question", Subject: a.Text, Epoch: a.Epoch}
+		if it, ok := subj[a.ID]; ok {
+			n.State, n.Subject = it.State, it.Subject
+		} else if i := strings.Index(a.Text, " asks you: "); i >= 0 {
+			n.Subject = a.Text[i+len(" asks you: "):]
+		}
+		out[a.From] = append(out[a.From], n)
 	}
 	for _, it := range m.snap.Open {
-		if it.Gone || it.Stale || seen[it.ID] || !toYou(it.To) {
+		if it.Stale || seen[it.ID] || !toYou(it.To) || it.From == "" {
 			continue
 		}
 		seen[it.ID] = true
-		out[it.From]++
+		out[it.From] = append(out[it.From], need{ID: it.ID, From: it.From, State: it.State, Subject: it.Subject, Epoch: it.Epoch})
+	}
+	for k := range out {
+		sort.SliceStable(out[k], func(i, j int) bool { return out[k][i].Epoch > out[k][j].Epoch })
+	}
+	return out
+}
+
+func (m model) needsYou() map[string]int {
+	out := map[string]int{}
+	for k, v := range m.needs() {
+		out[k] = len(v)
 	}
 	return out
 }
@@ -70,6 +99,25 @@ func (m model) tiles() ([]tile, []laneGroup) {
 		}
 	}
 	needs := m.needsYou()
+	// Agents that have exited but still wait on you keep a tile.
+	live := map[string]bool{}
+	for _, t := range all {
+		live[t.seat.Addr] = true
+	}
+	var ghosts []string
+	for addr := range needs {
+		if !live[addr] {
+			ghosts = append(ghosts, addr)
+		}
+	}
+	sort.Strings(ghosts)
+	for _, addr := range ghosts {
+		var ep int64
+		for _, n := range m.needs()[addr] {
+			ep = max(ep, n.Epoch)
+		}
+		all = append(all, tile{seat: Seat{Addr: addr, Tool: strings.SplitN(addr, "/", 2)[0], Epoch: ep}, gone: true})
+	}
 	byLane := map[string]*laneGroup{}
 	var order []string
 	for i, t := range all {
@@ -192,7 +240,7 @@ func (m model) gridLayout(w int) ([]string, []placed) {
 				if c > 0 {
 					cells = append(cells, strings.Repeat(" ", tileGap))
 				}
-				cells = append(cells, m.renderTile(tiles[ti], m.pane == paneAgents && ti == cur, needs[tiles[ti].seat.Addr]))
+				cells = append(cells, m.renderTile(tiles[ti], ti == cur, needs[tiles[ti].seat.Addr]))
 			}
 			trows = append(trows, lipgloss.JoinHorizontal(lipgloss.Top, cells...))
 		}
@@ -287,35 +335,27 @@ func (m model) findSeat(addr string) (Seat, string, bool) {
 
 func (m model) renderTile(t tile, selected bool, needs int) string {
 	s := t.seat
-	idle := m.snap.Now-s.Epoch > 30*60
-	color := lipgloss.Color(avatarColor(toolOf(s)))
-	av := lipgloss.NewStyle().Foreground(color)
-	if idle && !selected {
-		av = sDim
-	}
-	art := av.Render(strings.Join(avatarRows(s.Addr, toolOf(s)), "\n"))
+	idle := t.gone || m.snap.Now-s.Epoch > 30*60
+	art := avatarArt(s.Addr, toolOf(s), idle && !selected && needs == 0)
 	art = lipgloss.PlaceHorizontal(tileInner, lipgloss.Center, art)
 
-	// Name: the worktree and instance, since the lane is the header.
-	name := s.Addr
-	if i := strings.IndexByte(name, '/'); i >= 0 {
-		name = name[i+1:]
-	}
-	nameSt := sText
+	nameSt := sText.Bold(true)
 	if selected {
 		nameSt = lipgloss.NewStyle().Foreground(cAccent).Bold(true)
 	}
+	on := workingOn(s)
 	meta := ago(m.snap.Now, s.Epoch)
-	if t.peer != "" {
+	switch {
+	case t.gone:
+		meta = "not running"
+	case t.peer != "":
 		meta = t.peer + " · " + meta
 	}
-	metaLine := sDim.Render(meta)
-	if needs > 0 {
-		metaLine = lipgloss.NewStyle().Foreground(cBad).Bold(true).Render(fmt.Sprintf("● %d for you", needs))
-	}
+	center := func(st string) string { return lipgloss.PlaceHorizontal(tileInner, lipgloss.Center, st) }
 	body := art + "\n" +
-		lipgloss.PlaceHorizontal(tileInner, lipgloss.Center, nameSt.Render(midFit(clean(name), tileInner))) + "\n" +
-		lipgloss.PlaceHorizontal(tileInner, lipgloss.Center, ansiFitStyled(metaLine, tileInner))
+		center(nameSt.Render(fit(friendlyName(s.Addr), min(tileInner, len(friendlyName(s.Addr)))))) + "\n" +
+		center(sText.Render(fit(clean(on), min(tileInner, lipgloss.Width(clean(on)))))) + "\n" +
+		center(sDim.Render(fit(meta, min(tileInner, lipgloss.Width(meta)))))
 
 	border := lipgloss.RoundedBorder()
 	bc := lipgloss.TerminalColor(cDim)
@@ -327,7 +367,17 @@ func (m model) renderTile(t tile, selected bool, needs int) string {
 	case selected:
 		border, bc = lipgloss.ThickBorder(), cAccent
 	}
-	return lipgloss.NewStyle().Border(border).BorderForeground(bc).Width(tileInner).Render(body)
+	out := lipgloss.NewStyle().Border(border).BorderForeground(bc).Width(tileInner).Render(body)
+	if needs == 0 {
+		return out
+	}
+	// The badge sits in the top border: ╭───────── 2 ─╮
+	badge := lipgloss.NewStyle().Background(cBad).Foreground(lipgloss.Color("#FFFFFF")).Bold(true).Render(fmt.Sprintf(" %d ", needs))
+	bs := lipgloss.NewStyle().Foreground(bc)
+	fill := tileInner - lipgloss.Width(badge) - 1
+	top := bs.Render(border.TopLeft+strings.Repeat(border.Top, fill)) + badge + bs.Render(border.Top+border.TopRight)
+	lines := strings.SplitN(out, "\n", 2)
+	return top + "\n" + lines[1]
 }
 
 // midFit shortens from the middle, keeping the instance id at the end:
@@ -347,15 +397,9 @@ func midFit(s string, w int) string {
 	}
 	return string(r[:head]) + "…" + string(r[len(r)-tail:])
 }
-func ansiFitStyled(s string, w int) string {
-	if lipgloss.Width(s) <= w {
-		return s
-	}
-	return fit(s, w)
-}
 
-// gridBody renders the grid into h lines, scrolled to keep the selection in view.
-func (m model) gridBody(w, h int) string {
+// gridOffset is how far the grid is scrolled to keep the selection in view.
+func (m model) gridOffset(w, h int) int {
 	lines, pos := m.gridLayout(w)
 	off := 0
 	if cur := m.cursor[paneAgents]; cur >= 0 && cur < len(pos) {
@@ -370,8 +414,27 @@ func (m model) gridBody(w, h int) string {
 	if off > len(lines)-h {
 		off = max(0, len(lines)-h)
 	}
+	return off
+}
+
+// gridBody renders the grid into h lines, scrolled to keep the selection in view.
+func (m model) gridBody(w, h int) string {
+	lines, _ := m.gridLayout(w)
+	off := m.gridOffset(w, h)
 	end := min(len(lines), off+h)
 	return strings.Join(lines[off:end], "\n")
+}
+
+// tileAt is the tile under a point in grid coordinates (after scrolling).
+func (m model) tileAt(w, h, x, y int) int {
+	_, pos := m.gridLayout(w)
+	y += m.gridOffset(w, h)
+	for i, p := range pos {
+		if x >= p.x && x < p.x+tileW && y >= p.y && y < p.y+tileH {
+			return i
+		}
+	}
+	return -1
 }
 
 // selectedLine describes the selected agent in one line.
@@ -391,7 +454,11 @@ func (m model) selectedLine(w int) string {
 	if s.Branch != "" && s.Branch != "-" {
 		parts = append(parts, clean(s.Branch))
 	}
-	parts = append(parts, "seen "+ago(m.snap.Now, s.Epoch)+" ago")
+	if t.gone {
+		parts = append(parts, "not running")
+	} else {
+		parts = append(parts, "seen "+ago(m.snap.Now, s.Epoch)+" ago")
+	}
 	if n := m.needsYou()[s.Addr]; n > 0 {
 		parts = append(parts, lipgloss.NewStyle().Foreground(cBad).Bold(true).Render(fmt.Sprintf("%d waiting on you", n)))
 	}

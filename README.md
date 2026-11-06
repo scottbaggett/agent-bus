@@ -161,13 +161,13 @@ You see it in `agent-bus attention`, answer, and close it.
 agent-bus tui
 ```
 
-A live view: every agent on this Mac and on linked Macs as a grid of their
-bots, grouped by lane, with a red border on any agent waiting on you. Below it,
-what needs you, open work, and a feed of what's happening. Pick an agent and
-press Enter to chat with it: what you type is sent as you, and its answers
-appear as they come in. On a
-work item, Enter shows it, `r` replies, `x` closes it, and `c` opens a chat with
-whoever sent it. `?` lists the keys.
+Every agent on this Mac and on linked Macs, as a grid of little robots grouped
+by lane. Each has a name you can say ("Brave Otter") and shows what it's on.
+A red badge counts what an agent is waiting on you for; click it (or press
+Enter) to open a panel with those items, answer or close them, or chat with the
+agent. What you type is sent as you, and answers appear as they come in. Agents
+that have exited but still have a question for you keep their tile. `?` lists
+the keys.
 
 ### Tell your agents something yourself
 

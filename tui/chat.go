@@ -115,6 +115,7 @@ func (m *model) openChat(s Seat, peer string) tea.Cmd {
 	m.chatSeat, m.chatPeer = s, peer
 	m.chatMsgs = nil
 	m.chatStamp = ""
+	m.chatNote = ""
 	m.input.Placeholder = "message " + s.Addr + " as you · enter sends · esc back"
 	m.input.SetValue("")
 	m.input.Width = m.w - 6
@@ -164,6 +165,13 @@ func (m *model) renderChat() {
 				BorderForeground(colorFor(m.chatSeat)).PaddingLeft(1).Width(bubbleW).Render(body)
 			out = append(out, name+sDim.Render(" · "+meta), bub)
 		}
+	}
+	if m.chatNote != "" {
+		st := sDim
+		if strings.Contains(m.chatNote, "not running") || strings.Contains(m.chatNote, "exited") || strings.Contains(m.chatNote, "waits") {
+			st = lipgloss.NewStyle().Foreground(cWarn)
+		}
+		out = append(out, lipgloss.PlaceHorizontal(w, lipgloss.Right, st.Render(fit("delivery: "+m.chatNote, bubbleW+8))))
 	}
 	m.chatView.Width, m.chatView.Height = m.w-4, m.chatHeight()
 	content := strings.Join(out, "\n")
@@ -215,7 +223,13 @@ func (m model) chatScreen() string {
 	if m.chatPeer != "" {
 		where = "on " + m.chatPeer + " · " + where
 	}
-	title := " " + dot + " " + sAccent.Render(clean(s.Addr)) + sDim.Render("  "+where)
+	seen := "seen " + ago(m.snap.Now, s.Epoch) + " ago"
+	seenSt := sDim
+	if s.Epoch > 0 && m.snap.Now-s.Epoch > 30*60 {
+		seen += " · may not be running"
+		seenSt = lipgloss.NewStyle().Foreground(cWarn)
+	}
+	title := " " + dot + " " + sAccent.Render(clean(s.Addr)) + sDim.Render("  "+where+" · ") + seenSt.Render(seen)
 	body := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cAccent).
 		Width(m.w-2).Height(m.chatHeight()).Padding(0, 1).Render(m.chatView.View())
 	prompt := sAccent.Render(" › ") + m.input.View()

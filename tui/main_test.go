@@ -1,7 +1,7 @@
 package main
 
 import (
-	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -38,20 +38,31 @@ Drop the \x1b[31mtable?`
 	}
 }
 
-func TestWorkRowsHideStaleUntilAsked(t *testing.T) {
+func TestNeedsGroupByAgentAndKeepExitedOnes(t *testing.T) {
 	m := newModel()
-	m.snap = &Snapshot{Open: []Item{{ID: "a", Subject: "live"}, {ID: "b", Subject: "old", Stale: true}}}
-	m.tab = tabOpen
-	if n := len(m.workRows()); n != 1 {
-		t.Fatalf("got %d rows, want 1", n)
+	m.snap = &Snapshot{
+		Now:   100,
+		Seats: []Seat{{Addr: "codex/api.1", Tool: "codex", Epoch: 99}},
+		Open: []Item{
+			{ID: "a", From: "codex/api.1", To: "@lead", State: "question", Subject: "drop it?"},
+			{ID: "b", From: "claude/web.2", To: "lead/x.1", State: "handoff", Subject: "done"},
+			{ID: "c", From: "codex/api.1", To: "claude/web.2", Subject: "not for you"},
+			{ID: "d", From: "codex/api.1", To: "@lead", Subject: "old", Stale: true},
+		},
 	}
-	m.showStale = true
-	if n := len(m.workRows()); n != 2 {
-		t.Fatalf("got %d rows with stale shown, want 2", n)
+	n := m.needs()
+	if len(n["codex/api.1"]) != 1 || n["codex/api.1"][0].ID != "a" {
+		t.Fatalf("codex needs: %+v", n["codex/api.1"])
 	}
-	m.filter = "old"
-	if rows := m.workRows(); len(rows) != 1 || rows[0].id != "b" {
-		t.Fatalf("filter: got %+v", rows)
+	tiles, _ := m.tiles()
+	var gone []string
+	for _, t := range tiles {
+		if t.gone {
+			gone = append(gone, t.seat.Addr)
+		}
+	}
+	if len(tiles) != 2 || len(gone) != 1 || gone[0] != "claude/web.2" {
+		t.Fatalf("tiles: %+v", tiles)
 	}
 }
 
@@ -64,25 +75,32 @@ func TestMidFitKeepsTheInstance(t *testing.T) {
 	}
 }
 
-func TestAvatarMatchesTheCLI(t *testing.T) {
-	// agent-bus avatar codex/api.628b, from bin/agent-bus.
-	got := strings.Join(avatarRows("codex/api.628b", "codex"), "\n")
-	if want := cliAvatar(t, "codex/api.628b"); want != "" && got != want {
-		t.Fatalf("TUI and CLI draw different bots:\n%s\n---\n%s", got, want)
+func TestNamesAndRobotsVary(t *testing.T) {
+	names, robots := map[string]bool{}, map[string]bool{}
+	for i := 0; i < 40; i++ {
+		a := "claude/salt-monorepo." + strconv.Itoa(1000+i)
+		names[friendlyName(a)] = true
+		robots[avatarArt(a, "claude", false)] = true
+	}
+	if len(names) < 30 || len(robots) < 30 {
+		t.Fatalf("too little variety: %d names, %d robots of 40", len(names), len(robots))
+	}
+	if friendlyName("codex/api.1") != friendlyName("codex/api.1") {
+		t.Fatal("names must be stable")
 	}
 }
 
-func cliAvatar(t *testing.T, addr string) string {
-	out, err := exec.Command("../bin/agent-bus", "avatar", addr).Output()
-	if err != nil {
-		t.Skip("bin/agent-bus not runnable here")
-	}
-	var rows []string
-	for _, l := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
-		l = strings.TrimPrefix(l, "  ")
-		if l != addr {
-			rows = append(rows, l)
+func TestWorkingOn(t *testing.T) {
+	for _, c := range []struct {
+		s    Seat
+		want string
+	}{
+		{Seat{Branch: "feature/salt-9473-fix-thing"}, "SALT-9473"},
+		{Seat{Branch: "main", Repo: "salt-monorepo"}, "salt-monorepo"},
+		{Seat{Branch: "feat/tui"}, "tui"},
+	} {
+		if got := workingOn(c.s); got != c.want {
+			t.Errorf("workingOn(%+v) = %q, want %q", c.s, got, c.want)
 		}
 	}
-	return strings.Join(rows, "\n")
 }

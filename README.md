@@ -1,7 +1,7 @@
 # agent-bus
 
 <p align="center">
-  <img src="assets/agent-bus.svg" width="900" alt="A transit map of agent-bus. Claude Code, Codex and OpenCode are stations on one line. A handoff runs from Claude Code to Codex, the finished work runs back to be checked, Codex claims a file so OpenCode keeps out, and OpenCode's question about dropping a table runs to the last stop: you.">
+  <img src="assets/agent-bus.svg" width="900" alt="agent-bus as a terminal dashboard. A Claude Code agent hands the client work to a Codex agent; Codex claims src/client.ts, does it and sends it back; Claude checks and approves it. An OpenCode agent keeps out of the claimed file and asks you before dropping a table. A live bus log lists each step.">
 </p>
 
 Run several coding agents at once, in different windows and worktrees, and let

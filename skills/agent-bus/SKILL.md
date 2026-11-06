@@ -21,7 +21,9 @@ nothing after it, do **status**.
 Run `agent-bus status`.
 
 **If it says `new here`**, your user hasn't used agent-bus in this repo yet.
-Don't recite the status. Introduce it in about four short lines, in plain words:
+Don't recite the status. Start with your bot: the four lines of art at the top
+of `status`, in a code block, with "that's me, `<your seat>`". Then introduce
+agent-bus in about four short lines, in plain words:
 - what it does: lets the agents in their other windows hand work to each other,
   ask each other things, and bring them the decisions that are theirs;
 - the other agents it can see right now (from `agent-bus who`), or that there

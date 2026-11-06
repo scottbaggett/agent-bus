@@ -1039,6 +1039,15 @@ assert_has "and the owner there is told" "delivery (" "$out"
 assert_has "the agent there sees the handoff" "across the network" "$(PBT=opencode pb read --peek)"
 out=$(SSH_ORIGINAL_COMMAND="export 0" pa peer serve | serve_b "ingest amac.local")
 assert_has "syncing twice adds nothing" "up to date" "$out"
+# who lists the other Mac's agents from the last sync.
+assert_has "a peer reports its live seats" "$oc" "$(serve_b seats)"
+serve_b seats >"$PA/bus/state/peer.bmac.local.seats.json"
+out=$(pa who)
+assert_has "who shows the other Mac's agents" "on bmac (as of" "$out"
+assert_has "by name" "$oc" "$out"
+mkdir -p "$PA/nossh"; printf '#!/bin/sh\nexit 255\n' >"$PA/nossh/ssh"; chmod +x "$PA/nossh/ssh"
+out=$(AGENT_BUS_NO_PUSH=0 PATH="$PA/nossh:$PATH" pa post --to "$oc" -m "# hi" 2>&1 || true)
+assert_has "a post names the Mac its recipient is on" "is on bmac; sending it there" "$out"
 # Catch-up runs from the hooks at most once a minute, in the background.
 pa peer accept bmac.local ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl >/dev/null
 mkdir -p "$PA/fakebin"; printf '#!/bin/sh\necho "ssh $*" >>"%s/ssh.calls"; exit 255\n' "$PA" >"$PA/fakebin/ssh"; chmod +x "$PA/fakebin/ssh"

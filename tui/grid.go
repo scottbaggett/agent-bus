@@ -127,14 +127,14 @@ func (m model) tiles() ([]tile, []laneGroup) {
 		}
 		all = keep
 	}
-	byLane := map[string]*laneGroup{}
+	byKey := map[string]*laneGroup{}
 	var order []string
 	for i, t := range all {
-		l := t.seat.Lane
-		g := byLane[l]
+		l := m.groupBy.key(t)
+		g := byKey[l]
 		if g == nil {
 			g = &laneGroup{name: l}
-			byLane[l] = g
+			byKey[l] = g
 			order = append(order, l)
 		}
 		g.tiles = append(g.tiles, i)
@@ -144,7 +144,7 @@ func (m model) tiles() ([]tile, []laneGroup) {
 		}
 	}
 	sort.SliceStable(order, func(i, j int) bool {
-		a, b := byLane[order[i]], byLane[order[j]]
+		a, b := byKey[order[i]], byKey[order[j]]
 		if (a.name == "") != (b.name == "") {
 			return b.name == ""
 		}
@@ -156,7 +156,7 @@ func (m model) tiles() ([]tile, []laneGroup) {
 	var tiles []tile
 	var groups []laneGroup
 	for _, l := range order {
-		g := byLane[l]
+		g := byKey[l]
 		// Within a lane: needs you first, then most recent.
 		sort.SliceStable(g.tiles, func(i, j int) bool {
 			a, b := all[g.tiles[i]], all[g.tiles[j]]
@@ -227,7 +227,7 @@ func (m model) gridLayout(w int) ([]string, []placed) {
 		x0 := shelfX + gap
 		name := g.name
 		if name == "" {
-			name = "no lane"
+			name = m.groupBy.emptyLabel()
 		}
 		head := sHeader.Render(name)
 		if g.needs > 0 {

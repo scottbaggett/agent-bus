@@ -77,6 +77,7 @@ type model struct {
 	openItems  []openItem
 	openSel    int
 	query      string // "/" search over the grid
+	groupBy    groupBy
 }
 
 type snapMsg struct {
@@ -494,6 +495,10 @@ func (m model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.startSearch()
 	case "O":
 		return m.startOffboard()
+	case "g":
+		m.groupBy = (m.groupBy + 1) % groupModes
+		m.cursor[paneAgents] = 0
+		m.setStatus("grouped by " + m.groupBy.String())
 	case "esc":
 		if m.query != "" {
 			m.query = ""
@@ -666,8 +671,7 @@ func (m model) box(title, body string, w, h int, focus bool) string {
 }
 
 func (m model) headerView() string {
-	host, _ := os.Hostname()
-	host = strings.TrimSuffix(strings.SplitN(host, ".", 2)[0], ".local")
+	host := localHost()
 	tiles, _ := m.tiles()
 	agents := 0
 	for _, t := range tiles {
@@ -753,7 +757,7 @@ func (m model) footerView() string {
 	if m.err != nil {
 		return lipgloss.NewStyle().Foreground(cBad).Render(fit(" refresh failed: "+m.err.Error(), m.w))
 	}
-	keys := []string{"arrows or click: pick an agent", "/: search", "enter: details", "o: open in…", "c: timeline & chat", "O: offboard", "?: help", "q: quit"}
+	keys := []string{"arrows or click: pick an agent", "/: search", "enter: details", "o: open in…", "c: timeline & chat", "O: offboard", "g: grouped by " + m.groupBy.String(), "?: help", "q: quit"}
 	if m.query != "" {
 		keys = append([]string{sAccent.Render("/" + m.query), "esc: clear"}, keys[1:]...)
 	}
@@ -788,6 +792,7 @@ func (m model) helpView() string {
 		"  c                its timeline: everything it sent, got, closed or decided;",
 		"                   ↑↓ moves through it, and you can message it from there",
 		"  o                open its folder in Finder, Zed, Cursor… or its ports in a browser",
+		"  g                group by lane, tool, repo, Mac, or nothing",
 		"  O                offboard it: ask it to hand on or close its work",
 		"                   and run agent-bus offboard",
 		"",

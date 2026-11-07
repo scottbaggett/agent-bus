@@ -144,3 +144,24 @@ func openEditor(dir string) error {
 }
 
 func openURL(u string) error { return exec.Command("open", u).Start() }
+
+// ownPorts is what runs from this agent's folder and no other agent's: when
+// agents share a folder, their shared ports say nothing about which is which.
+func (m model) ownPorts(s Seat) []service {
+	if m.snap == nil {
+		return nil
+	}
+	owners := map[int]int{}
+	for _, o := range m.snap.Seats {
+		for _, svc := range m.servicesFor(o) {
+			owners[svc.Port]++
+		}
+	}
+	var out []service
+	for _, svc := range m.servicesFor(s) {
+		if owners[svc.Port] <= 1 {
+			out = append(out, svc)
+		}
+	}
+	return out
+}

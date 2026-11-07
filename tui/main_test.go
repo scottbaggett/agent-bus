@@ -118,32 +118,46 @@ func TestNamesMatchTheCLI(t *testing.T) {
 	}
 }
 
-func TestFuzzySearch(t *testing.T) {
+func TestSearchFilters(t *testing.T) {
 	for _, c := range []struct {
 		hay, term string
 		want      bool
 	}{
-		{"bold mantis", "bm", true},
-		{"bold mantis", "mant", true},
 		{"wiring the invoices api", "inv", true},
+		{"feature/salt-9473-fix", "9473", true},
+		{":3003 :3107", "3003", true},
+		{"salt-mobile-native", "salt-mobile", true},
+		{"salt-monorepo", "repo", false}, // not a word start
 		{"bold mantis", "ae", false},
-		{"salt-9473", "9473", true},
 	} {
-		if got := fuzzy(c.hay, c.term); got != c.want {
-			t.Errorf("fuzzy(%q, %q) = %v", c.hay, c.term, got)
+		if got := wordPrefix(c.hay, c.term); got != c.want {
+			t.Errorf("wordPrefix(%q, %q) = %v", c.hay, c.term, got)
 		}
+	}
+	if !initials("bold mantis", "bm") || initials("bold mantis", "mb") {
+		t.Error("initials")
 	}
 	m := newModel()
 	m.snap = &Snapshot{Seats: []Seat{
-		{Addr: "codex/api.1", Tool: "codex", Focus: "Wiring the invoices API", Branch: "feature/salt-1234"},
-		{Addr: "claude/web.2", Tool: "claude", Focus: "Landing page copy"},
+		{Addr: "codex/api.1", Tool: "codex", Repo: "salt", Focus: "Wiring the invoices API", Branch: "feature/salt-1234"},
+		{Addr: "claude/web.2", Tool: "claude", Repo: "salt", Focus: "Landing page copy"},
+		{Addr: "claude/mobile-native.3", Tool: "claude", Repo: "salt"},
 	}}
-	m.query = "invoice 1234"
-	if tiles, _ := m.tiles(); len(tiles) != 1 || tiles[0].seat.Addr != "codex/api.1" {
-		t.Fatalf("search: %+v", tiles)
-	}
-	m.query = friendlyName("claude/web.2")
-	if tiles, _ := m.tiles(); len(tiles) != 1 || tiles[0].seat.Addr != "claude/web.2" {
-		t.Fatalf("search by name: %+v", tiles)
+	for q, want := range map[string][]string{
+		"invoice 1234":               {"codex/api.1"},
+		friendlyName("claude/web.2"): {"claude/web.2"},
+		"mobile":                     {"claude/mobile-native.3"},
+		"claude":                     nil,             // the tool is shared, not a filter
+		"salt":                       {"codex/api.1"}, // repo ignored; branch matches
+	} {
+		m.query = q
+		tiles, _ := m.tiles()
+		var got []string
+		for _, t := range tiles {
+			got = append(got, t.seat.Addr)
+		}
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Errorf("search %q: got %v, want %v", q, got, want)
+		}
 	}
 }

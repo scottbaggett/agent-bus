@@ -49,8 +49,17 @@ func (m model) needs() map[string][]need {
 	for _, it := range m.snap.Open {
 		subj[it.ID] = it
 	}
+	live := map[string]bool{}
+	for _, s := range m.snap.Seats {
+		live[s.Addr] = true
+	}
 	for _, a := range m.snap.Attention {
 		if a.Kind != "needs-you" || a.From == "" || a.ID == "" || seen[a.ID] {
+			continue
+		}
+		// A stale ask from an agent that has exited can't be acted on: answering
+		// reaches no one. It stays in `agent-bus triage`, not on the grid.
+		if it, ok := subj[a.ID]; ok && it.Stale && !live[a.From] {
 			continue
 		}
 		seen[a.ID] = true

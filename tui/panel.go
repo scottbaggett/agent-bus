@@ -90,6 +90,8 @@ func (m model) panelView(w, h int) string {
 		foot = []string{sAccent.Render("Your answer to " + friendlyName(s.Addr)), m.input.View()}
 	case modeConfirm:
 		foot = []string{lipgloss.NewStyle().Foreground(cWarn).Render(fit("Close it?  y done · c canceled · n denied", inner))}
+	case modeOffboard:
+		foot = []string{offboardPrompt(friendlyName(s.Addr), inner)}
 	case modeOpen:
 		foot = append(foot, sAccent.Render("Open in…"))
 		for i, it := range m.openItems {

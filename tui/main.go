@@ -73,6 +73,12 @@ type model struct {
 	titlesAt   time.Time
 	services   []service
 	servicesAt time.Time
+	apps       map[string]hostApp // addr -> the app it runs in
+	notified   map[string]bool    // asks already announced
+	lastClick  struct {
+		addr string
+		at   time.Time
+	}
 	scanning   bool
 	openItems  []openItem
 	openSel    int
@@ -115,7 +121,7 @@ func newModel() model {
 	ti := textinput.New()
 	ti.CharLimit = 4000
 	ti.Prompt = ""
-	return model{loading: true, input: ti, seen: map[string]time.Time{}, bodies: map[string]string{}, titles: map[string]string{}}
+	return model{loading: true, input: ti, seen: map[string]time.Time{}, bodies: map[string]string{}, titles: map[string]string{}, apps: map[string]hostApp{}, groupBy: loadGroupBy()}
 }
 
 func (m model) Init() tea.Cmd { return tea.Batch(loadCmd(), tick(), scanServicesCmd()) }
@@ -168,6 +174,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case titlesMsg:
 		m.titles = msg
+		return m, nil
+
+	case appsMsg:
+		m.apps = msg
+		return m, nil
+
+	case appFocused:
+		if msg.err != nil {
+			m.setStatus("✗ could not bring " + msg.name + " forward: " + msg.err.Error())
+		}
 		return m, nil
 
 	case servicesMsg:
@@ -243,6 +259,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.scanning && time.Since(m.servicesAt) > 10*time.Second {
 			m.scanning = true
 			cmd = tea.Batch(cmd, scanServicesCmd())
+			if m.snap != nil {
+				cmd = tea.Batch(cmd, scanAppsCmd(m.snap.Seats))
+			}
 		}
 		if m.status != "" && time.Since(m.statusAt) > 6*time.Second {
 			m.status = ""
@@ -258,6 +277,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.err = nil
 		first := m.snap == nil
+		// Keep the same agent selected (and in the panel) as the grid reshuffles.
+		var keep string
+		if t, ok := m.selectedTile(); ok {
+			keep = t.seat.Addr
+		}
 		m.snap = msg.s
 		m.stamp = ledgerStamp(msg.s.Bus)
 		for _, e := range msg.s.Recent {
@@ -270,7 +294,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.clamp()
-		cmds := []tea.Cmd{m.loadPanelBody()}
+		if keep != "" {
+			if tiles, _ := m.tiles(); len(tiles) > 0 {
+				for i, t := range tiles {
+					if t.seat.Addr == keep {
+						m.cursor[paneAgents] = i
+					}
+				}
+			}
+		}
+		if m.panelW() > 0 {
+			if t, ok := m.selectedTile(); ok && t.seat.Addr == m.panel.seat.Addr {
+				m.panel = t
+			} else if m.mode == modePanel {
+				// Its agent left the grid; the panel goes with it.
+				m.mode = modeNormal
+			}
+		}
+		cmds := []tea.Cmd{m.loadPanelBody(), notifyCmd(m.newNeeds(first))}
+		if first {
+			cmds = append(cmds, scanAppsCmd(msg.s.Seats))
+		}
 		if time.Since(m.titlesAt) > 30*time.Second {
 			m.titlesAt = time.Now()
 			cmds = append(cmds, loadTitlesCmd(msg.s.Seats))
@@ -387,7 +431,20 @@ func (m model) mouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		if m.mode == modeReply || m.mode == modeConfirm || m.mode == modeOffboard {
 			m.input.Blur()
 		}
+		// A second click on the same agent brings its app forward.
+		if t, ok := m.selectedTile(); ok {
+			double := m.lastClick.addr == t.seat.Addr && time.Since(m.lastClick.at) < 500*time.Millisecond
+			m.lastClick.addr, m.lastClick.at = t.seat.Addr, time.Now()
+			if double {
+				mm, _ := m.openPanel()
+				return mm.(model).jumpToApp()
+			}
+		}
 		return m.openPanel()
+	}
+	// The panel's top (the bot, its name and the app button) also brings it forward.
+	if pw := m.panelW(); pw > 0 && msg.X >= m.w-pw && msg.Y >= 2 && msg.Y <= 9 {
+		return m.jumpToApp()
 	}
 	return m, nil
 }
@@ -468,7 +525,12 @@ func (m model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.target, m.mode = n, modeConfirm
 			}
 			return m, nil
-		case "c", "enter":
+		case "enter":
+			if _, ok := m.appOf(m.panel); ok {
+				return m.jumpToApp()
+			}
+			return m, m.openChat(m.panel.seat, m.panel.peer)
+		case "c":
 			return m, m.openChat(m.panel.seat, m.panel.peer)
 		case "o":
 			return m.startOpen(m.panel)
@@ -492,6 +554,7 @@ func (m model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.openActivity()
 	case "g":
 		m.groupBy = (m.groupBy + 1) % groupModes
+		saveGroupBy(m.groupBy)
 		m.cursor[paneAgents] = 0
 		m.setStatus("grouped by " + m.groupBy.String())
 	case "esc":
@@ -722,7 +785,7 @@ func (m model) footerView() string {
 	case modeOpen:
 		keys = []string{"↑↓ or number: pick", "enter: open", "esc: back"}
 	case modePanel:
-		keys = []string{"↑↓ item", "r answer", "x close it", "c timeline & chat", "o open in…", "O offboard", "←→ next agent", "esc back"}
+		keys = []string{"⏎ or click: go to its app", "↑↓ item", "r answer", "x close it", "c timeline & chat", "o open in…", "O offboard", "←→ next agent", "esc back"}
 	case modeReply:
 		keys = []string{"enter sends and closes it", "esc cancels"}
 	case modeOffboard:
@@ -741,13 +804,14 @@ func (m model) helpView() string {
 		"Actions run agent-bus as you (@lead).",
 		"",
 		"  arrows / click   pick an agent",
-		"  enter            open what it needs from you",
+		"  enter            its panel: what it needs from you; enter again (or",
+		"                   double-click its tile) brings its app to the front",
 		"  /                search: name, focus, ticket, branch, port (fuzzy)",
 		"  c                its timeline: everything it sent, got, closed or decided;",
 		"                   ↑↓ moves through it, and you can message it from there",
 		"  o                open its folder in Finder, Zed, Cursor… or its ports in a browser",
 		"  a                all activity: every message, close and decision on the bus",
-		"  g                group by lane, tool, repo, Mac, or nothing",
+		"  g                group by repo, lane, tool, Mac, or nothing (remembered)",
 		"  O                offboard it: ask it to hand on or close its work",
 		"                   and run agent-bus offboard",
 		"",

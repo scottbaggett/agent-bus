@@ -30,6 +30,7 @@ type Seat struct {
 	Cwd     string `json:"cwd"`
 	Session string `json:"session"`
 	Focus   string `json:"focus"`
+	PID     int    `json:"pid"`
 	Epoch   int64  `json:"epoch"`
 	Avatar  struct {
 		Color string `json:"color"`

@@ -1,26 +1,67 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
-// g cycles how the grid groups agents: by lane, by tool, by repo, by Mac, or
-// not at all.
+// g cycles how the grid groups agents: by repo (the default: every agent has
+// one), lane, tool, Mac, or not at all. The choice is remembered.
 
 type groupBy int
 
 const (
-	byLane groupBy = iota
+	byRepo groupBy = iota
+	byLane
 	byTool
-	byRepo
 	byMac
 	byNone
 	groupModes
 )
 
 func (g groupBy) String() string {
-	return [...]string{"lane", "tool", "repo", "Mac", "nothing"}[g]
+	return [...]string{"repo", "lane", "tool", "Mac", "nothing"}[g]
+}
+
+// prefsFile keeps the TUI's own settings, apart from the bus.
+func prefsFile() string {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(dir, "agent-bus", "tui.json")
+}
+
+type prefs struct {
+	GroupBy string `json:"group_by"`
+}
+
+func loadGroupBy() groupBy {
+	b, err := os.ReadFile(prefsFile())
+	if err != nil {
+		return byRepo
+	}
+	var p prefs
+	if json.Unmarshal(b, &p) != nil {
+		return byRepo
+	}
+	for g := groupBy(0); g < groupModes; g++ {
+		if g.String() == p.GroupBy {
+			return g
+		}
+	}
+	return byRepo
+}
+
+func saveGroupBy(g groupBy) {
+	f := prefsFile()
+	if f == "" || os.MkdirAll(filepath.Dir(f), 0o755) != nil {
+		return
+	}
+	b, _ := json.Marshal(prefs{GroupBy: g.String()})
+	_ = os.WriteFile(f, b, 0o644)
 }
 
 func toolLabel(t string) string {
@@ -48,7 +89,14 @@ func (g groupBy) key(t tile) string {
 	case byTool:
 		return toolLabel(toolOf(t.seat))
 	case byRepo:
-		return t.seat.Repo
+		if r := t.seat.Repo; r != "" && r != "-" {
+			return r
+		}
+		// Not a git checkout: its folder's name is the best guess at the project.
+		if c := strings.TrimRight(t.seat.Cwd, "/"); c != "" && c != homeDir() {
+			return filepath.Base(c)
+		}
+		return ""
 	case byMac:
 		if t.peer != "" {
 			return t.peer

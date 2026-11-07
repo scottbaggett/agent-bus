@@ -179,6 +179,18 @@ assert_eq "snapshot carries focus" "Wiring the invoices API" \
 assert_eq "focus survives the seat's other commands" "Wiring the invoices API" "$(raw_seat foc1 codex focwt focus)"
 assert_has "a seat without a focus is asked for one" "agent-bus focus" "$(raw_seat foc2 claude focwt2 digest 2>/dev/null)"
 assert_lacks "a seat with a focus is not asked again" "agent-bus focus \"" "$(raw_seat foc1 codex focwt digest 2>/dev/null)"
+# offboard: the seat stands down and leaves who/snapshot until it takes new work.
+raw_seat off1 claude offwt focus "Done with the docs pass" >/dev/null
+raw_seat off1 claude offwt offboard >/dev/null
+assert_lacks "an offboarded seat leaves who" "offwt" "$(raw_seat off1 claude offwt who)"
+assert_eq "an offboarded seat leaves the snapshot" "" "$("$BIN" snapshot | jq -r '.seats[] | select(.wt == "offwt") | .addr')"
+raw_seat off1 claude offwt read --peek >/dev/null
+assert_eq "reading does not bring it back" "" "$("$BIN" snapshot | jq -r '.seats[] | select(.wt == "offwt") | .addr')"
+AGENT_BUS_VIA=hook raw_seat off1 claude offwt digest >/dev/null 2>&1
+assert_eq "a new prompt brings it back" "offwt" "$("$BIN" snapshot | jq -r '.seats[] | select(.wt == "offwt") | .wt')"
+raw_seat off1 claude offwt offboard >/dev/null
+raw_seat off1 claude offwt focus "Picking up the API docs" >/dev/null
+assert_eq "a new focus brings it back" "offwt" "$("$BIN" snapshot | jq -r '.seats[] | select(.wt == "offwt") | .wt')"
 nm=$("$BIN" avatar codex/api.1 | tail -1)
 assert_has "every seat has a stable name" "· codex/api.1" "$nm"
 assert_eq "the same name every time" "$nm" "$("$BIN" avatar codex/api.1 | tail -1)"

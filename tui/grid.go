@@ -379,7 +379,7 @@ func (m model) renderTile(t tile, selected bool, needs int) string {
 		doing = append(doing, "")
 	}
 	metaLine := sDim.Render(shrink(meta))
-	if svc := m.servicesFor(s); len(svc) > 0 {
+	if svc := m.ownPorts(s); len(svc) > 0 {
 		p := ports(svc)
 		metaLine = lipgloss.NewStyle().Foreground(cGood).Render(shrink(p)) + sDim.Render(" · "+ago(m.snap.Now, s.Epoch))
 		if lipgloss.Width(metaLine) > tileInner {

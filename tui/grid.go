@@ -368,7 +368,8 @@ func (m model) renderTile(t tile, selected bool, needs int) string {
 	case t.peer != "":
 		meta = t.peer + " · " + meta
 	}
-	if on := workingOn(s); on != "" && !t.gone {
+	// What it's on, unless the group heading already says it.
+	if on := workingOn(s); on != "" && !t.gone && on != m.groupBy.key(t) {
 		meta = on + " · " + meta
 	}
 	center := func(st string) string { return lipgloss.PlaceHorizontal(tileInner, lipgloss.Center, st) }

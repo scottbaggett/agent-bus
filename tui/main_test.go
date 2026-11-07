@@ -152,3 +152,9 @@ func TestFuzzySearch(t *testing.T) {
 		t.Fatalf("search by name: %+v", tiles)
 	}
 }
+
+func TestWorkingOnHidesUnknown(t *testing.T) {
+	if got := workingOn(Seat{Branch: "-", Repo: "-"}); got != "" {
+		t.Errorf("got %q", got)
+	}
+}

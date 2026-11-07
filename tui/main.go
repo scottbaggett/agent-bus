@@ -147,16 +147,9 @@ func (m model) panelW() int {
 	return w
 }
 
-func (m model) feedH() int {
-	if m.h < 30 {
-		return 0
-	}
-	return 6
-}
-
 // gridSize is the grid's inner width and height, inside its box.
 func (m model) gridSize() (int, int) {
-	return m.w - m.panelW() - 4, m.h - 2 /* header+footer */ - m.feedH() - 2 /* box */ - 1 /* selected line */
+	return m.w - m.panelW() - 4, m.h - 2 /* header+footer */ - 2 /* box */ - 1 /* selected line */
 }
 
 // ---- update
@@ -495,6 +488,8 @@ func (m model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.startSearch()
 	case "O":
 		return m.startOffboard()
+	case "a":
+		return m, m.openActivity()
 	case "g":
 		m.groupBy = (m.groupBy + 1) % groupModes
 		m.cursor[paneAgents] = 0
@@ -640,9 +635,6 @@ func (m model) View() string {
 		body = lipgloss.JoinHorizontal(lipgloss.Top, body, m.panelView(pw, gh+3))
 	}
 	parts := []string{m.headerView(), body}
-	if fh := m.feedH(); fh > 0 {
-		parts = append(parts, m.box("LIVE", m.feedBody(m.w-4, fh-2), m.w, fh, false))
-	}
 	parts = append(parts, m.footerView())
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
@@ -706,44 +698,6 @@ func (m model) headerView() string {
 	return left + strings.Repeat(" ", gap) + right
 }
 
-func (m model) feedBody(w, h int) string {
-	if len(m.snap.Recent) == 0 {
-		return sDim.Render("quiet")
-	}
-	var b []string
-	for _, e := range m.snap.Recent {
-		if len(b) >= h {
-			break
-		}
-		t := time.Unix(e.Epoch, 0).Format("15:04")
-		var what string
-		switch e.Kind {
-		case "msg":
-			arrow := clean(e.From) + " → " + clean(e.To)
-			st := e.State
-			if e.Close != "" {
-				st = "closed " + e.Close
-			}
-			what = arrow + "  " + kindStyle(e.State).Render(st) + "  " + clean(e.Subject)
-		case "resolve":
-			what = clean(e.From) + "  " + lipgloss.NewStyle().Foreground(cGood).Render("closed "+e.Reason) + "  " + clean(e.Subject)
-		case "delivery":
-			what = "→ " + clean(e.To) + "  " + sDim.Render(e.Status+" via "+e.Transport) + "  " + clean(e.Subject)
-		case "decision":
-			what = clean(e.From) + "  " + sAccent.Render("decided") + "  " + clean(e.Subject)
-		default:
-			what = clean(e.From) + "  " + e.Kind + "  " + clean(e.Subject)
-		}
-		mark := "  "
-		if at := m.seen[e.ID+e.Kind]; !at.IsZero() && time.Since(at) < 20*time.Second {
-			mark = sAccent.Render("•") + " "
-		}
-		line := mark + sDim.Render(t) + "  " + fit(what, w-9)
-		b = append(b, line)
-	}
-	return strings.Join(b, "\n")
-}
-
 func (m model) footerView() string {
 	if m.status != "" {
 		st := sText
@@ -757,7 +711,7 @@ func (m model) footerView() string {
 	if m.err != nil {
 		return lipgloss.NewStyle().Foreground(cBad).Render(fit(" refresh failed: "+m.err.Error(), m.w))
 	}
-	keys := []string{"arrows or click: pick an agent", "/: search", "enter: details", "o: open in…", "c: timeline & chat", "O: offboard", "g: grouped by " + m.groupBy.String(), "?: help", "q: quit"}
+	keys := []string{"arrows or click: pick an agent", "/: search", "enter: details", "o: open in…", "c: timeline & chat", "a: all activity", "O: offboard", "g: grouped by " + m.groupBy.String(), "?: help", "q: quit"}
 	if m.query != "" {
 		keys = append([]string{sAccent.Render("/" + m.query), "esc: clear"}, keys[1:]...)
 	}
@@ -792,6 +746,7 @@ func (m model) helpView() string {
 		"  c                its timeline: everything it sent, got, closed or decided;",
 		"                   ↑↓ moves through it, and you can message it from there",
 		"  o                open its folder in Finder, Zed, Cursor… or its ports in a browser",
+		"  a                all activity: every message, close and decision on the bus",
 		"  g                group by lane, tool, repo, Mac, or nothing",
 		"  O                offboard it: ask it to hand on or close its work",
 		"                   and run agent-bus offboard",

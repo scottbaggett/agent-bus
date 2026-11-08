@@ -424,6 +424,9 @@ func (m model) renderTile(t tile, selected bool, needs int) string {
 	if t.gone {
 		dot = ""
 	}
+	if st := stageChip(s.Stage); st != "" && m.groupBy != byStage {
+		meta = st + " · " + meta
+	}
 	metaLine := dot + sDim.Render(fit(meta, min(tileInner-lipgloss.Width(dot), lipgloss.Width(meta))))
 	if svc := m.ownPorts(s); len(svc) > 0 {
 		p := ports(svc)
@@ -660,4 +663,19 @@ func (m model) peerHealth(p Peer) string {
 		return p.Name + sDim.Render(" ✓ "+ago(m.snap.Now, p.Synced))
 	}
 	return p.Name + sDim.Render(" not synced yet")
+}
+
+// stageChip is a short word for where its work stands, on the tile.
+func stageChip(s string) string {
+	switch s {
+	case "review":
+		return "review"
+	case "blocked":
+		return "blocked"
+	case "parked":
+		return "parked"
+	case "done":
+		return "done"
+	}
+	return ""
 }

@@ -35,8 +35,11 @@ type Seat struct {
 	// own window) or idle.
 	Activity   string `json:"activity"`
 	ActivityAt int64  `json:"activity_at"`
-	Epoch      int64  `json:"epoch"`
-	Avatar     struct {
+	// Stage is where its work stands, as it said: in-progress, review,
+	// blocked, parked or done.
+	Stage  string `json:"stage"`
+	Epoch  int64  `json:"epoch"`
+	Avatar struct {
 		Color string `json:"color"`
 	} `json:"avatar"`
 }

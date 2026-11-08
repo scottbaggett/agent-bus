@@ -14,6 +14,7 @@ type groupBy int
 
 const (
 	byRepo groupBy = iota
+	byStage
 	byLane
 	byTool
 	byMac
@@ -22,7 +23,7 @@ const (
 )
 
 func (g groupBy) String() string {
-	return [...]string{"repo", "lane", "tool", "Mac", "nothing"}[g]
+	return [...]string{"repo", "stage", "lane", "tool", "Mac", "nothing"}[g]
 }
 
 // prefsFile keeps the TUI's own settings, apart from the bus.
@@ -104,6 +105,8 @@ func (g groupBy) key(t tile) string {
 		return localHost()
 	case byNone:
 		return ""
+	case byStage:
+		return stageLabel(t.seat.Stage)
 	}
 	return t.seat.Lane
 }
@@ -114,6 +117,24 @@ func (g groupBy) emptyLabel() string {
 		return "no repo"
 	case byNone:
 		return "agents"
+	case byStage:
+		return "no stage set"
 	}
 	return "no lane"
+}
+
+func stageLabel(s string) string {
+	switch s {
+	case "in-progress":
+		return "In progress"
+	case "review":
+		return "Ready for review"
+	case "blocked":
+		return "Blocked"
+	case "parked":
+		return "Parked"
+	case "done":
+		return "Done"
+	}
+	return ""
 }

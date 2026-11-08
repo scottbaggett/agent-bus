@@ -177,6 +177,10 @@ assert_has "who shows a seat's focus" "Wiring the invoices API" "$(raw_seat foc1
 assert_eq "snapshot carries focus" "Wiring the invoices API" \
   "$("$BIN" snapshot | jq -r '.seats[] | select(.wt == "focwt") | .focus')"
 assert_eq "focus survives the seat's other commands" "Wiring the invoices API" "$(raw_seat foc1 codex focwt focus)"
+assert_has "focus takes a stage" "[review]" "$(raw_seat foc1 codex focwt focus --stage needs-review)"
+assert_eq "the stage keeps the focus and is in the snapshot" "Wiring the invoices API review" \
+  "$("$BIN" snapshot | jq -r '.seats[] | select(.wt == "focwt") | "\(.focus) \(.stage)"')"
+assert_has "an unknown stage is refused" "in-progress, review" "$(raw_seat foc1 codex focwt focus --stage soon 2>&1 || true)"
 assert_has "a seat without a focus is asked for one" "agent-bus focus" "$(raw_seat foc2 claude focwt2 digest 2>/dev/null)"
 assert_lacks "a seat with a focus is not asked again" "agent-bus focus \"" "$(raw_seat foc1 codex focwt digest 2>/dev/null)"
 # offboard: the seat stands down and leaves who/snapshot until it takes new work.

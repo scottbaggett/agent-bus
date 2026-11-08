@@ -45,6 +45,9 @@ func (m model) panelView(w, h int) string {
 		if strings.TrimSpace(s.Focus) == "" {
 			label = "Session"
 		}
+		if st := stageLabel(s.Stage); st != "" {
+			label += " · " + st
+		}
 		b = append(b, sDim.Render(label), lipgloss.NewStyle().Width(inner).Render(d), "")
 	}
 	if svc := m.servicesFor(s); len(svc) > 0 {

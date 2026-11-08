@@ -272,7 +272,7 @@ server_pid() {
 touch_seat() {
   local f="$BUS/seats/$SEAT.json" now last_hook=0 socket="" codex_queue=""
   local grok_webhook="" grok_secret_env="" pid="" old_pid="" old_session="" focus="" focus_at=0 offboarded=0
-  local activity="" activity_at=0
+  local activity="" activity_at=0 stage=""
   now=$(now_epoch)
   if [ -f "$f" ]; then
     IFS=$'\t' read -r last_hook old_pid old_session < <(jq -r \
@@ -284,6 +284,7 @@ touch_seat() {
     focus=$(jq -r '.focus // ""' "$f" 2>/dev/null); focus_at=$(jq -r '.focus_at // 0' "$f" 2>/dev/null)
     offboarded=$(jq -r '.offboarded // 0' "$f" 2>/dev/null)
     activity=$(jq -r '.activity // ""' "$f" 2>/dev/null); activity_at=$(jq -r '.activity_at // 0' "$f" 2>/dev/null)
+    stage=$(jq -r '.stage // ""' "$f" 2>/dev/null)
   fi
   # Hooks say what the agent is doing right now: working, waiting (on you, in
   # its own window) or idle.
@@ -312,7 +313,7 @@ touch_seat() {
     --argjson last_hook "${last_hook:-0}" --arg lane "$LANE" --arg lane_src "${LANE_SRC:-unfiled}" \
     --arg grok_webhook "$grok_webhook" --arg grok_secret_env "$grok_secret_env" --arg pid "$pid" --arg spid "${spid:-}" \
     --arg focus "$focus" --arg focus_at "${focus_at:-0}" --arg offboarded "${offboarded:-0}" \
-    --arg activity "$activity" --arg activity_at "${activity_at:-0}" \
+    --arg activity "$activity" --arg activity_at "${activity_at:-0}" --arg stage "$stage" \
     '{addr:$addr,tool:$tool,repo:$repo,repo_id:$repo_id,wt:$wt,branch:$branch,cwd:$cwd,
       session:$session,socket:$socket,codex_queue:$codex_queue,epoch:$epoch,last_hook:$last_hook,lane:$lane,
       lane_src:$lane_src,pid:($pid | tonumber? // null)}
@@ -320,6 +321,7 @@ touch_seat() {
      + (if $focus != "" then {focus:$focus,focus_at:($focus_at | tonumber? // 0)} else {} end)
      + (if ($offboarded | tonumber? // 0) > 0 then {offboarded:($offboarded | tonumber)} else {} end)
      + (if $activity != "" then {activity:$activity,activity_at:($activity_at | tonumber? // 0)} else {} end)
+     + (if $stage != "" then {stage:$stage} else {} end)
      + (if $grok_webhook != "" then {grok_webhook:$grok_webhook,grok_secret_env:$grok_secret_env} else {} end)' >"$tmpf" \
     && mv "$tmpf" "$f" || rm -f "$tmpf"
   # The waiting marker (see cmd_activity) follows the activity.
@@ -1308,16 +1310,39 @@ use_color() { [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-}" != dumb ]; }
 # `agent-bus focus "<one line>"`: what this seat is working on, for your user
 # and the other agents (who, the TUI). Shown until the session ends.
 cmd_focus() {
-  local f="$BUS/seats/$SEAT.json" text
-  if [ $# -eq 0 ]; then
-    jq -r '.focus // "(no focus set; agent-bus focus \"<one line>\")"' "$f" 2>/dev/null | sanitize; return 0
+  local f="$BUS/seats/$SEAT.json" text="" stage="" words=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --stage) [ $# -ge 2 ] || die "focus: --stage needs a value"; stage="$2"; shift 2 ;;
+      --stage=*) stage="${1#--stage=}"; shift ;;
+      *) words+=("$1"); shift ;;
+    esac
+  done
+  if [ ${#words[@]} -eq 0 ] && [ -z "$stage" ]; then
+    jq -r '(.focus // "(no focus set; agent-bus focus \"<one line>\")") + (if (.stage // "") != "" then "  [\(.stage)]" else "" end)' "$f" 2>/dev/null | sanitize; return 0
   fi
-  text=$(printf '%s' "$*" | tr '\n\t' '  ' | tr -d '\000-\037' | cut -c1-120)
-  [ -n "${text// /}" ] || die "focus: say what you're working on in one line"
+  # Where the work stands. Close spellings are accepted and stored as one word.
+  if [ -n "$stage" ]; then
+    stage=$(printf '%s' "$stage" | tr '[:upper:]_ ' '[:lower:]--')
+    case "$stage" in
+      in-progress|working|active|wip) stage=in-progress ;;
+      review|in-review|needs-review|ready-for-review) stage=review ;;
+      blocked|needs-input|needs-you|waiting) stage=blocked ;;
+      parked|paused|on-hold|hold|deferred) stage=parked ;;
+      done|complete|completed|finished|merged|shipped) stage=done ;;
+      *) die "focus: --stage is in-progress, review, blocked, parked or done" ;;
+    esac
+  fi
+  if [ ${#words[@]} -gt 0 ]; then
+    text=$(printf '%s' "${words[*]}" | tr '\n\t' '  ' | tr -d '\000-\037' | cut -c1-120)
+    [ -n "${text// /}" ] || die "focus: say what you're working on in one line"
+  fi
   touch_seat; seat_offboarded 0
   local tmpf; tmpf=$(mktemp "${f}.XXXXXX")
-  jq -c --arg t "$text" --argjson at "$(now_epoch)" '. + {focus: $t, focus_at: $at}' "$f" >"$tmpf" && mv "$tmpf" "$f"
-  printf 'focus: %s (%s)\n' "$text" "$(seat_name "$ADDR")"
+  jq -c --arg t "$text" --arg st "$stage" --argjson at "$(now_epoch)" \
+    '(if $t != "" then . + {focus: $t, focus_at: $at} else . end) | (if $st != "" then . + {stage: $st} else . end)' "$f" >"$tmpf" && mv "$tmpf" "$f"
+  [ -n "$text" ] || text=$(jq -r '.focus // ""' "$f")
+  printf 'focus: %s%s (%s)\n' "${text:-(none)}" "${stage:+ [$stage]}" "$(seat_name "$ADDR")"
 }
 
 # `agent-bus activity <working|waiting|idle|notify>`, for hooks. `notify`
@@ -1846,7 +1871,7 @@ peer_health() { # host ok|fail errfile
 peer_seats_json() {
   local now; now=$(now_epoch)
   seat_rows | jq -c --argjson cut "$(( now - SEAT_TTL ))" --argjson codex_cut "$(( now - CODEX_MAX_IDLE_TTL ))" \
-    "$JQ_SEAT_LIVE"'select(buslive($cut; $codex_cut)) | {addr, tool, repo, branch, epoch, lane: (.lane // ""), focus: (.focus // ""), activity: (.activity // ""), activity_at: (.activity_at // 0)}' | jq -cs .
+    "$JQ_SEAT_LIVE"'select(buslive($cut; $codex_cut)) | {addr, tool, repo, branch, epoch, lane: (.lane // ""), focus: (.focus // ""), activity: (.activity // ""), activity_at: (.activity_at // 0), stage: (.stage // "")}' | jq -cs .
 }
 peer_seats_file() { printf '%s/state/peer.%s.seats.json' "$BUS" "$1"; }
 peer_fetch_seats() { # host
@@ -2691,7 +2716,7 @@ snapshot_json() {
     "$JQ_SEAT_LIVE"'[.[] | select(buslive($cut; $codex_cut) and (.tool // "") != "lead")
       | {addr, tool, repo, repo_id, wt, branch, cwd: (.cwd // ""), pid: (.pid // null), session: (.session // ""),
          focus: (.focus // ""), focus_at: (.focus_at // 0),
-         activity: (.activity // ""), activity_at: (.activity_at // 0),
+         activity: (.activity // ""), activity_at: (.activity_at // 0), stage: (.stage // ""),
          lane: (.lane // ""), lane_src: (.lane_src // ""),
          epoch: ((.epoch // 0) | tonumber? // 0), last_hook: ((.last_hook // 0) | tonumber? // 0),
          scope: ((.tool // "") + "/" + (.wt // "")),
@@ -3413,7 +3438,9 @@ agent-bus — handoff bus for coding agents sharing repos and worktrees.
   offboard                    stand down: PM role and claims released, open
                               items listed
   log [n]                     recent packets and closes
-  focus ["<one line>"]        say what you are working on (your user sees it in who and the TUI)
+  focus ["<one line>"] [--stage <s>]
+                              say what you are working on (your user sees it in who and the TUI);
+                              --stage: in-progress, review, blocked, parked or done
   activity <state>            for hooks: working, waiting (on you, in its window), idle, or notify
   tui                         live view: agents here and on linked Macs, what needs you,
                               open work, a live feed; reply and close from it

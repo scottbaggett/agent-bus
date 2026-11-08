@@ -829,7 +829,7 @@ func (m model) helpView() string {
 		"  o                open its folder in Finder, Zed, Cursor… or its ports in a browser",
 		"  a                all activity: every message, close and decision on the bus",
 		"  1-9              go to the agent with that number in the header (needs you)",
-		"  g                group by repo, lane, tool, Mac, or nothing (remembered)",
+		"  g                group by repo, stage, lane, tool, Mac, or nothing (remembered)",
 		"  O                offboard it: ask it to hand on or close its work",
 		"                   and run agent-bus offboard",
 		"",

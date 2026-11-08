@@ -37,6 +37,7 @@ const (
 	modeOpen
 	modeSearch
 	modeOffboard
+	modeWelcome
 )
 
 type model struct {
@@ -79,11 +80,13 @@ type model struct {
 		addr string
 		at   time.Time
 	}
-	scanning   bool
-	openItems  []openItem
-	openSel    int
-	query      string // "/" search over the grid
-	groupBy    groupBy
+	scanning  bool
+	openItems []openItem
+	openSel   int
+	query     string // "/" search over the grid
+	groupBy   groupBy
+	welcome   welcomeKind
+	showOff   bool // ^: the offboarded agents instead of the live ones
 }
 
 type snapMsg struct {
@@ -389,7 +392,7 @@ func (m model) loadPanelBody() tea.Cmd {
 	if !ok {
 		return nil
 	}
-	if _, have := m.bodies[n.ID]; have {
+	if _, have := m.bodies[n.ID]; have || isLive(n) {
 		return nil
 	}
 	m.bodies[n.ID] = "" // in flight
@@ -464,6 +467,10 @@ func (m model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case modeHelp:
 		m.mode = modeNormal
 		return m, nil
+	case modeWelcome:
+		m.mode = modeNormal
+		markWelcomed()
+		return m, nil
 	case modeConfirm:
 		m.mode = modePanel
 		switch k.String() {
@@ -511,6 +518,9 @@ func (m model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, m.loadPanelBody()
 		case "r":
+			if n, ok := m.selectedNeed(); ok && isLive(n) {
+				return m.jumpToApp()
+			}
 			if n, ok := m.selectedNeed(); ok {
 				m.target, m.mode = n, modeReply
 				m.input.Placeholder = "your answer · enter sends and closes it · esc cancels"
@@ -521,6 +531,10 @@ func (m model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "x":
+			if n, ok := m.selectedNeed(); ok && isLive(n) {
+				m.setStatus("it's waiting in its own window: enter goes there")
+				return m, nil
+			}
 			if n, ok := m.selectedNeed(); ok {
 				m.target, m.mode = n, modeConfirm
 			}
@@ -536,6 +550,8 @@ func (m model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.startOpen(m.panel)
 		case "O":
 			return m.startOffboard()
+		case "1", "2", "3", "4", "5", "6", "7", "8", "9":
+			return m.goToNeed(int(k.String()[0] - '1'))
 		case "left", "right", "h", "l":
 			// Fall through to the grid: move and follow with the panel.
 		default:
@@ -552,6 +568,20 @@ func (m model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.startOffboard()
 	case "a":
 		return m, m.openActivity()
+	case "w":
+		m.welcome, m.mode = welcomeFirst, modeWelcome
+		if notesFor(version) != nil {
+			m.welcome = welcomeNews
+		}
+		return m, nil
+	case "^":
+		m.showOff = !m.showOff
+		m.cursor[paneAgents] = 0
+		if m.showOff {
+			m.setStatus(fmt.Sprintf("offboarded in the last day: %d · ^ goes back", len(m.snap.Offboarded)))
+		}
+	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
+		return m.goToNeed(int(k.String()[0] - '1'))
 	case "g":
 		m.groupBy = (m.groupBy + 1) % groupModes
 		saveGroupBy(m.groupBy)
@@ -686,6 +716,8 @@ func (m model) View() string {
 	switch m.mode {
 	case modeHelp:
 		return m.helpView()
+	case modeWelcome:
+		return m.welcomeView()
 	case modeChat:
 		return m.chatScreen()
 	}
@@ -735,19 +767,24 @@ func (m model) headerView() string {
 		}
 	}
 	left := sAccent.Render(" agent-bus") + sDim.Render(" · "+host)
-	needs := m.needsCount()
 	parts := []string{plural(agents, "agent")}
-	if needs > 0 {
-		parts = append(parts, lipgloss.NewStyle().Foreground(cBad).Bold(true).Render(fmt.Sprintf("%d need you", needs)))
+	if order := m.needOrder(); len(order) > 0 {
+		// Numbered, newest first: press the number to go to that agent.
+		red := lipgloss.NewStyle().Foreground(cBad).Bold(true)
+		var who []string
+		for i, a := range order {
+			if i == 9 {
+				who = append(who, sDim.Render(fmt.Sprintf("+%d", len(order)-9)))
+				break
+			}
+			who = append(who, red.Render(fmt.Sprintf("%d", i+1))+" "+friendlyName(a))
+		}
+		parts = append(parts, red.Render("needs you:")+" "+strings.Join(who, "  "))
 	} else {
 		parts = append(parts, lipgloss.NewStyle().Foreground(cGood).Render("nothing needs you"))
 	}
-	if len(m.snap.Peers) > 0 {
-		var names []string
-		for _, p := range m.snap.Peers {
-			names = append(names, p.Name)
-		}
-		parts = append(parts, "linked: "+strings.Join(names, ", "))
+	for _, p := range m.snap.Peers {
+		parts = append(parts, m.peerHealth(p))
 	}
 	spin := " "
 	if m.loading {
@@ -756,7 +793,8 @@ func (m model) headerView() string {
 	right := strings.Join(parts, sDim.Render(" · ")) + " " + sDim.Render(spin) + " "
 	gap := m.w - ansi.StringWidth(left) - ansi.StringWidth(right)
 	if gap < 1 {
-		return fit(left, m.w)
+		// Too wide: keep the start of the right side (what needs you).
+		return left + " " + ansi.Truncate(right, max(0, m.w-ansi.StringWidth(left)-1), "…")
 	}
 	return left + strings.Repeat(" ", gap) + right
 }
@@ -773,6 +811,9 @@ func (m model) footerView() string {
 	}
 	if m.err != nil {
 		return lipgloss.NewStyle().Foreground(cBad).Render(fit(" refresh failed: "+m.err.Error(), m.w))
+	}
+	if m.showOff && m.mode == modeNormal {
+		return sDim.Render(fit(" offboarded in the last day · c: timeline · ^: back to live agents · q: quit", m.w))
 	}
 	keys := []string{"arrows or click: pick an agent", "/: search", "enter: details", "o: open in…", "c: timeline & chat", "a: all activity", "O: offboard", "g: grouped by " + m.groupBy.String(), "?: help", "q: quit"}
 	if m.query != "" {
@@ -811,7 +852,11 @@ func (m model) helpView() string {
 		"                   ↑↓ moves through it, and you can message it from there",
 		"  o                open its folder in Finder, Zed, Cursor… or its ports in a browser",
 		"  a                all activity: every message, close and decision on the bus",
-		"  g                group by repo, lane, tool, Mac, or nothing (remembered)",
+		"  1-9              go to the agent with that number in the header (needs you)",
+		"  w                the welcome, or this version's what's new",
+		"  ^                the agents you offboarded in the last day (they come back",
+		"                   on their own when they take new work)",
+		"  g                group by repo, stage, lane, tool, Mac, or nothing (remembered)",
 		"  O                offboard it: ask it to hand on or close its work",
 		"                   and run agent-bus offboard",
 		"",
@@ -899,7 +944,11 @@ func main() {
 			return
 		}
 	}
-	p := tea.NewProgram(newModel(), tea.WithAltScreen(), tea.WithMouseCellMotion())
+	m := newModel()
+	if kind, ok := startupWelcome(); ok {
+		m.welcome, m.mode = kind, modeWelcome
+	}
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "agent-bus tui:", err)
 		os.Exit(1)

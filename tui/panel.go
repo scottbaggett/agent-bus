@@ -45,6 +45,9 @@ func (m model) panelView(w, h int) string {
 		if strings.TrimSpace(s.Focus) == "" {
 			label = "Session"
 		}
+		if st := stageLabel(s.Stage); st != "" {
+			label += " · " + st
+		}
 		b = append(b, sDim.Render(label), lipgloss.NewStyle().Width(inner).Render(d), "")
 	}
 	if svc := m.servicesFor(s); len(svc) > 0 {
@@ -70,7 +73,14 @@ func (m model) panelView(w, h int) string {
 			}
 			b = append(b, line)
 		}
-		if n, ok := m.selectedNeed(); ok {
+		if n, ok := m.selectedNeed(); ok && isLive(n) {
+			app := "its window"
+			if a, ok := m.appOf(t); ok {
+				app = a.Name
+			}
+			b = append(b, "", sText.Render(fit("It stopped on a prompt in "+app+": a permission or a question.", inner)),
+				sAccent.Render("⏎ go answer it there"))
+		} else if n, ok := m.selectedNeed(); ok {
 			b = append(b, "", sDim.Render(strings.Repeat("─", inner)), "")
 			body, have := m.bodies[n.ID]
 			switch {

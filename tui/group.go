@@ -14,6 +14,7 @@ type groupBy int
 
 const (
 	byRepo groupBy = iota
+	byStage
 	byLane
 	byTool
 	byMac
@@ -22,7 +23,7 @@ const (
 )
 
 func (g groupBy) String() string {
-	return [...]string{"repo", "lane", "tool", "Mac", "nothing"}[g]
+	return [...]string{"repo", "stage", "lane", "tool", "Mac", "nothing"}[g]
 }
 
 // prefsFile keeps the TUI's own settings, apart from the bus.
@@ -35,18 +36,33 @@ func prefsFile() string {
 }
 
 type prefs struct {
-	GroupBy string `json:"group_by"`
+	GroupBy     string `json:"group_by,omitempty"`
+	Welcomed    bool   `json:"welcomed,omitempty"`
+	SeenVersion string `json:"seen_version,omitempty"`
+}
+
+func loadPrefs() (prefs, bool) {
+	var p prefs
+	b, err := os.ReadFile(prefsFile())
+	if err != nil {
+		return p, false
+	}
+	return p, json.Unmarshal(b, &p) == nil
+}
+
+func savePrefs(change func(*prefs)) {
+	f := prefsFile()
+	if f == "" || os.MkdirAll(filepath.Dir(f), 0o755) != nil {
+		return
+	}
+	p, _ := loadPrefs()
+	change(&p)
+	b, _ := json.Marshal(p)
+	_ = os.WriteFile(f, b, 0o644)
 }
 
 func loadGroupBy() groupBy {
-	b, err := os.ReadFile(prefsFile())
-	if err != nil {
-		return byRepo
-	}
-	var p prefs
-	if json.Unmarshal(b, &p) != nil {
-		return byRepo
-	}
+	p, _ := loadPrefs()
 	for g := groupBy(0); g < groupModes; g++ {
 		if g.String() == p.GroupBy {
 			return g
@@ -55,14 +71,7 @@ func loadGroupBy() groupBy {
 	return byRepo
 }
 
-func saveGroupBy(g groupBy) {
-	f := prefsFile()
-	if f == "" || os.MkdirAll(filepath.Dir(f), 0o755) != nil {
-		return
-	}
-	b, _ := json.Marshal(prefs{GroupBy: g.String()})
-	_ = os.WriteFile(f, b, 0o644)
-}
+func saveGroupBy(g groupBy) { savePrefs(func(p *prefs) { p.GroupBy = g.String() }) }
 
 func toolLabel(t string) string {
 	switch t {
@@ -104,6 +113,8 @@ func (g groupBy) key(t tile) string {
 		return localHost()
 	case byNone:
 		return ""
+	case byStage:
+		return stageLabel(t.seat.Stage)
 	}
 	return t.seat.Lane
 }
@@ -114,6 +125,24 @@ func (g groupBy) emptyLabel() string {
 		return "no repo"
 	case byNone:
 		return "agents"
+	case byStage:
+		return "no stage set"
 	}
 	return "no lane"
+}
+
+func stageLabel(s string) string {
+	switch s {
+	case "in-progress":
+		return "In progress"
+	case "review":
+		return "Ready for review"
+	case "blocked":
+		return "Blocked"
+	case "parked":
+		return "Parked"
+	case "done":
+		return "Done"
+	}
+	return ""
 }

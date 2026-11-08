@@ -27,6 +27,10 @@ def main():
             env.pop(key, None)
         env.update(AGENT_BUS_TOOL='codex', AGENT_BUS_SESSION=session,
                    CODEX_THREAD_ID=session, AGENT_BUS_VIA='hook')
+        # What the agent is doing right now, for who, snapshot and the TUI.
+        activity = {'UserPromptSubmit': 'working', 'Stop': 'idle', 'SessionStart': 'idle'}.get(name)
+        if activity:
+            env['AGENT_BUS_ACTIVITY'] = activity
         result = subprocess.run([str(Path(sys.argv[1]).resolve()), 'codex',
                                  'end' if name == 'SessionEnd' else 'sync'],
                                 env=env, cwd=cwd, stdout=subprocess.PIPE,

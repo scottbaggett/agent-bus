@@ -19,6 +19,8 @@ type Snapshot struct {
 	Attention []Att   `json:"attention"`
 	Recent    []Event `json:"recent"`
 	Peers     []Peer  `json:"peers"`
+	// Offboarded is who stood down in the last day; ^ shows them.
+	Offboarded []Seat `json:"offboarded"`
 }
 
 type Seat struct {
@@ -31,8 +33,15 @@ type Seat struct {
 	Session string `json:"session"`
 	Focus   string `json:"focus"`
 	PID     int    `json:"pid"`
-	Epoch   int64  `json:"epoch"`
-	Avatar  struct {
+	// Activity is what its hooks last said: working, waiting (on you, in its
+	// own window) or idle.
+	Activity   string `json:"activity"`
+	ActivityAt int64  `json:"activity_at"`
+	// Stage is where its work stands, as it said: in-progress, review,
+	// blocked, parked or done.
+	Stage  string `json:"stage"`
+	Epoch  int64  `json:"epoch"`
+	Avatar struct {
 		Color string `json:"color"`
 	} `json:"avatar"`
 }
@@ -82,6 +91,10 @@ type Peer struct {
 	Name   string `json:"name"`
 	Synced int64  `json:"synced"`
 	Seats  []Seat `json:"seats"`
+	// How the last sync went: OK, or why not (auth failed, timeout, host down).
+	Checked int64  `json:"checked"`
+	OK      bool   `json:"ok"`
+	Error   string `json:"error"`
 }
 
 // cli is the agent-bus the wrapper ran us from (AGENT_BUS_CLI), else PATH.

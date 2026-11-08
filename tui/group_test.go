@@ -47,3 +47,12 @@ func TestOwnPortsSkipShared(t *testing.T) {
 		t.Errorf("own port: %+v", p)
 	}
 }
+
+func TestWaitingInItsWindowNeedsYou(t *testing.T) {
+	m := newModel()
+	m.snap = &Snapshot{Seats: []Seat{{Addr: "claude/web.2", Activity: "waiting", ActivityAt: 5}, {Addr: "claude/api.1", Activity: "working"}}}
+	n := m.needs()
+	if len(n["claude/web.2"]) != 1 || !isLive(n["claude/web.2"][0]) || len(n["claude/api.1"]) != 0 {
+		t.Fatalf("needs: %+v", n)
+	}
+}

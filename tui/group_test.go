@@ -62,7 +62,7 @@ func TestWaitingInItsWindowNeedsYou(t *testing.T) {
 	}
 }
 
-func TestScreenHeightStableAcrossTabs(t *testing.T) {
+func TestScreenHeightStable(t *testing.T) {
 	m := newModel()
 	m.w, m.h = 160, 40
 	m.snap = &Snapshot{Now: 100, Seats: []Seat{{Addr: "claude/web.2", Tool: "claude", Epoch: 99}}}
@@ -71,11 +71,12 @@ func TestScreenHeightStableAcrossTabs(t *testing.T) {
 	for i := 0; i < 30; i++ {
 		m.logMsgs = append(m.logMsgs, chatMsg{Kind: "said", Body: long, Epoch: int64(i)}, chatMsg{Kind: "asked", Body: long, Epoch: int64(i)})
 	}
-	for _, tab := range []int{0, 1} {
-		m.panelTab = tab
-		if got := len(strings.Split(m.View(), "\n")); got != m.h {
-			t.Errorf("tab %d: screen is %d lines, want %d", tab, got, m.h)
-		}
+	if got := len(strings.Split(m.View(), "\n")); got != m.h {
+		t.Errorf("screen is %d lines, want %d", got, m.h)
+	}
+	m.logScroll = 10
+	if got := len(strings.Split(m.View(), "\n")); got != m.h {
+		t.Errorf("scrolled: screen is %d lines, want %d", got, m.h)
 	}
 }
 

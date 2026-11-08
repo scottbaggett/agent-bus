@@ -68,7 +68,6 @@ type model struct {
 	logAddr     string // whose log the side panel holds
 	logStamp    string
 	logMsgs     []chatMsg
-	panelTab    int          // 0 timeline, 1 chat
 	logScroll   int          // lines the panel's log is scrolled back from the newest
 	layout      *layoutCache // shared by every copy of the model
 	chatView    viewport.Model
@@ -221,13 +220,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.addr == m.logAddr && msg.err == nil {
 			// Scrolled back: new lines arrive below, so hold the view still.
 			if m.logScroll > 0 && m.panelW() > 0 {
-				seat, inner, chat := m.panel.seat, m.panelW()-4, m.panelTab == 1
+				seat, inner := m.panel.seat, m.panelW()-4
 				if t, ok := m.selectedTile(); ok && (m.mode == modeNormal || m.mode == modeSearch) {
 					seat = t.seat
 				}
-				before := len(m.panelLogLines(seat, inner, chat, 1<<30))
+				before := len(m.panelLogLines(seat, inner, 1<<30))
 				m.logMsgs = msg.msgs
-				m.logScroll += max(0, len(m.panelLogLines(seat, inner, chat, 1<<30))-before)
+				m.logScroll += max(0, len(m.panelLogLines(seat, inner, 1<<30))-before)
 			} else {
 				m.logMsgs = msg.msgs
 			}
@@ -465,7 +464,7 @@ func (m model) mouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 				seat = t.seat
 			}
 			if up {
-				total := len(m.panelLogLines(seat, pw-4, m.panelTab == 1, 1<<30))
+				total := len(m.panelLogLines(seat, pw-4, 1<<30))
 				m.logScroll = min(m.logScroll+3, max(0, total-5))
 			} else {
 				m.logScroll = max(0, m.logScroll-3)
@@ -608,9 +607,6 @@ func (m model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.startOpen(m.panel)
 		case "O":
 			return m.startOffboard()
-		case "t":
-			m.panelTab, m.logScroll = 1-m.panelTab, 0
-			return m, nil
 		case "i":
 			return m.startPanelChat()
 		case "1", "2", "3", "4", "5", "6", "7", "8", "9":
@@ -631,8 +627,6 @@ func (m model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.startOffboard()
 	case "a":
 		return m, m.openActivity()
-	case "t":
-		m.panelTab, m.logScroll = 1-m.panelTab, 0
 	case "i":
 		if m.panelW() > 0 {
 			if t, ok := m.selectedTile(); ok {
@@ -892,7 +886,7 @@ func (m model) footerView() string {
 	if m.showOff && m.mode == modeNormal {
 		return sDim.Render(fit(" offboarded in the last day · c: timeline · ^: back to live agents · q: quit", m.w))
 	}
-	keys := []string{"arrows or click: pick an agent", "/: search", "enter: details", "o: open in…", "t: timeline/chat", "i: message", "c: full screen", "a: all activity", "O: offboard", "g: grouped by " + m.groupBy.String(), "?: help", "q: quit"}
+	keys := []string{"arrows or click: pick an agent", "/: search", "enter: details", "o: open in…", "i: message", "c: full screen", "a: all activity", "O: offboard", "g: grouped by " + m.groupBy.String(), "?: help", "q: quit"}
 	if m.query != "" {
 		keys = append([]string{sAccent.Render("/" + m.query), "esc: clear"}, keys[1:]...)
 	}
@@ -903,7 +897,7 @@ func (m model) footerView() string {
 	case modeOpen:
 		keys = []string{"↑↓ or number: pick", "enter: open", "esc: back"}
 	case modePanel:
-		keys = []string{"arrows: move", "⏎: go to its app", "tab: next item", "r answer", "x close it", "t timeline/chat", "i message", "c full screen", "o open in…", "O offboard", "esc back"}
+		keys = []string{"arrows: move", "⏎: go to its app", "tab: next item", "r answer", "x close it", "i message", "c full screen", "o open in…", "O offboard", "esc back"}
 	case modeReply:
 		keys = []string{"enter sends and closes it", "esc cancels"}
 	case modePanelChat:
@@ -927,8 +921,8 @@ func (m model) helpView() string {
 		"  enter            its panel: what it needs from you; enter again (or",
 		"                   double-click its tile) brings its app to the front",
 		"  /                search: name, focus, ticket, branch, port (fuzzy)",
-		"  c                its timeline: everything it sent, got, closed or decided;",
-		"                   ↑↓ moves through it, and you can message it from there",
+		"  i                message the selected agent as you (the box under its log)",
+		"  c                its log full screen: your prompts, its replies, its tools",
 		"  o                open its folder in Finder, Zed, Cursor… or its ports in a browser",
 		"  a                all activity: every message, close and decision on the bus",
 		"  1-9              go to the agent with that number in the header (needs you)",
@@ -939,7 +933,7 @@ func (m model) helpView() string {
 		"  O                offboard it: ask it to hand on or close its work",
 		"                   and run agent-bus offboard",
 		"",
-		"  in the panel:  ↑↓ item · r answer (and close) · x close · c chat",
+		"  in the panel:  tab next item · r answer (and close) · x close · ⏎ go to its app",
 		"",
 		"  A red badge counts what an agent is waiting on you for.",
 		"  Dim bots have been idle 30+ minutes; \"not running\" ones have exited",

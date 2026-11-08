@@ -103,36 +103,25 @@ func (m model) panelView(w, h int) string {
 		bodyH--
 	}
 	lines := strings.Split(strings.Join(b, "\n"), "\n")
-	// The rest of the height is a tab: its live timeline, or your chat with it.
-	chat := m.panelTab == 1
-	box := ""
-	if chat {
-		if m.mode == modePanelChat {
-			box = sAccent.Render("› ") + m.input.View()
-		} else {
-			box = sDim.Render("i: message " + friendlyName(s.Addr) + " as you")
-		}
+	// The rest of the height is its live log, with a box to message it.
+	box := sDim.Render("i: message " + friendlyName(s.Addr) + " as you")
+	if m.mode == modePanelChat {
+		box = sAccent.Render("› ") + m.input.View()
 	}
-	if room := bodyH - len(lines) - 2 - boolInt(chat)*2; room > 3 && m.logAddr == s.Addr {
-		log := m.panelLogLines(s, inner, chat, room+m.logScroll)
+	if room := bodyH - len(lines) - 4; room > 3 && m.logAddr == s.Addr {
+		log := m.panelLogLines(s, inner, room+m.logScroll)
 		// Scrolled back: show an earlier window, ending logScroll lines up.
 		end := len(log) - min(m.logScroll, max(0, len(log)-room))
 		log = log[max(0, end-room):end]
-		lines = append(lines, sDim.Render(strings.Repeat("─", inner)), m.tabBar(inner))
+		lines = append(lines, sDim.Render(strings.Repeat("─", inner)), m.logBar(inner))
 		if len(log) == 0 {
-			empty := "Nothing in its timeline yet"
-			if chat {
-				empty = "No messages between you yet"
-			}
-			log = []string{sDim.Render(empty)}
+			log = []string{sDim.Render("Nothing in its log yet")}
 		}
-		for len(lines)+len(log) < bodyH-boolInt(chat)*2 {
+		for len(lines)+len(log) < bodyH-2 {
 			lines = append(lines, "")
 		}
 		lines = append(lines, log...)
-		if chat {
-			lines = append(lines, "", box)
-		}
+		lines = append(lines, "", box)
 	}
 	if len(lines) > bodyH {
 		lines = append(lines[:bodyH-1], sDim.Render("…"))
@@ -222,52 +211,21 @@ func (m model) panelPorts(s Seat) string {
 	return strings.Join(p, "  ")
 }
 
-func boolInt(b bool) int {
-	if b {
-		return 1
-	}
-	return 0
-}
-
-// isChat: your conversation with the agent: what you typed in its window and
-// its replies, and messages between you over the bus. No tools, no other agents.
-func isChat(c chatMsg) bool {
-	switch c.Kind {
-	case "asked", "said":
-		return true
-	case "msg":
-		return c.Mine || c.ToYou
-	case "resolve":
-		return c.Mine
-	}
-	return false
-}
-
-func (m model) tabBar(w int) string {
-	tab := func(name string, on bool) string {
-		if on {
-			return lipgloss.NewStyle().Foreground(cAccent).Bold(true).Underline(true).Render(name)
-		}
-		return sDim.Render(name)
-	}
-	bar := tab("Timeline", m.panelTab == 0) + "   " + tab("Chat", m.panelTab == 1)
-	hint := "   t switches · c full screen"
+func (m model) logBar(w int) string {
+	hint := "Log · wheel scrolls · c full screen"
 	if m.logScroll > 0 {
-		hint = "   scrolled back · wheel down for the newest"
+		hint = "Log · scrolled back · wheel down for the newest"
 	}
-	return bar + sDim.Render(fit(hint, max(0, w-lipgloss.Width(bar))))
+	return sDim.Render(fit(hint, w))
 }
 
-// panelLogLines is the tab's log as screen lines, newest last, at least want
+// panelLogLines is the agent's log as screen lines, newest last, at least want
 // lines of it when there are that many. Entries can be several lines each;
 // counting real lines keeps the panel from outgrowing the grid.
-func (m model) panelLogLines(s Seat, inner int, chat bool, want int) []string {
+func (m model) panelLogLines(s Seat, inner int, want int) []string {
 	var log []string
 	for i := len(m.logMsgs) - 1; i >= 0 && len(log) < want; i-- {
 		c := m.logMsgs[i]
-		if chat && !isChat(c) {
-			continue
-		}
 		log = append(strings.Split(strings.Join(m.logEntry(c, inner, s), "\n"), "\n"), log...)
 	}
 	for len(log) > 0 && strings.TrimSpace(ansiStrip(log[0])) == "" {

@@ -191,6 +191,22 @@ assert_eq "a new prompt brings it back" "offwt" "$("$BIN" snapshot | jq -r '.sea
 raw_seat off1 claude offwt offboard >/dev/null
 raw_seat off1 claude offwt focus "Picking up the API docs" >/dev/null
 assert_eq "a new focus brings it back" "offwt" "$("$BIN" snapshot | jq -r '.seats[] | select(.wt == "offwt") | .wt')"
+# activity: hooks say whether an agent is working, waiting on you, or idle.
+act() { "$BIN" snapshot | jq -r '.seats[] | select(.wt == "actwt") | .activity'; }
+AGENT_BUS_PID=999991 AGENT_BUS_VIA=hook raw_seat act1 claude actwt digest >/dev/null 2>&1
+assert_eq "a prompt means working" "working" "$(act)"
+printf '{"notification_type":"permission_prompt","message":"Claude needs your permission to use Bash"}' \
+  | AGENT_BUS_PID=999991 AGENT_BUS_VIA=hook raw_seat act1 claude actwt activity notify
+assert_eq "a permission prompt means waiting on you" "waiting" "$(act)"
+assert_eq "waiting leaves a marker for the cheap PostToolUse check" "yes" "$([ -e "$BUS_HOME/state/waiting.999991" ] && echo yes)"
+printf '{"message":"Claude is waiting for your input"}' | AGENT_BUS_PID=999991 raw_seat act1 claude actwt activity notify
+assert_eq "an idle prompt means idle" "idle" "$(act)"
+assert_eq "the marker goes when it stops waiting" "" "$([ -e "$BUS_HOME/state/waiting.999991" ] && echo yes)"
+AGENT_BUS_PID=999991 raw_seat act1 claude actwt activity working
+AGENT_BUS_PID=999991 raw_seat act1 claude actwt read --peek >/dev/null
+assert_eq "other commands keep the activity" "working" "$(act)"
+AGENT_BUS_PID=999991 AGENT_BUS_VIA=hook raw_seat act1 claude actwt stop-hook </dev/null >/dev/null
+assert_eq "a turn's end means idle" "idle" "$(act)"
 nm=$("$BIN" avatar codex/api.1 | tail -1)
 assert_has "every seat has a stable name" "· codex/api.1" "$nm"
 assert_eq "the same name every time" "$nm" "$("$BIN" avatar codex/api.1 | tail -1)"

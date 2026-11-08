@@ -78,10 +78,50 @@ func (m model) needs() map[string][]need {
 		seen[it.ID] = true
 		out[it.From] = append(out[it.From], need{ID: it.ID, From: it.From, State: it.State, Subject: it.Subject, Epoch: it.Epoch})
 	}
+	// An agent stopped on a permission or question prompt in its own window
+	// needs you too, though it never said so on the bus.
+	for _, s := range m.allSeats() {
+		if s.Activity == "waiting" {
+			out[s.Addr] = append(out[s.Addr], need{ID: liveID + s.Addr, From: s.Addr, State: "waiting",
+				Subject: "waiting for you in its window", Epoch: s.ActivityAt})
+		}
+	}
 	for k := range out {
 		sort.SliceStable(out[k], func(i, j int) bool { return out[k][i].Epoch > out[k][j].Epoch })
 	}
 	return out
+}
+
+// liveID marks a need that comes from an agent's live state, not a bus item:
+// it can't be answered or closed here, only gone to.
+const liveID = "live:"
+
+func isLive(n need) bool { return strings.HasPrefix(n.ID, liveID) }
+
+// allSeats is this Mac's agents and the linked Macs'.
+func (m model) allSeats() []Seat {
+	if m.snap == nil {
+		return nil
+	}
+	out := append([]Seat(nil), m.snap.Seats...)
+	for _, p := range m.snap.Peers {
+		out = append(out, p.Seats...)
+	}
+	return out
+}
+
+// activityDot is a tile's live state: green working, red waiting on you,
+// grey idle; nothing when its hooks haven't said.
+func activityDot(s Seat) string {
+	switch s.Activity {
+	case "working":
+		return lipgloss.NewStyle().Foreground(cGood).Render("●") + " "
+	case "waiting":
+		return lipgloss.NewStyle().Foreground(cBad).Render("◐") + " "
+	case "idle":
+		return sDim.Render("○") + " "
+	}
+	return ""
 }
 
 func (m model) needsYou() map[string]int {
@@ -353,7 +393,7 @@ func (m model) findSeat(addr string) (Seat, string, bool) {
 
 func (m model) renderTile(t tile, selected bool, needs int) string {
 	s := t.seat
-	idle := t.gone || m.snap.Now-s.Epoch > 30*60
+	idle := t.gone || (s.Activity != "working" && m.snap.Now-s.Epoch > 30*60)
 	art := avatarArt(s.Addr, toolOf(s), idle && !selected && needs == 0)
 	art = lipgloss.PlaceHorizontal(tileInner, lipgloss.Center, art)
 
@@ -379,7 +419,11 @@ func (m model) renderTile(t tile, selected bool, needs int) string {
 	for len(doing) < 2 {
 		doing = append(doing, "")
 	}
-	metaLine := sDim.Render(shrink(meta))
+	dot := activityDot(s)
+	if t.gone {
+		dot = ""
+	}
+	metaLine := dot + sDim.Render(fit(meta, min(tileInner-lipgloss.Width(dot), lipgloss.Width(meta))))
 	if svc := m.ownPorts(s); len(svc) > 0 {
 		p := ports(svc)
 		metaLine = lipgloss.NewStyle().Foreground(cGood).Render(shrink(p)) + sDim.Render(" · "+ago(m.snap.Now, s.Epoch))

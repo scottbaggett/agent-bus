@@ -31,8 +31,12 @@ type Seat struct {
 	Session string `json:"session"`
 	Focus   string `json:"focus"`
 	PID     int    `json:"pid"`
-	Epoch   int64  `json:"epoch"`
-	Avatar  struct {
+	// Activity is what its hooks last said: working, waiting (on you, in its
+	// own window) or idle.
+	Activity   string `json:"activity"`
+	ActivityAt int64  `json:"activity_at"`
+	Epoch      int64  `json:"epoch"`
+	Avatar     struct {
 		Color string `json:"color"`
 	} `json:"avatar"`
 }

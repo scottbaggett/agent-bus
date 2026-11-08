@@ -79,11 +79,11 @@ type model struct {
 		addr string
 		at   time.Time
 	}
-	scanning   bool
-	openItems  []openItem
-	openSel    int
-	query      string // "/" search over the grid
-	groupBy    groupBy
+	scanning  bool
+	openItems []openItem
+	openSel   int
+	query     string // "/" search over the grid
+	groupBy   groupBy
 }
 
 type snapMsg struct {
@@ -389,7 +389,7 @@ func (m model) loadPanelBody() tea.Cmd {
 	if !ok {
 		return nil
 	}
-	if _, have := m.bodies[n.ID]; have {
+	if _, have := m.bodies[n.ID]; have || isLive(n) {
 		return nil
 	}
 	m.bodies[n.ID] = "" // in flight
@@ -511,6 +511,9 @@ func (m model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, m.loadPanelBody()
 		case "r":
+			if n, ok := m.selectedNeed(); ok && isLive(n) {
+				return m.jumpToApp()
+			}
 			if n, ok := m.selectedNeed(); ok {
 				m.target, m.mode = n, modeReply
 				m.input.Placeholder = "your answer · enter sends and closes it · esc cancels"
@@ -521,6 +524,10 @@ func (m model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "x":
+			if n, ok := m.selectedNeed(); ok && isLive(n) {
+				m.setStatus("it's waiting in its own window: enter goes there")
+				return m, nil
+			}
 			if n, ok := m.selectedNeed(); ok {
 				m.target, m.mode = n, modeConfirm
 			}

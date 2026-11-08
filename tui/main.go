@@ -543,6 +543,8 @@ func (m model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.startOpen(m.panel)
 		case "O":
 			return m.startOffboard()
+		case "1", "2", "3", "4", "5", "6", "7", "8", "9":
+			return m.goToNeed(int(k.String()[0] - '1'))
 		case "left", "right", "h", "l":
 			// Fall through to the grid: move and follow with the panel.
 		default:
@@ -559,6 +561,8 @@ func (m model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.startOffboard()
 	case "a":
 		return m, m.openActivity()
+	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
+		return m.goToNeed(int(k.String()[0] - '1'))
 	case "g":
 		m.groupBy = (m.groupBy + 1) % groupModes
 		saveGroupBy(m.groupBy)
@@ -742,19 +746,24 @@ func (m model) headerView() string {
 		}
 	}
 	left := sAccent.Render(" agent-bus") + sDim.Render(" · "+host)
-	needs := m.needsCount()
 	parts := []string{plural(agents, "agent")}
-	if needs > 0 {
-		parts = append(parts, lipgloss.NewStyle().Foreground(cBad).Bold(true).Render(fmt.Sprintf("%d need you", needs)))
+	if order := m.needOrder(); len(order) > 0 {
+		// Numbered, newest first: press the number to go to that agent.
+		red := lipgloss.NewStyle().Foreground(cBad).Bold(true)
+		var who []string
+		for i, a := range order {
+			if i == 9 {
+				who = append(who, sDim.Render(fmt.Sprintf("+%d", len(order)-9)))
+				break
+			}
+			who = append(who, red.Render(fmt.Sprintf("%d", i+1))+" "+friendlyName(a))
+		}
+		parts = append(parts, red.Render("needs you:")+" "+strings.Join(who, "  "))
 	} else {
 		parts = append(parts, lipgloss.NewStyle().Foreground(cGood).Render("nothing needs you"))
 	}
-	if len(m.snap.Peers) > 0 {
-		var names []string
-		for _, p := range m.snap.Peers {
-			names = append(names, p.Name)
-		}
-		parts = append(parts, "linked: "+strings.Join(names, ", "))
+	for _, p := range m.snap.Peers {
+		parts = append(parts, m.peerHealth(p))
 	}
 	spin := " "
 	if m.loading {
@@ -763,7 +772,8 @@ func (m model) headerView() string {
 	right := strings.Join(parts, sDim.Render(" · ")) + " " + sDim.Render(spin) + " "
 	gap := m.w - ansi.StringWidth(left) - ansi.StringWidth(right)
 	if gap < 1 {
-		return fit(left, m.w)
+		// Too wide: keep the start of the right side (what needs you).
+		return left + " " + ansi.Truncate(right, max(0, m.w-ansi.StringWidth(left)-1), "…")
 	}
 	return left + strings.Repeat(" ", gap) + right
 }
@@ -818,6 +828,7 @@ func (m model) helpView() string {
 		"                   ↑↓ moves through it, and you can message it from there",
 		"  o                open its folder in Finder, Zed, Cursor… or its ports in a browser",
 		"  a                all activity: every message, close and decision on the bus",
+		"  1-9              go to the agent with that number in the header (needs you)",
 		"  g                group by repo, lane, tool, Mac, or nothing (remembered)",
 		"  O                offboard it: ask it to hand on or close its work",
 		"                   and run agent-bus offboard",

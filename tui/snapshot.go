@@ -86,6 +86,10 @@ type Peer struct {
 	Name   string `json:"name"`
 	Synced int64  `json:"synced"`
 	Seats  []Seat `json:"seats"`
+	// How the last sync went: OK, or why not (auth failed, timeout, host down).
+	Checked int64  `json:"checked"`
+	OK      bool   `json:"ok"`
+	Error   string `json:"error"`
 }
 
 // cli is the agent-bus the wrapper ran us from (AGENT_BUS_CLI), else PATH.

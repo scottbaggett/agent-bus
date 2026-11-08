@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	tea "github.com/charmbracelet/bubbletea"
 	"sort"
 	"strings"
 
@@ -594,4 +595,69 @@ func wrapLines(s string, w, n int) []string {
 		lines = lines[:n]
 	}
 	return lines
+}
+
+// needOrder is the agents that need you, newest ask first: the numbers in the
+// header.
+func (m model) needOrder() []string {
+	type row struct {
+		addr string
+		at   int64
+	}
+	var rows []row
+	for a, ns := range m.needs() {
+		var at int64
+		for _, n := range ns {
+			at = max(at, n.Epoch)
+		}
+		rows = append(rows, row{a, at})
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].at != rows[j].at {
+			return rows[i].at > rows[j].at
+		}
+		return rows[i].addr < rows[j].addr
+	})
+	out := make([]string, len(rows))
+	for i, r := range rows {
+		out[i] = r.addr
+	}
+	return out
+}
+
+// goToNeed selects the i-th agent that needs you and opens its panel; one
+// waiting in its own window goes straight to its app.
+func (m model) goToNeed(i int) (tea.Model, tea.Cmd) {
+	order := m.needOrder()
+	if i < 0 || i >= len(order) {
+		return m, nil
+	}
+	if m.query != "" {
+		m.query = "" // the agent may be filtered out
+	}
+	tiles, _ := m.tiles()
+	for j, t := range tiles {
+		if t.seat.Addr == order[i] {
+			m.cursor[paneAgents] = j
+			mm, cmd := m.openPanel()
+			m = mm.(model)
+			if ns := m.needs()[t.seat.Addr]; len(ns) > 0 && isLive(ns[0]) {
+				return m.jumpToApp()
+			}
+			return m, cmd
+		}
+	}
+	return m, nil
+}
+
+// peerHealth is a linked Mac in the header: its name, and when it last synced
+// or why it couldn't.
+func (m model) peerHealth(p Peer) string {
+	switch {
+	case !p.OK && p.Error != "":
+		return lipgloss.NewStyle().Foreground(cWarn).Render(p.Name + " ✗ " + p.Error)
+	case p.Synced > 0:
+		return p.Name + sDim.Render(" ✓ "+ago(m.snap.Now, p.Synced))
+	}
+	return p.Name + sDim.Render(" not synced yet")
 }

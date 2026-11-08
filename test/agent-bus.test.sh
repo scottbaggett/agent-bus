@@ -1092,6 +1092,10 @@ assert_has "by name" "$oc" "$out"
 assert_eq "snapshot lists the linked Mac and its agents, for the TUI" "bmac $oc" \
   "$(pa snapshot | jq -r '.peers[] | "\(.name) \(.seats[0].addr)"')"
 mkdir -p "$PA/nossh"; printf '#!/bin/sh\nexit 255\n' >"$PA/nossh/ssh"; chmod +x "$PA/nossh/ssh"
+mkdir -p "$PA/denyssh"; printf '#!/bin/sh\necho "Permission denied (publickey)." >&2; exit 255\n' >"$PA/denyssh/ssh"; chmod +x "$PA/denyssh/ssh"
+PATH="$PA/denyssh:$PATH" pa peer sync >/dev/null 2>&1 || true
+assert_eq "snapshot says why the last sync with a Mac failed" "false auth failed" \
+  "$(pa snapshot | jq -r '.peers[] | "\(.ok) \(.error)"')"
 out=$(AGENT_BUS_NO_PUSH=0 PATH="$PA/nossh:$PATH" pa post --to "$oc" -m "# hi" 2>&1 || true)
 assert_has "a post names the Mac its recipient is on" "is on bmac; sending it there" "$out"
 # Catch-up runs from the hooks at most once a minute, in the background.

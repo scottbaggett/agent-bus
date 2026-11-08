@@ -1707,7 +1707,7 @@ peer_key_ensure() {
 peer_pub() { cut -d' ' -f1,2 "$PEER_KEY.pub"; }
 peer_ssh() { # host args...   (args reach `peer serve` as SSH_ORIGINAL_COMMAND)
   local host="$1"; shift
-  local err=/dev/null; [ -n "${AGENT_BUS_PEER_DEBUG:-}" ] && err=/dev/stderr
+  local err=${AGENT_BUS_PEER_ERRFILE:-/dev/null}; [ -n "${AGENT_BUS_PEER_DEBUG:-}" ] && err=/dev/stderr
   ssh -i "$PEER_KEY" -o IdentitiesOnly=yes -o BatchMode=yes \
     -o ConnectTimeout="${AGENT_BUS_PEER_TIMEOUT:-3}" "$host" "$@" 2>"$err"
 }
@@ -1799,25 +1799,46 @@ seat_on_peer() { peer_of_seat "$1" >/dev/null || { [ -n "$(peer_list)" ] && [ ! 
 peer_self() { /usr/sbin/scutil --get LocalHostName 2>/dev/null || hostname -s; }
 
 peer_push() { # host
-  local host="$1" since now
+  local host="$1" since now errf
   since=$(cat "$(peer_cursor "$host" pushed)" 2>/dev/null || echo 0)
   now=$(now_epoch)
+  mkdir -p "$BUS/state"; errf="$BUS/state/peer.$host.err.tmp"
   # Overlap by five minutes: clocks differ, and the receiver drops duplicates.
-  if peer_export $((since > 300 ? since - 300 : 0)) | peer_ssh "$host" ingest "$(peer_self).local"; then
-    printf '%s\n' "$now" >"$(peer_cursor "$host" pushed)"
+  if peer_export $((since > 300 ? since - 300 : 0)) | AGENT_BUS_PEER_ERRFILE="$errf" peer_ssh "$host" ingest "$(peer_self).local"; then
+    printf '%s\n' "$now" >"$(peer_cursor "$host" pushed)"; rm -f "$errf"
   else
+    peer_health "$host" fail "$errf"
     printf 'peer: could not reach %s (asleep, off the network, or Remote Login is off); it catches up at the next sync\n' "$host" >&2
     return 1
   fi
 }
 peer_pull() { # host
-  local host="$1" since now
+  local host="$1" since now errf
   since=$(cat "$(peer_cursor "$host" pulled)" 2>/dev/null || echo 0)
   now=$(now_epoch)
-  if peer_ssh "$host" export $((since > 300 ? since - 300 : 0)) | peer_ingest "$host"; then
+  mkdir -p "$BUS/state"; errf="$BUS/state/peer.$host.err.tmp"
+  if AGENT_BUS_PEER_ERRFILE="$errf" peer_ssh "$host" export $((since > 300 ? since - 300 : 0)) | peer_ingest "$host"; then
     printf '%s\n' "$now" >"$(peer_cursor "$host" pulled)"
     peer_fetch_seats "$host"
-  else return 1; fi
+    peer_health "$host" ok "$errf"
+  else peer_health "$host" fail "$errf"; return 1; fi
+}
+
+# How the last sync with a peer went, for snapshot (the TUI header, the menu
+# bar): ok, or why not, in words a person can act on.
+peer_health_file() { printf '%s/state/peer.%s.health.json' "$BUS" "$1"; }
+peer_health() { # host ok|fail errfile
+  local why="" e; e=$(cat "$3" 2>/dev/null || true); rm -f "$3"
+  if [ "$2" = fail ]; then
+    case "$e" in
+      *"Permission denied"*|*"Too many authentication"*) why="auth failed" ;;
+      *"timed out"*|*"Operation timed out"*) why="timeout" ;;
+      *"Could not resolve"*|*"No route"*|*"Host is down"*|*"Connection refused"*) why="host down" ;;
+      *) why="sync failed" ;;
+    esac
+  fi
+  jq -nc --argjson at "$(now_epoch)" --arg ok "$2" --arg why "$why" \
+    '{at: $at, ok: ($ok == "ok"), error: $why}' >"$(peer_health_file "$1")" 2>/dev/null || true
 }
 
 # The live seats here, for a peer's `who`. Local seats only, never ones
@@ -2843,7 +2864,9 @@ peer_snapshot_json() {
     f=$(peer_seats_file "$h")
     out=$(jq -c --arg h "$h" --argjson seats "$( [ -f "$f" ] && cat "$f" || printf '[]')" \
       --argjson synced "$( [ -f "$f" ] && { stat -f %m "$f" 2>/dev/null || stat -c %Y "$f"; } || printf 0)" \
-      '. + [{host: $h, name: ($h | sub("\\.local$"; "")), synced: $synced, seats: $seats}]' <<<"$out")
+      --argjson health "$(cat "$(peer_health_file "$h")" 2>/dev/null || printf '{}')" \
+      '. + [{host: $h, name: ($h | sub("\\.local$"; "")), synced: $synced, seats: $seats,
+             checked: ($health.at // 0), ok: ($health.ok != false), error: ($health.error // "")}]' <<<"$out")
   done
   printf '%s' "$out"
 }

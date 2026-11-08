@@ -43,9 +43,7 @@ func (m model) panelView(w, h int) string {
 	// What it is doing right now leads: that is what you came to see.
 	b = append(b, m.nowLines(t, inner)...)
 	ns := m.panelNeeds()
-	if len(ns) == 0 {
-		b = append(b, sDim.Render("Nothing waiting on you · c: its timeline"))
-	} else {
+	if len(ns) > 0 {
 		title := fmt.Sprintf("Waiting on you · %d", len(ns))
 		b = append(b, lipgloss.NewStyle().Foreground(cBad).Bold(true).Render(title), "")
 		for i, n := range ns {
@@ -80,10 +78,6 @@ func (m model) panelView(w, h int) string {
 		}
 	}
 
-	if p := m.panelPorts(s); p != "" {
-		b = append(b, "", sDim.Render("Ports  ")+lipgloss.NewStyle().Foreground(cGood).Width(inner-7).Render(p))
-	}
-
 	// The bottom: reply box, close confirmation, or nothing.
 	var foot []string
 	switch m.mode {
@@ -109,6 +103,47 @@ func (m model) panelView(w, h int) string {
 		bodyH--
 	}
 	lines := strings.Split(strings.Join(b, "\n"), "\n")
+	// The rest of the height is a tab: its live timeline, or your chat with it.
+	chat := m.panelTab == 1
+	box := ""
+	if chat {
+		if m.mode == modePanelChat {
+			box = sAccent.Render("› ") + m.input.View()
+		} else {
+			box = sDim.Render("i: message " + friendlyName(s.Addr) + " as you")
+		}
+	}
+	if room := bodyH - len(lines) - 2 - boolInt(chat)*2; room > 3 && m.logAddr == s.Addr {
+		var log []string
+		for i := len(m.logMsgs) - 1; i >= 0 && len(log) < room; i-- {
+			c := m.logMsgs[i]
+			if chat && !isChat(c) {
+				continue
+			}
+			log = append(m.logEntry(c, inner, s), log...)
+		}
+		for len(log) > 0 && strings.TrimSpace(ansiStrip(log[0])) == "" {
+			log = log[1:]
+		}
+		if len(log) > room {
+			log = log[len(log)-room:]
+		}
+		lines = append(lines, sDim.Render(strings.Repeat("─", inner)), m.tabBar(inner))
+		if len(log) == 0 {
+			empty := "Nothing in its timeline yet"
+			if chat {
+				empty = "No messages between you yet"
+			}
+			log = []string{sDim.Render(empty)}
+		}
+		for len(lines)+len(log) < bodyH-boolInt(chat)*2 {
+			lines = append(lines, "")
+		}
+		lines = append(lines, log...)
+		if chat {
+			lines = append(lines, "", box)
+		}
+	}
 	if len(lines) > bodyH {
 		lines = append(lines[:bodyH-1], sDim.Render("…"))
 	}
@@ -190,4 +225,36 @@ func (m model) panelPorts(s Seat) string {
 		p = append(p, fmt.Sprintf(":%d %s", x.Port, clean(x.Cmd)))
 	}
 	return strings.Join(p, "  ")
+}
+
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// isChat: your conversation with the agent: what you typed in its window and
+// its replies, and messages between you over the bus. No tools, no other agents.
+func isChat(c chatMsg) bool {
+	switch c.Kind {
+	case "asked", "said":
+		return true
+	case "msg":
+		return c.Mine || c.ToYou
+	case "resolve":
+		return c.Mine
+	}
+	return false
+}
+
+func (m model) tabBar(w int) string {
+	tab := func(name string, on bool) string {
+		if on {
+			return lipgloss.NewStyle().Foreground(cAccent).Bold(true).Underline(true).Render(name)
+		}
+		return sDim.Render(name)
+	}
+	bar := tab("Timeline", m.panelTab == 0) + "   " + tab("Chat", m.panelTab == 1)
+	return bar + sDim.Render(fit("   t switches · c full screen", max(0, w-lipgloss.Width(bar))))
 }

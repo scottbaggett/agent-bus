@@ -38,6 +38,7 @@ const (
 	modeSearch
 	modeOffboard
 	modeWelcome
+	modePanelChat // typing a message in the panel's chat tab
 )
 
 type model struct {
@@ -64,6 +65,10 @@ type model struct {
 	chatPeer    string
 	chatMsgs    []chatMsg
 	chatStamp   string
+	logAddr     string // whose log the side panel holds
+	logStamp    string
+	logMsgs     []chatMsg
+	panelTab    int // 0 timeline, 1 chat
 	chatView    viewport.Model
 	chatSending bool
 	chatNote    string
@@ -143,8 +148,16 @@ func (m model) needsCount() int {
 const panelMin = 44
 
 // panelW is the side panel's width when it is open, 0 otherwise.
+// The side panel is always there when the window is wide enough: the
+// selected agent's state and its live log are the point of the screen.
 func (m model) panelW() int {
-	if m.mode != modePanel && m.mode != modeReply && m.mode != modeConfirm && m.mode != modeOpen && m.mode != modeOffboard {
+	switch m.mode {
+	case modePanel, modeReply, modeConfirm, modeOpen, modeOffboard, modePanelChat:
+	case modeNormal, modeSearch:
+		if m.w < 110 {
+			return 0
+		}
+	default:
 		return 0
 	}
 	w := m.w * 2 / 5
@@ -203,6 +216,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case chatLoaded:
+		if msg.addr == m.logAddr && msg.err == nil {
+			m.logMsgs = msg.msgs
+		}
 		if m.mode == modeChat && msg.addr == m.chatSeat.Addr {
 			if msg.err != nil {
 				m.setStatus("✗ could not read the conversation: " + msg.err.Error())
@@ -221,6 +237,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.offboardDone(msg), loadCmd()
 
 	case chatSent:
+		m.logStamp = "" // the panel's log reloads with it
 		m.chatSending = false
 		m.chatNote = ""
 		if msg.err != nil {
@@ -240,6 +257,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mode == modeChat {
 			return m, loadChat(m.snap.Bus, m.chatSeat)
 		}
+		if msg.err == nil {
+			m.setStatus("✓ sent · " + m.chatNote)
+		}
 		return m, nil
 
 	case tickMsg:
@@ -255,6 +275,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if st := ledgerStamp(m.snap.Bus) + transcriptStamp(m.chatSeat); st != m.chatStamp {
 				m.chatStamp = st
 				cmd = tea.Batch(cmd, loadChat(m.snap.Bus, m.chatSeat))
+			}
+		}
+		if t, ok := m.selectedTile(); ok && m.panelW() > 0 && m.mode != modeChat {
+			if t.seat.Addr != m.logAddr {
+				m.logAddr, m.logMsgs, m.logStamp = t.seat.Addr, nil, ""
+			}
+			if st := ledgerStamp(m.snap.Bus) + transcriptStamp(t.seat); st != m.logStamp {
+				m.logStamp = st
+				cmd = tea.Batch(cmd, loadChat(m.snap.Bus, t.seat))
 			}
 		}
 		if !m.scanning && time.Since(m.servicesAt) > 10*time.Second {
@@ -469,6 +498,8 @@ func (m model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.mode = modeNormal
 		markWelcomed()
 		return m, nil
+	case modePanelChat:
+		return m.panelChatKey(k)
 	case modeConfirm:
 		m.mode = modePanel
 		switch k.String() {
@@ -548,6 +579,11 @@ func (m model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.startOpen(m.panel)
 		case "O":
 			return m.startOffboard()
+		case "t":
+			m.panelTab = 1 - m.panelTab
+			return m, nil
+		case "i":
+			return m.startPanelChat()
 		case "1", "2", "3", "4", "5", "6", "7", "8", "9":
 			return m.goToNeed(int(k.String()[0] - '1'))
 		case "left", "right", "up", "down", "h", "l", "j", "k":
@@ -566,6 +602,15 @@ func (m model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.startOffboard()
 	case "a":
 		return m, m.openActivity()
+	case "t":
+		m.panelTab = 1 - m.panelTab
+	case "i":
+		if m.panelW() > 0 {
+			if t, ok := m.selectedTile(); ok {
+				m.panel = t
+				return m.startPanelChat()
+			}
+		}
 	case "w":
 		m.welcome, m.mode = welcomeFirst, modeWelcome
 		if notesFor(version) != nil {
@@ -725,6 +770,11 @@ func (m model) View() string {
 	agents := m.gridBody(gw, gh) + "\n" + m.selectedLine(gw)
 	body := m.box("AGENTS", agents, m.w-pw, gh+3, m.mode == modeNormal)
 	if pw > 0 {
+		if m.mode == modeNormal || m.mode == modeSearch {
+			if t, ok := m.selectedTile(); ok {
+				m.panel = t // the panel follows the selection
+			}
+		}
 		body = lipgloss.JoinHorizontal(lipgloss.Top, body, m.panelView(pw, gh+3))
 	}
 	parts := []string{m.headerView(), body}
@@ -813,7 +863,7 @@ func (m model) footerView() string {
 	if m.showOff && m.mode == modeNormal {
 		return sDim.Render(fit(" offboarded in the last day · c: timeline · ^: back to live agents · q: quit", m.w))
 	}
-	keys := []string{"arrows or click: pick an agent", "/: search", "enter: details", "o: open in…", "c: timeline & chat", "a: all activity", "O: offboard", "g: grouped by " + m.groupBy.String(), "?: help", "q: quit"}
+	keys := []string{"arrows or click: pick an agent", "/: search", "enter: details", "o: open in…", "t: timeline/chat", "i: message", "c: full screen", "a: all activity", "O: offboard", "g: grouped by " + m.groupBy.String(), "?: help", "q: quit"}
 	if m.query != "" {
 		keys = append([]string{sAccent.Render("/" + m.query), "esc: clear"}, keys[1:]...)
 	}
@@ -824,9 +874,11 @@ func (m model) footerView() string {
 	case modeOpen:
 		keys = []string{"↑↓ or number: pick", "enter: open", "esc: back"}
 	case modePanel:
-		keys = []string{"arrows: move", "⏎: go to its app", "tab: next item", "r answer", "x close it", "c timeline & chat", "o open in…", "O offboard", "esc back"}
+		keys = []string{"arrows: move", "⏎: go to its app", "tab: next item", "r answer", "x close it", "t timeline/chat", "i message", "c full screen", "o open in…", "O offboard", "esc back"}
 	case modeReply:
 		keys = []string{"enter sends and closes it", "esc cancels"}
+	case modePanelChat:
+		keys = []string{"enter sends as you, over the bus", "esc cancels"}
 	case modeOffboard:
 		keys = []string{"y asks it to hand on or close its work and run agent-bus offboard", "any other key cancels"}
 	case modeConfirm:

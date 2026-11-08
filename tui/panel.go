@@ -114,23 +114,10 @@ func (m model) panelView(w, h int) string {
 		}
 	}
 	if room := bodyH - len(lines) - 2 - boolInt(chat)*2; room > 3 && m.logAddr == s.Addr {
-		var log []string
-		for i := len(m.logMsgs) - 1; i >= 0 && len(log) < room; i-- {
-			c := m.logMsgs[i]
-			if chat && !isChat(c) {
-				continue
-			}
-			// Entries can be several lines each; count real lines, or the
-			// panel outgrows the grid and the whole screen jumps.
-			entry := strings.Split(strings.Join(m.logEntry(c, inner, s), "\n"), "\n")
-			log = append(entry, log...)
-		}
-		for len(log) > 0 && strings.TrimSpace(ansiStrip(log[0])) == "" {
-			log = log[1:]
-		}
-		if len(log) > room {
-			log = log[len(log)-room:]
-		}
+		log := m.panelLogLines(s, inner, chat, room+m.logScroll)
+		// Scrolled back: show an earlier window, ending logScroll lines up.
+		end := len(log) - min(m.logScroll, max(0, len(log)-room))
+		log = log[max(0, end-room):end]
 		lines = append(lines, sDim.Render(strings.Repeat("─", inner)), m.tabBar(inner))
 		if len(log) == 0 {
 			empty := "Nothing in its timeline yet"
@@ -264,5 +251,27 @@ func (m model) tabBar(w int) string {
 		return sDim.Render(name)
 	}
 	bar := tab("Timeline", m.panelTab == 0) + "   " + tab("Chat", m.panelTab == 1)
-	return bar + sDim.Render(fit("   t switches · c full screen", max(0, w-lipgloss.Width(bar))))
+	hint := "   t switches · c full screen"
+	if m.logScroll > 0 {
+		hint = "   scrolled back · wheel down for the newest"
+	}
+	return bar + sDim.Render(fit(hint, max(0, w-lipgloss.Width(bar))))
+}
+
+// panelLogLines is the tab's log as screen lines, newest last, at least want
+// lines of it when there are that many. Entries can be several lines each;
+// counting real lines keeps the panel from outgrowing the grid.
+func (m model) panelLogLines(s Seat, inner int, chat bool, want int) []string {
+	var log []string
+	for i := len(m.logMsgs) - 1; i >= 0 && len(log) < want; i-- {
+		c := m.logMsgs[i]
+		if chat && !isChat(c) {
+			continue
+		}
+		log = append(strings.Split(strings.Join(m.logEntry(c, inner, s), "\n"), "\n"), log...)
+	}
+	for len(log) > 0 && strings.TrimSpace(ansiStrip(log[0])) == "" {
+		log = log[1:]
+	}
+	return log
 }

@@ -69,6 +69,7 @@ type model struct {
 	logStamp    string
 	logMsgs     []chatMsg
 	panelTab    int // 0 timeline, 1 chat
+	logScroll   int // lines the panel's log is scrolled back from the newest
 	chatView    viewport.Model
 	chatSending bool
 	chatNote    string
@@ -279,7 +280,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if t, ok := m.selectedTile(); ok && m.panelW() > 0 && m.mode != modeChat {
 			if t.seat.Addr != m.logAddr {
-				m.logAddr, m.logMsgs, m.logStamp = t.seat.Addr, nil, ""
+				m.logAddr, m.logMsgs, m.logStamp, m.logScroll = t.seat.Addr, nil, "", 0
 			}
 			if st := ledgerStamp(m.snap.Bus) + transcriptStamp(t.seat); st != m.logStamp {
 				m.logStamp = st
@@ -443,11 +444,27 @@ func (m model) mouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	switch msg.Button {
-	case tea.MouseButtonWheelUp:
-		m.moveGrid(0, -1, m.gridW())
-		return m, nil
-	case tea.MouseButtonWheelDown:
-		m.moveGrid(0, 1, m.gridW())
+	case tea.MouseButtonWheelUp, tea.MouseButtonWheelDown:
+		up := msg.Button == tea.MouseButtonWheelUp
+		// Over the panel the wheel scrolls its log; over the grid it moves.
+		if pw := m.panelW(); pw > 0 && msg.X >= m.w-pw {
+			seat := m.panel.seat
+			if t, ok := m.selectedTile(); ok && (m.mode == modeNormal || m.mode == modeSearch) {
+				seat = t.seat
+			}
+			if up {
+				total := len(m.panelLogLines(seat, pw-4, m.panelTab == 1, 1<<30))
+				m.logScroll = min(m.logScroll+3, max(0, total-5))
+			} else {
+				m.logScroll = max(0, m.logScroll-3)
+			}
+			return m, nil
+		}
+		if up {
+			m.moveGrid(0, -1, m.gridW())
+		} else {
+			m.moveGrid(0, 1, m.gridW())
+		}
 		return m, nil
 	case tea.MouseButtonLeft:
 	default:
@@ -580,7 +597,7 @@ func (m model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "O":
 			return m.startOffboard()
 		case "t":
-			m.panelTab = 1 - m.panelTab
+			m.panelTab, m.logScroll = 1-m.panelTab, 0
 			return m, nil
 		case "i":
 			return m.startPanelChat()
@@ -603,7 +620,7 @@ func (m model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "a":
 		return m, m.openActivity()
 	case "t":
-		m.panelTab = 1 - m.panelTab
+		m.panelTab, m.logScroll = 1-m.panelTab, 0
 	case "i":
 		if m.panelW() > 0 {
 			if t, ok := m.selectedTile(); ok {

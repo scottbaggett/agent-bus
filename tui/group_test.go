@@ -3,6 +3,8 @@ package main
 import (
 	"strings"
 	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 func TestGroupBy(t *testing.T) {
@@ -74,5 +76,21 @@ func TestScreenHeightStableAcrossTabs(t *testing.T) {
 		if got := len(strings.Split(m.View(), "\n")); got != m.h {
 			t.Errorf("tab %d: screen is %d lines, want %d", tab, got, m.h)
 		}
+	}
+}
+
+func TestWheelOverPanelScrollsItsLog(t *testing.T) {
+	m := newModel()
+	m.w, m.h = 160, 40
+	m.snap = &Snapshot{Now: 100, Seats: []Seat{{Addr: "claude/a.1", Tool: "claude", Epoch: 99}, {Addr: "claude/b.2", Tool: "claude", Epoch: 98}}}
+	m.logAddr = "claude/a.1"
+	for i := 0; i < 50; i++ {
+		m.logMsgs = append(m.logMsgs, chatMsg{Kind: "said", Body: "reply", Epoch: int64(i)})
+	}
+	before := m.cursor[paneAgents]
+	mm, _ := m.mouse(tea.MouseMsg{X: m.w - 5, Y: 20, Button: tea.MouseButtonWheelUp, Action: tea.MouseActionPress})
+	m = mm.(model)
+	if m.cursor[paneAgents] != before || m.logScroll == 0 {
+		t.Fatalf("wheel over the panel: cursor %d→%d, scroll %d", before, m.cursor[paneAgents], m.logScroll)
 	}
 }

@@ -2,11 +2,13 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -142,4 +144,112 @@ func oneLine(s string) string {
 		s = string(r[:200]) + "…"
 	}
 	return s
+}
+
+func claudeTranscript(session string) string {
+	if session == "" || strings.ContainsAny(session, "/\\*?[") {
+		return ""
+	}
+	matches, _ := filepath.Glob(filepath.Join(homeDir(), ".claude", "projects", "*", session+".jsonl"))
+	if len(matches) == 0 {
+		return ""
+	}
+	return matches[0]
+}
+
+// transcriptStamp changes when the agent's session log does.
+func transcriptStamp(s Seat) string {
+	if s.Tool != "claude" {
+		return ""
+	}
+	p := claudeTranscript(s.Session)
+	fi, err := os.Stat(p)
+	if p == "" || err != nil {
+		return ""
+	}
+	return fmt.Sprintf("|%d|%d", fi.Size(), fi.ModTime().UnixNano())
+}
+
+// claudeLog is the recent part of an agent's own session as log entries:
+// your prompts, its replies, and one line per tool it ran.
+func claudeLog(session string) []chatMsg {
+	p := claudeTranscript(session)
+	if p == "" {
+		return nil
+	}
+	f, err := os.Open(p)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	const tail = 2 << 20
+	if fi, err := f.Stat(); err == nil && fi.Size() > tail {
+		_, _ = f.Seek(fi.Size()-tail, io.SeekStart)
+	}
+	b, _ := io.ReadAll(f)
+	var out []chatMsg
+	for _, l := range strings.Split(string(b), "\n") {
+		if !strings.Contains(l, `"type":"user"`) && !strings.Contains(l, `"type":"assistant"`) {
+			continue
+		}
+		var r struct {
+			Type      string `json:"type"`
+			Sidechain bool   `json:"isSidechain"`
+			Meta      bool   `json:"isMeta"`
+			Timestamp string `json:"timestamp"`
+			UUID      string `json:"uuid"`
+			Message   struct {
+				Content json.RawMessage `json:"content"`
+			} `json:"message"`
+		}
+		if json.Unmarshal([]byte(l), &r) != nil || r.Sidechain || r.Meta {
+			continue
+		}
+		t, err := time.Parse(time.RFC3339Nano, r.Timestamp)
+		if err != nil {
+			continue
+		}
+		at := t.Unix()
+		var str string
+		var parts []struct {
+			Type  string          `json:"type"`
+			Text  string          `json:"text"`
+			Name  string          `json:"name"`
+			Input json.RawMessage `json:"input"`
+		}
+		if json.Unmarshal(r.Message.Content, &str) != nil {
+			_ = json.Unmarshal(r.Message.Content, &parts)
+		}
+		switch r.Type {
+		case "user":
+			text := str
+			for _, p := range parts {
+				if p.Type == "text" {
+					text += p.Text
+				}
+			}
+			text = strings.TrimSpace(text)
+			// Skip what the harness injects rather than what you typed.
+			if text == "" || strings.HasPrefix(text, "<") || strings.HasPrefix(text, "[Request interrupted") ||
+				strings.HasPrefix(text, "Caveat:") {
+				continue
+			}
+			out = append(out, chatMsg{ID: r.UUID, Epoch: at, Kind: "asked", Body: text, Mine: true})
+		case "assistant":
+			for _, p := range parts {
+				switch p.Type {
+				case "text":
+					if strings.TrimSpace(p.Text) != "" {
+						out = append(out, chatMsg{ID: r.UUID, Epoch: at, Kind: "said", Body: p.Text})
+					}
+				case "tool_use":
+					out = append(out, chatMsg{ID: r.UUID, Epoch: at, Kind: "tool", Subject: p.Name + ": " + toolGist(p.Input)})
+				}
+			}
+		}
+	}
+	if len(out) > 300 {
+		out = out[len(out)-300:]
+	}
+	return out
 }

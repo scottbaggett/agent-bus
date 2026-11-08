@@ -207,20 +207,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.err != nil {
 				m.setStatus("✗ could not read the conversation: " + msg.err.Error())
 			} else {
-				var keep string
-				if !m.chatFollow && m.chatSel >= 0 && m.chatSel < len(m.chatMsgs) {
-					keep = m.chatMsgs[m.chatSel].ID + m.chatMsgs[m.chatSel].Kind
-				}
+				off := m.chatView.YOffset
 				m.chatMsgs = msg.msgs
-				m.chatSel = len(m.chatMsgs) - 1
-				if keep != "" {
-					for i, c := range m.chatMsgs {
-						if c.ID+c.Kind == keep {
-							m.chatSel = i
-						}
-					}
-				}
 				m.renderChat()
+				if !m.chatFollow {
+					m.chatView.SetYOffset(off) // keep your place while reading
+				}
 			}
 		}
 		return m, nil
@@ -246,7 +238,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if m.mode == modeChat {
-			return m, loadChat(m.snap.Bus, m.chatSeat.Addr)
+			return m, loadChat(m.snap.Bus, m.chatSeat)
 		}
 		return m, nil
 
@@ -259,9 +251,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if m.mode == modeChat && m.snap != nil && !m.chatSending {
-			if st := ledgerStamp(m.snap.Bus); st != m.chatStamp {
+			// The bus changed, or its own session did.
+			if st := ledgerStamp(m.snap.Bus) + transcriptStamp(m.chatSeat); st != m.chatStamp {
 				m.chatStamp = st
-				cmd = tea.Batch(cmd, loadChat(m.snap.Bus, m.chatSeat.Addr))
+				cmd = tea.Batch(cmd, loadChat(m.snap.Bus, m.chatSeat))
 			}
 		}
 		if !m.scanning && time.Since(m.servicesAt) > 10*time.Second {

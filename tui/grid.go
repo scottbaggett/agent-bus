@@ -265,6 +265,28 @@ type placed struct{ x, y int }
 // group is a header over its tiles. It returns the rendered lines and where
 // each tile landed, for scrolling and moving the selection.
 func (m model) gridLayout(w int) ([]string, []placed) {
+	// Laying out and drawing every tile is the costly part of a frame, and a
+	// burst of wheel or key events asks for many frames: reuse the last
+	// layout while nothing it depends on has changed.
+	key := fmt.Sprintf("%d|%d|%p|%s|%d|%v|%p|%p|%p|%p|%d|%d", w, m.cursor[paneAgents], m.snap, m.query, m.groupBy, m.showOff,
+		m.now, m.apps, m.titles, m.services, len(m.services), len(m.now))
+	if c := m.layout; c != nil && c.key == key {
+		return c.lines, c.pos
+	}
+	lines, pos := m.layoutGrid(w)
+	if m.layout != nil {
+		*m.layout = layoutCache{key, lines, pos}
+	}
+	return lines, pos
+}
+
+type layoutCache struct {
+	key   string
+	lines []string
+	pos   []placed
+}
+
+func (m model) layoutGrid(w int) ([]string, []placed) {
 	tiles, groups := m.tiles()
 	if len(tiles) == 0 {
 		switch {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
 
@@ -22,7 +23,7 @@ import (
 type chatMsg struct {
 	ID      string
 	Epoch   int64
-	Kind    string // msg, resolve, decision
+	Kind    string // msg, resolve, decision; asked, said, tool (its own session)
 	From    string
 	To      string
 	State   string
@@ -80,7 +81,8 @@ func addressedTo(to, addr string) bool {
 }
 
 // loadChat reads the ledger (read-only) for one agent's timeline.
-func loadChat(bus, addr string) tea.Cmd {
+func loadChat(bus string, seat Seat) tea.Cmd {
+	addr := seat.Addr
 	return func() tea.Msg {
 		f, err := os.Open(bus + "/ledger.jsonl")
 		if err != nil {
@@ -133,6 +135,11 @@ func loadChat(bus, addr string) tea.Cmd {
 		if len(out) > 400 {
 			out = out[len(out)-400:]
 		}
+		// Its own session: what you asked, what it said, the tools it ran.
+		if seat.Tool == "claude" && seat.Session != "" {
+			out = append(out, claudeLog(seat.Session)...)
+			sort.SliceStable(out, func(i, j int) bool { return out[i].Epoch < out[j].Epoch })
+		}
 		for i := range out {
 			if out[i].Kind != "msg" {
 				continue
@@ -172,7 +179,7 @@ func (m *model) openChat(s Seat, peer string) tea.Cmd {
 	m.input.Width = m.w - 6
 	m.input.Focus()
 	m.chatView = viewport.New(m.w/2, m.chatHeight())
-	return tea.Batch(loadChat(m.snap.Bus, s.Addr), textinput.Blink)
+	return tea.Batch(loadChat(m.snap.Bus, s), textinput.Blink)
 }
 
 // openActivity is the same screen over every agent: the whole bus, newest at
@@ -187,7 +194,7 @@ func (m *model) openActivity() tea.Cmd {
 	m.input.SetValue("")
 	m.input.Blur()
 	m.chatView = viewport.New(m.w/2, m.chatHeight())
-	return loadChat(m.snap.Bus, "")
+	return loadChat(m.snap.Bus, Seat{})
 }
 
 func (m model) allActivity() bool { return m.mode == modeChat && m.chatSeat.Addr == "" }
@@ -246,69 +253,81 @@ func when(epoch int64) string {
 	return t.Format("Jan 2")
 }
 
-// renderChat refreshes the detail pane for the selected entry.
+// renderChat lays the whole log out, full width, every entry in full.
 func (m *model) renderChat() {
-	_, dw := m.chatWidths()
-	m.chatView.Width, m.chatView.Height = dw-4, m.chatHeight()-2
+	w := m.w - 4
+	m.chatView.Width, m.chatView.Height = w, m.chatHeight()
 	m.input.Width = m.w - 6
-	if m.chatSel < 0 || m.chatSel >= len(m.chatMsgs) {
+	if len(m.chatMsgs) == 0 {
+		msg := "Nothing yet from or to " + friendlyName(m.chatSeat.Addr) + ". Say something below."
 		if m.allActivity() {
-			m.chatView.SetContent(sDim.Render("Nothing on the bus yet."))
-		} else {
-			m.chatView.SetContent(sDim.Render("Nothing on the bus from or to " + friendlyName(m.chatSeat.Addr) + " yet.\nSay something below."))
+			msg = "Nothing on the bus yet."
 		}
+		m.chatView.SetContent(sDim.Render(msg))
 		return
 	}
-	c := m.chatMsgs[m.chatSel]
-	w := dw - 6
 	var b []string
-	label, st := m.rowLabel(c)
-	b = append(b, st.Bold(true).Render(label))
-	meta := time.Unix(c.Epoch, 0).Format("Mon Jan 2 15:04")
-	if c.State != "" {
-		meta += " · " + c.State
-	}
-	if c.Close != "" {
-		meta += " · closes its parent (" + c.Close + ")"
-	}
-	if c.Reason != "" {
-		meta += " · " + c.Reason
-	}
-	b = append(b, sDim.Render(meta))
-	if c.Kind == "msg" {
-		b = append(b, sDim.Render(fit(clean(c.From)+" → "+clean(c.To), w)))
-	}
-	b = append(b, "")
-	body := strings.TrimSpace(c.Body)
-	if body == "" {
-		body = c.Subject
-	}
-	first, rest, _ := strings.Cut(clean2(body), "\n")
-	b = append(b, lipgloss.NewStyle().Bold(true).Width(w).Render(strings.TrimLeft(first, "# ")))
-	if strings.TrimSpace(rest) != "" {
-		b = append(b, lipgloss.NewStyle().Width(w).Render(rest))
-	}
-	if c.ID != "" {
-		b = append(b, "", sDim.Render(c.ID))
+	var lastDay string
+	for _, c := range m.chatMsgs {
+		t := time.Unix(c.Epoch, 0)
+		if d := t.Format("Mon Jan 2"); d != lastDay {
+			lastDay = d
+			b = append(b, "", sDim.Render("── "+d+" "+strings.Repeat("─", max(0, w-len(d)-4))))
+		}
+		b = append(b, m.logEntry(c, w)...)
 	}
 	m.chatView.SetContent(strings.Join(b, "\n"))
-	m.chatView.GotoTop()
+	if m.chatFollow {
+		m.chatView.GotoBottom()
+	}
 }
 
-func (m model) chatWidths() (int, int) {
-	lw := m.w * 55 / 100
-	return lw, m.w - lw
+// logEntry is one entry: a header line (time, who, what kind) and its text.
+func (m model) logEntry(c chatMsg, w int) []string {
+	at := sDim.Render(time.Unix(c.Epoch, 0).Format("15:04") + "  ")
+	body := lipgloss.NewStyle().Width(w - 7).MarginLeft(7)
+	text := strings.TrimSpace(c.Body)
+	if text == "" {
+		text = c.Subject
+	}
+	text = clean2(text)
+	switch c.Kind {
+	case "tool":
+		// One dim line: tools are the texture, not the story.
+		return []string{at + sDim.Render(fit("▸ "+oneLine(c.Subject), w-7))}
+	case "asked":
+		return []string{"", at + lipgloss.NewStyle().Foreground(cAccent).Bold(true).Render("you"),
+			body.Render(lipgloss.NewStyle().Foreground(cAccent).Render(capLines(text, 12)))}
+	case "said":
+		name := lipgloss.NewStyle().Foreground(lipgloss.Color(avatarColor(toolOf(m.chatSeat)))).Bold(true).Render(friendlyName(m.chatSeat.Addr))
+		return []string{"", at + name, body.Render(capLines(text, 30))}
+	case "resolve":
+		label, st := m.rowLabel(c)
+		return []string{at + st.Render(label+" "+c.Reason) + sDim.Render("  "+fit(oneLine(c.Subject), w-30))}
+	case "decision":
+		label, st := m.rowLabel(c)
+		return []string{"", at + st.Render(label), body.Render(text)}
+	}
+	label, st := m.rowLabel(c)
+	state := c.State
+	if c.Close != "" {
+		state = "closed " + c.Close
+	}
+	head := at + st.Bold(true).Render(label) + "  " + kindStyle(c.State).Render(state) + sDim.Render("  on the bus")
+	return []string{"", head, body.Render(capLines(text, 30))}
+}
+
+func capLines(s string, n int) string {
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	if len(lines) > n {
+		lines = append(lines[:n], "…")
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m model) chatKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
-	move := func(d int) (tea.Model, tea.Cmd) {
-		n := len(m.chatMsgs)
-		if n == 0 {
-			return m, nil
-		}
-		m.chatSel = max(0, min(n-1, m.chatSel+d))
-		m.chatFollow = m.chatSel == n-1
-		m.renderChat()
+	scrolled := func() (tea.Model, tea.Cmd) {
+		m.chatFollow = m.chatView.AtBottom()
 		return m, nil
 	}
 	switch k.String() {
@@ -317,23 +336,23 @@ func (m model) chatKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.input.Blur()
 		return m, nil
 	case "up":
-		return move(-1)
+		m.chatView.LineUp(1)
+		return scrolled()
 	case "down":
-		return move(1)
-	case "pgup":
-		return move(-10)
-	case "pgdown":
-		return move(10)
-	case "home":
-		return move(-1 << 20)
-	case "end":
-		return move(1 << 20)
-	case "shift+up", "ctrl+u":
+		m.chatView.LineDown(1)
+		return scrolled()
+	case "pgup", "shift+up", "ctrl+u":
 		m.chatView.HalfPageUp()
-		return m, nil
-	case "shift+down", "ctrl+d":
+		return scrolled()
+	case "pgdown", "shift+down", "ctrl+d":
 		m.chatView.HalfPageDown()
-		return m, nil
+		return scrolled()
+	case "home":
+		m.chatView.GotoTop()
+		return scrolled()
+	case "end":
+		m.chatView.GotoBottom()
+		return scrolled()
 	case "q":
 		if m.allActivity() {
 			m.mode = modeNormal
@@ -362,13 +381,6 @@ func (m model) chatKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m model) chatScreen() string {
 	s := m.chatSeat
-	lw, dw := m.chatWidths()
-	h := m.chatHeight()
-	labelW := 18
-	if m.allActivity() {
-		labelW = 34
-	}
-
 	// Header: who, what it's on, where, when.
 	name := lipgloss.NewStyle().Foreground(lipgloss.Color(avatarColor(toolOf(s)))).Bold(true).Render(friendlyName(s.Addr))
 	parts := []string{name, sDim.Render(clean(s.Addr))}
@@ -378,58 +390,23 @@ func (m model) chatScreen() string {
 	if m.chatPeer != "" {
 		parts = append(parts, sDim.Render("on "+m.chatPeer))
 	}
-	seen := "seen " + ago(m.snap.Now, s.Epoch) + " ago"
-	if s.Epoch > 0 && m.snap.Now-s.Epoch > 30*60 {
-		parts = append(parts, lipgloss.NewStyle().Foreground(cWarn).Render(seen+" · may not be running"))
+	if dot := activityDot(s); dot != "" {
+		parts = append(parts, dot+sDim.Render(s.Activity))
 	} else {
-		parts = append(parts, sDim.Render(seen))
+		parts = append(parts, sDim.Render("seen "+ago(m.snap.Now, s.Epoch)+" ago"))
 	}
 	title := " " + fit(strings.Join(parts, sDim.Render(" · ")), m.w-2)
 	if m.allActivity() {
 		title = " " + sAccent.Render("All activity") + sDim.Render(fmt.Sprintf(" · every message, close and decision on the bus · %d", len(m.chatMsgs)))
 	}
-
-	// The timeline, newest at the bottom, scrolled to the selection.
-	inner := lw - 4
-	rows := h
-	var lines []string
-	if len(m.chatMsgs) == 0 {
-		lines = append(lines, sDim.Render("No activity yet."))
-	}
-	off := 0
-	if m.chatSel >= rows {
-		off = m.chatSel - rows + 1
-	}
-	for i := off; i < len(m.chatMsgs) && len(lines) < rows; i++ {
-		c := m.chatMsgs[i]
-		label, st := m.rowLabel(c)
-		state := c.State
-		if c.Close != "" {
-			state = "closed " + c.Close
-		}
-		if c.Kind == "resolve" {
-			state = c.Reason
-		}
-		row := sDim.Render(fmt.Sprintf("%-6s", when(c.Epoch))) + st.Render(fit(label, labelW)) + " " +
-			kindStyle(c.State).Render(fit(state, 12)) + " " + fit(clean(strings.TrimLeft(c.Subject, "# ")), max(4, inner-20-labelW))
-		if i == m.chatSel {
-			row = sSel.Render(fit(ansiStrip(row), inner))
-		}
-		lines = append(lines, row)
-	}
-	for len(lines) < rows {
-		lines = append([]string{""}, lines...) // newest sits at the bottom
-	}
-	list := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cAccent).
-		Width(lw-2).Height(h).Padding(0, 1).Render(strings.Join(lines, "\n"))
-	detail := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cDim).
-		Width(dw-2).Height(h).Padding(0, 1).Render(m.chatView.View())
+	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cAccent).
+		Width(m.w-2).Height(m.chatHeight()).Padding(0, 1).Render(m.chatView.View())
 
 	prompt := sAccent.Render(" › ") + m.input.View()
-	help := " ↑↓ timeline · pgup pgdn · shift+↑↓ scroll entry · enter sends as you · esc back"
+	help := " ↑↓ scroll · pgup pgdn · home end · enter sends as you (over the bus) · esc back"
 	if m.allActivity() {
-		prompt = sDim.Render(" to message an agent, open its timeline with c")
-		help = " ↑↓ timeline · pgup pgdn · shift+↑↓ scroll entry · esc back"
+		prompt = sDim.Render(" to message an agent, open its log with c")
+		help = " ↑↓ scroll · pgup pgdn · home end · esc back"
 	}
 	foot := sDim.Render(fit(help, m.w))
 	switch {
@@ -444,5 +421,5 @@ func (m model) chatScreen() string {
 		}
 		foot = st.Render(fit(" delivery: "+m.chatNote, m.w))
 	}
-	return lipgloss.JoinVertical(lipgloss.Left, title, lipgloss.JoinHorizontal(lipgloss.Top, list, detail), prompt, foot)
+	return lipgloss.JoinVertical(lipgloss.Left, title, box, prompt, foot)
 }

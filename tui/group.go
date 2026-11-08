@@ -36,18 +36,33 @@ func prefsFile() string {
 }
 
 type prefs struct {
-	GroupBy string `json:"group_by"`
+	GroupBy     string `json:"group_by,omitempty"`
+	Welcomed    bool   `json:"welcomed,omitempty"`
+	SeenVersion string `json:"seen_version,omitempty"`
+}
+
+func loadPrefs() (prefs, bool) {
+	var p prefs
+	b, err := os.ReadFile(prefsFile())
+	if err != nil {
+		return p, false
+	}
+	return p, json.Unmarshal(b, &p) == nil
+}
+
+func savePrefs(change func(*prefs)) {
+	f := prefsFile()
+	if f == "" || os.MkdirAll(filepath.Dir(f), 0o755) != nil {
+		return
+	}
+	p, _ := loadPrefs()
+	change(&p)
+	b, _ := json.Marshal(p)
+	_ = os.WriteFile(f, b, 0o644)
 }
 
 func loadGroupBy() groupBy {
-	b, err := os.ReadFile(prefsFile())
-	if err != nil {
-		return byRepo
-	}
-	var p prefs
-	if json.Unmarshal(b, &p) != nil {
-		return byRepo
-	}
+	p, _ := loadPrefs()
 	for g := groupBy(0); g < groupModes; g++ {
 		if g.String() == p.GroupBy {
 			return g
@@ -56,14 +71,7 @@ func loadGroupBy() groupBy {
 	return byRepo
 }
 
-func saveGroupBy(g groupBy) {
-	f := prefsFile()
-	if f == "" || os.MkdirAll(filepath.Dir(f), 0o755) != nil {
-		return
-	}
-	b, _ := json.Marshal(prefs{GroupBy: g.String()})
-	_ = os.WriteFile(f, b, 0o644)
-}
+func saveGroupBy(g groupBy) { savePrefs(func(p *prefs) { p.GroupBy = g.String() }) }
 
 func toolLabel(t string) string {
 	switch t {

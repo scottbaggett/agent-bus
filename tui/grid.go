@@ -22,6 +22,7 @@ const (
 type tile struct {
 	seat Seat
 	peer string // the Mac it's on, "" for this one
+	off  bool   // it offboarded (shown only under ^)
 	gone bool   // not running, but still waiting on you
 }
 
@@ -136,6 +137,22 @@ func (m model) needsYou() map[string]int {
 // tiles orders every agent by lane: lanes that need you first, then the most
 // recently active; agents without a lane last.
 func (m model) tiles() ([]tile, []laneGroup) {
+	if m.showOff && m.snap != nil {
+		var ts []tile
+		var g laneGroup
+		g.name = "offboarded"
+		for _, o := range m.snap.Offboarded {
+			if q := strings.TrimSpace(m.query); q != "" && !m.matches(tile{seat: o}, q) {
+				continue
+			}
+			g.tiles = append(g.tiles, len(ts))
+			ts = append(ts, tile{seat: o, off: true})
+		}
+		if len(ts) == 0 {
+			return nil, nil
+		}
+		return ts, []laneGroup{g}
+	}
 	if m.snap == nil {
 		return nil, nil
 	}
@@ -244,6 +261,12 @@ type placed struct{ x, y int }
 func (m model) gridLayout(w int) ([]string, []placed) {
 	tiles, groups := m.tiles()
 	if len(tiles) == 0 {
+		switch {
+		case m.showOff:
+			return []string{sDim.Render("no agent offboarded in the last day · ^ goes back")}, nil
+		case strings.TrimSpace(m.query) != "":
+			return []string{sDim.Render("no agent matches /" + m.query + " · esc clears")}, nil
+		}
 		return []string{sDim.Render("no agents running")}, nil
 	}
 	needs := m.needsYou()
@@ -394,7 +417,7 @@ func (m model) findSeat(addr string) (Seat, string, bool) {
 
 func (m model) renderTile(t tile, selected bool, needs int) string {
 	s := t.seat
-	idle := t.gone || (s.Activity != "working" && m.snap.Now-s.Epoch > 30*60)
+	idle := t.gone || t.off || (s.Activity != "working" && m.snap.Now-s.Epoch > 30*60)
 	art := avatarArt(s.Addr, toolOf(s), idle && !selected && needs == 0)
 	art = lipgloss.PlaceHorizontal(tileInner, lipgloss.Center, art)
 
@@ -404,6 +427,8 @@ func (m model) renderTile(t tile, selected bool, needs int) string {
 	}
 	meta := ago(m.snap.Now, s.Epoch)
 	switch {
+	case t.off:
+		meta = "offboarded " + ago(m.snap.Now, s.Epoch) + " ago"
 	case t.gone:
 		meta = "not running"
 	case t.peer != "":

@@ -19,6 +19,8 @@ type Snapshot struct {
 	Attention []Att   `json:"attention"`
 	Recent    []Event `json:"recent"`
 	Peers     []Peer  `json:"peers"`
+	// Offboarded is who stood down in the last day; ^ shows them.
+	Offboarded []Seat `json:"offboarded"`
 }
 
 type Seat struct {

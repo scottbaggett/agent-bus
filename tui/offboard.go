@@ -38,6 +38,10 @@ func (m model) startOffboard() (tea.Model, tea.Cmd) {
 	if !ok {
 		return m, nil
 	}
+	if t.off {
+		m.setStatus(friendlyName(t.seat.Addr) + " has already offboarded")
+		return m, nil
+	}
 	if t.gone {
 		m.setStatus(friendlyName(t.seat.Addr) + " has exited; nothing to offboard")
 		return m, nil

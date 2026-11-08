@@ -188,6 +188,7 @@ raw_seat off1 claude offwt focus "Done with the docs pass" >/dev/null
 raw_seat off1 claude offwt offboard >/dev/null
 assert_lacks "an offboarded seat leaves who" "offwt" "$(raw_seat off1 claude offwt who)"
 assert_eq "an offboarded seat leaves the snapshot" "" "$("$BIN" snapshot | jq -r '.seats[] | select(.wt == "offwt") | .addr')"
+assert_eq "and is listed as offboarded" "Done with the docs pass" "$("$BIN" snapshot | jq -r '.offboarded[] | select(.addr | contains("offwt")) | .focus')"
 raw_seat off1 claude offwt read --peek >/dev/null
 assert_eq "reading does not bring it back" "" "$("$BIN" snapshot | jq -r '.seats[] | select(.wt == "offwt") | .addr')"
 AGENT_BUS_VIA=hook raw_seat off1 claude offwt digest >/dev/null 2>&1

@@ -2914,7 +2914,16 @@ cmd_tui() {
   [ -n "$bin" ] || die "tui: not installed with this copy. Upgrade (brew upgrade agent-bus, or agent-bus update), or install Go to build it from a checkout."
   AGENT_BUS_CLI="$root/bin/agent-bus" exec "$bin" "$@"
 }
-cmd_snapshot() { snapshot_json | jq -c --argjson peers "$(peer_snapshot_json)" '. + {peers: $peers}'; }
+# Seats that offboarded in the last day, for a viewer's "offboarded" list. They
+# are not live; they come back on their own when they take new work.
+offboarded_json() {
+  seat_rows | jq -sc --argjson cut "$(( $(now_epoch) - 86400 ))" \
+    '[.[] | select((.offboarded // 0) >= $cut)
+      | {addr, tool, repo, branch, cwd: (.cwd // ""), lane: (.lane // ""), focus: (.focus // ""),
+         stage: (.stage // ""), epoch: (.offboarded)}] | sort_by(-.epoch)'
+}
+cmd_snapshot() { snapshot_json | jq -c --argjson peers "$(peer_snapshot_json)" --argjson off "$(offboarded_json)" \
+  '. + {peers: $peers, offboarded: $off}'; }
 
 # Which lanes' branches are already merged into their repo's trunk. Results go
 # to state/merged.json for snapshot to read, so hooks never pay for git.

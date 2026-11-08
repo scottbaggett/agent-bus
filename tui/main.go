@@ -37,6 +37,7 @@ const (
 	modeOpen
 	modeSearch
 	modeOffboard
+	modeWelcome
 )
 
 type model struct {
@@ -84,6 +85,8 @@ type model struct {
 	openSel   int
 	query     string // "/" search over the grid
 	groupBy   groupBy
+	welcome   welcomeKind
+	showOff   bool // ^: the offboarded agents instead of the live ones
 }
 
 type snapMsg struct {
@@ -464,6 +467,10 @@ func (m model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case modeHelp:
 		m.mode = modeNormal
 		return m, nil
+	case modeWelcome:
+		m.mode = modeNormal
+		markWelcomed()
+		return m, nil
 	case modeConfirm:
 		m.mode = modePanel
 		switch k.String() {
@@ -561,6 +568,18 @@ func (m model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.startOffboard()
 	case "a":
 		return m, m.openActivity()
+	case "w":
+		m.welcome, m.mode = welcomeFirst, modeWelcome
+		if notesFor(version) != nil {
+			m.welcome = welcomeNews
+		}
+		return m, nil
+	case "^":
+		m.showOff = !m.showOff
+		m.cursor[paneAgents] = 0
+		if m.showOff {
+			m.setStatus(fmt.Sprintf("offboarded in the last day: %d · ^ goes back", len(m.snap.Offboarded)))
+		}
 	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
 		return m.goToNeed(int(k.String()[0] - '1'))
 	case "g":
@@ -697,6 +716,8 @@ func (m model) View() string {
 	switch m.mode {
 	case modeHelp:
 		return m.helpView()
+	case modeWelcome:
+		return m.welcomeView()
 	case modeChat:
 		return m.chatScreen()
 	}
@@ -791,6 +812,9 @@ func (m model) footerView() string {
 	if m.err != nil {
 		return lipgloss.NewStyle().Foreground(cBad).Render(fit(" refresh failed: "+m.err.Error(), m.w))
 	}
+	if m.showOff && m.mode == modeNormal {
+		return sDim.Render(fit(" offboarded in the last day · c: timeline · ^: back to live agents · q: quit", m.w))
+	}
 	keys := []string{"arrows or click: pick an agent", "/: search", "enter: details", "o: open in…", "c: timeline & chat", "a: all activity", "O: offboard", "g: grouped by " + m.groupBy.String(), "?: help", "q: quit"}
 	if m.query != "" {
 		keys = append([]string{sAccent.Render("/" + m.query), "esc: clear"}, keys[1:]...)
@@ -829,6 +853,9 @@ func (m model) helpView() string {
 		"  o                open its folder in Finder, Zed, Cursor… or its ports in a browser",
 		"  a                all activity: every message, close and decision on the bus",
 		"  1-9              go to the agent with that number in the header (needs you)",
+		"  w                the welcome, or this version's what's new",
+		"  ^                the agents you offboarded in the last day (they come back",
+		"                   on their own when they take new work)",
 		"  g                group by repo, stage, lane, tool, Mac, or nothing (remembered)",
 		"  O                offboard it: ask it to hand on or close its work",
 		"                   and run agent-bus offboard",
@@ -917,7 +944,11 @@ func main() {
 			return
 		}
 	}
-	p := tea.NewProgram(newModel(), tea.WithAltScreen(), tea.WithMouseCellMotion())
+	m := newModel()
+	if kind, ok := startupWelcome(); ok {
+		m.welcome, m.mode = kind, modeWelcome
+	}
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "agent-bus tui:", err)
 		os.Exit(1)

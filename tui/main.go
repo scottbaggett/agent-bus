@@ -68,8 +68,9 @@ type model struct {
 	logAddr     string // whose log the side panel holds
 	logStamp    string
 	logMsgs     []chatMsg
-	panelTab    int // 0 timeline, 1 chat
-	logScroll   int // lines the panel's log is scrolled back from the newest
+	panelTab    int          // 0 timeline, 1 chat
+	logScroll   int          // lines the panel's log is scrolled back from the newest
+	layout      *layoutCache // shared by every copy of the model
 	chatView    viewport.Model
 	chatSending bool
 	chatNote    string
@@ -131,7 +132,7 @@ func newModel() model {
 	ti := textinput.New()
 	ti.CharLimit = 4000
 	ti.Prompt = ""
-	return model{loading: true, input: ti, seen: map[string]time.Time{}, bodies: map[string]string{}, titles: map[string]string{}, apps: map[string]hostApp{}, now: map[string]nowInfo{}, groupBy: loadGroupBy()}
+	return model{loading: true, input: ti, seen: map[string]time.Time{}, bodies: map[string]string{}, titles: map[string]string{}, apps: map[string]hostApp{}, now: map[string]nowInfo{}, groupBy: loadGroupBy(), layout: &layoutCache{}}
 }
 
 func (m model) Init() tea.Cmd { return tea.Batch(loadCmd(), tick(), scanServicesCmd()) }
@@ -218,7 +219,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case chatLoaded:
 		if msg.addr == m.logAddr && msg.err == nil {
-			m.logMsgs = msg.msgs
+			// Scrolled back: new lines arrive below, so hold the view still.
+			if m.logScroll > 0 && m.panelW() > 0 {
+				seat, inner, chat := m.panel.seat, m.panelW()-4, m.panelTab == 1
+				if t, ok := m.selectedTile(); ok && (m.mode == modeNormal || m.mode == modeSearch) {
+					seat = t.seat
+				}
+				before := len(m.panelLogLines(seat, inner, chat, 1<<30))
+				m.logMsgs = msg.msgs
+				m.logScroll += max(0, len(m.panelLogLines(seat, inner, chat, 1<<30))-before)
+			} else {
+				m.logMsgs = msg.msgs
+			}
 		}
 		if m.mode == modeChat && msg.addr == m.chatSeat.Addr {
 			if msg.err != nil {

@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestGroupBy(t *testing.T) {
 	m := newModel()
@@ -54,5 +57,22 @@ func TestWaitingInItsWindowNeedsYou(t *testing.T) {
 	n := m.needs()
 	if len(n["claude/web.2"]) != 1 || !isLive(n["claude/web.2"][0]) || len(n["claude/api.1"]) != 0 {
 		t.Fatalf("needs: %+v", n)
+	}
+}
+
+func TestScreenHeightStableAcrossTabs(t *testing.T) {
+	m := newModel()
+	m.w, m.h = 160, 40
+	m.snap = &Snapshot{Now: 100, Seats: []Seat{{Addr: "claude/web.2", Tool: "claude", Epoch: 99}}}
+	m.logAddr = "claude/web.2"
+	long := strings.Repeat("a long reply that wraps across several lines of the panel ", 20)
+	for i := 0; i < 30; i++ {
+		m.logMsgs = append(m.logMsgs, chatMsg{Kind: "said", Body: long, Epoch: int64(i)}, chatMsg{Kind: "asked", Body: long, Epoch: int64(i)})
+	}
+	for _, tab := range []int{0, 1} {
+		m.panelTab = tab
+		if got := len(strings.Split(m.View(), "\n")); got != m.h {
+			t.Errorf("tab %d: screen is %d lines, want %d", tab, got, m.h)
+		}
 	}
 }

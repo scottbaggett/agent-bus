@@ -120,7 +120,10 @@ func (m model) panelView(w, h int) string {
 			if chat && !isChat(c) {
 				continue
 			}
-			log = append(m.logEntry(c, inner, s), log...)
+			// Entries can be several lines each; count real lines, or the
+			// panel outgrows the grid and the whole screen jumps.
+			entry := strings.Split(strings.Join(m.logEntry(c, inner, s), "\n"), "\n")
+			log = append(entry, log...)
 		}
 		for len(log) > 0 && strings.TrimSpace(ansiStrip(log[0])) == "" {
 			log = log[1:]
@@ -158,8 +161,13 @@ func (m model) panelView(w, h int) string {
 	if len(ns) > 0 {
 		bc = cBad
 	}
+	// Every line fits the width and the box is exactly h tall, whatever the
+	// tab holds, so the layout never moves.
+	for i, l := range lines {
+		lines[i] = ansi.Truncate(l, inner, "…")
+	}
 	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(bc).
-		Width(w-2).Height(h-2).Padding(0, 1).Render(strings.Join(lines, "\n"))
+		Width(w-2).Height(h-2).MaxHeight(h).Padding(0, 1).Render(strings.Join(lines, "\n"))
 }
 
 func ansiStrip(s string) string { return ansi.Strip(s) }

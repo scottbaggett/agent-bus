@@ -198,6 +198,9 @@ func (m model) tiles() ([]tile, []laneGroup) {
 	var order []string
 	for i, t := range all {
 		l := m.groupBy.key(t)
+		if m.groupBy == byState {
+			l = m.stateOf(t, needs[t.seat.Addr])
+		}
 		g := byKey[l]
 		if g == nil {
 			g = &laneGroup{name: l}
@@ -212,6 +215,9 @@ func (m model) tiles() ([]tile, []laneGroup) {
 	}
 	sort.SliceStable(order, func(i, j int) bool {
 		a, b := byKey[order[i]], byKey[order[j]]
+		if m.groupBy == byState {
+			return stateRank(a.name) < stateRank(b.name)
+		}
 		if (a.name == "") != (b.name == "") {
 			return b.name == ""
 		}
@@ -435,13 +441,13 @@ func (m model) renderTile(t tile, selected bool, needs int) string {
 		meta = t.peer + " · " + meta
 	}
 	// What it's on, unless the group heading already says it.
-	if on := workingOn(s); on != "" && !t.gone && on != m.groupBy.key(t) {
+	if on := workingOn(s); on != "" && !t.gone && (m.groupBy == byState || on != m.groupBy.key(t)) {
 		meta = on + " · " + meta
 	}
 	center := func(st string) string { return lipgloss.PlaceHorizontal(tileInner, lipgloss.Center, st) }
 	shrink := func(st string) string { return fit(st, min(tileInner, lipgloss.Width(st))) }
 	// What it's doing, in up to two lines.
-	doing := wrapLines(m.doing(s), tileInner, 2)
+	doing := wrapLines(m.tileText(t), tileInner, 2)
 	for len(doing) < 2 {
 		doing = append(doing, "")
 	}
@@ -557,7 +563,9 @@ func (m model) selectedLine(w int) string {
 	if d := m.doing(s); d != "" {
 		parts = append(parts, d)
 	}
-	if svc := m.servicesFor(s); len(svc) > 0 {
+	if n := m.now[s.Addr]; n.Doing != "" {
+		parts = append(parts, n.Doing)
+	} else if svc := m.ownPorts(s); len(svc) > 0 {
 		parts = append(parts, lipgloss.NewStyle().Foreground(cGood).Render(ports(svc)))
 	}
 	if t.peer != "" {
@@ -703,4 +711,15 @@ func stageChip(s string) string {
 		return "done"
 	}
 	return ""
+}
+
+// tileText is the two lines under a robot's name: its latest move while it
+// works (what you'd want to know at a glance), else its focus or session title.
+func (m model) tileText(t tile) string {
+	s := t.seat
+	if n := m.now[s.Addr]; n.Doing != "" && !t.gone && !t.off &&
+		(s.Activity == "working" || s.Activity == "waiting" || (s.Activity == "" && m.snap.Now-s.Epoch < 5*60)) {
+		return n.Doing
+	}
+	return m.doing(s)
 }

@@ -75,6 +75,7 @@ type model struct {
 	services   []service
 	servicesAt time.Time
 	apps       map[string]hostApp // addr -> the app it runs in
+	now        map[string]nowInfo // addr -> its latest move and your last ask
 	notified   map[string]bool    // asks already announced
 	lastClick  struct {
 		addr string
@@ -124,7 +125,7 @@ func newModel() model {
 	ti := textinput.New()
 	ti.CharLimit = 4000
 	ti.Prompt = ""
-	return model{loading: true, input: ti, seen: map[string]time.Time{}, bodies: map[string]string{}, titles: map[string]string{}, apps: map[string]hostApp{}, groupBy: loadGroupBy()}
+	return model{loading: true, input: ti, seen: map[string]time.Time{}, bodies: map[string]string{}, titles: map[string]string{}, apps: map[string]hostApp{}, now: map[string]nowInfo{}, groupBy: loadGroupBy()}
 }
 
 func (m model) Init() tea.Cmd { return tea.Batch(loadCmd(), tick(), scanServicesCmd()) }
@@ -181,6 +182,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case appsMsg:
 		m.apps = msg
+		return m, nil
+
+	case nowAllMsg:
+		m.now = msg
 		return m, nil
 
 	case appFocused:
@@ -263,7 +268,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.scanning = true
 			cmd = tea.Batch(cmd, scanServicesCmd())
 			if m.snap != nil {
-				cmd = tea.Batch(cmd, scanAppsCmd(m.snap.Seats))
+				cmd = tea.Batch(cmd, scanAppsCmd(m.snap.Seats), loadNowCmd(m.snap.Seats))
 			}
 		}
 		if m.status != "" && time.Since(m.statusAt) > 6*time.Second {
@@ -316,7 +321,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		cmds := []tea.Cmd{m.loadPanelBody(), notifyCmd(m.newNeeds(first))}
 		if first {
-			cmds = append(cmds, scanAppsCmd(msg.s.Seats))
+			cmds = append(cmds, scanAppsCmd(msg.s.Seats), loadNowCmd(msg.s.Seats))
 		}
 		if time.Since(m.titlesAt) > 30*time.Second {
 			m.titlesAt = time.Now()
@@ -507,12 +512,12 @@ func (m model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "esc", "q":
 			m.mode = modeNormal
 			return m, nil
-		case "up", "k":
+		case "shift+tab":
 			if m.panelSel > 0 {
 				m.panelSel--
 			}
 			return m, m.loadPanelBody()
-		case "down", "j":
+		case "tab":
 			if m.panelSel < len(m.panelNeeds())-1 {
 				m.panelSel++
 			}
@@ -552,8 +557,8 @@ func (m model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.startOffboard()
 		case "1", "2", "3", "4", "5", "6", "7", "8", "9":
 			return m.goToNeed(int(k.String()[0] - '1'))
-		case "left", "right", "h", "l":
-			// Fall through to the grid: move and follow with the panel.
+		case "left", "right", "up", "down", "h", "l", "j", "k":
+			// Arrows always move on the grid; the panel follows.
 		default:
 			return m, nil
 		}
@@ -826,7 +831,7 @@ func (m model) footerView() string {
 	case modeOpen:
 		keys = []string{"↑↓ or number: pick", "enter: open", "esc: back"}
 	case modePanel:
-		keys = []string{"⏎ or click: go to its app", "↑↓ item", "r answer", "x close it", "c timeline & chat", "o open in…", "O offboard", "←→ next agent", "esc back"}
+		keys = []string{"arrows: move", "⏎: go to its app", "tab: next item", "r answer", "x close it", "c timeline & chat", "o open in…", "O offboard", "esc back"}
 	case modeReply:
 		keys = []string{"enter sends and closes it", "esc cancels"}
 	case modeOffboard:

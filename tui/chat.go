@@ -274,7 +274,7 @@ func (m *model) renderChat() {
 			lastDay = d
 			b = append(b, "", sDim.Render("── "+d+" "+strings.Repeat("─", max(0, w-len(d)-4))))
 		}
-		b = append(b, m.logEntry(c, w)...)
+		b = append(b, m.logEntry(c, w, m.chatSeat)...)
 	}
 	m.chatView.SetContent(strings.Join(b, "\n"))
 	if m.chatFollow {
@@ -283,7 +283,7 @@ func (m *model) renderChat() {
 }
 
 // logEntry is one entry: a header line (time, who, what kind) and its text.
-func (m model) logEntry(c chatMsg, w int) []string {
+func (m model) logEntry(c chatMsg, w int, seat Seat) []string {
 	at := sDim.Render(time.Unix(c.Epoch, 0).Format("15:04") + "  ")
 	body := lipgloss.NewStyle().Width(w - 7).MarginLeft(7)
 	text := strings.TrimSpace(c.Body)
@@ -299,7 +299,7 @@ func (m model) logEntry(c chatMsg, w int) []string {
 		return []string{"", at + lipgloss.NewStyle().Foreground(cAccent).Bold(true).Render("you"),
 			body.Render(lipgloss.NewStyle().Foreground(cAccent).Render(capLines(text, 12)))}
 	case "said":
-		name := lipgloss.NewStyle().Foreground(lipgloss.Color(avatarColor(toolOf(m.chatSeat)))).Bold(true).Render(friendlyName(m.chatSeat.Addr))
+		name := lipgloss.NewStyle().Foreground(lipgloss.Color(avatarColor(toolOf(seat)))).Bold(true).Render(friendlyName(seat.Addr))
 		return []string{"", at + name, body.Render(capLines(text, 30))}
 	case "resolve":
 		label, st := m.rowLabel(c)
@@ -422,4 +422,40 @@ func (m model) chatScreen() string {
 		foot = st.Render(fit(" delivery: "+m.chatNote, m.w))
 	}
 	return lipgloss.JoinVertical(lipgloss.Left, title, box, prompt, foot)
+}
+
+// startPanelChat puts the cursor in the panel's chat box.
+func (m model) startPanelChat() (tea.Model, tea.Cmd) {
+	if m.panel.gone || m.panel.off {
+		m.setStatus(friendlyName(m.panel.seat.Addr) + " isn't running")
+		return m, nil
+	}
+	m.panelTab = 1
+	m.mode = modePanelChat
+	m.input.Placeholder = "message " + friendlyName(m.panel.seat.Addr) + " as you · enter sends · esc"
+	m.input.SetValue("")
+	m.input.Width = m.panelW() - 8
+	m.input.Focus()
+	return m, textinput.Blink
+}
+
+func (m model) panelChatKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch k.String() {
+	case "esc":
+		m.mode = modePanel
+		m.input.Blur()
+		return m, nil
+	case "enter":
+		v := strings.TrimSpace(m.input.Value())
+		m.mode = modePanel
+		m.input.Blur()
+		if v == "" {
+			return m, nil
+		}
+		m.setStatus("sending to " + friendlyName(m.panel.seat.Addr) + " …")
+		return m, sendChat(m.panel.seat.Addr, v)
+	}
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(k)
+	return m, cmd
 }

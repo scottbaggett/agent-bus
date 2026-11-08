@@ -40,27 +40,11 @@ func (m model) panelView(w, h int) string {
 	}
 	head := lipgloss.JoinHorizontal(lipgloss.Top, avatar(s), "  ", strings.Join(info, "\n"))
 	b = append(b, head, "")
-	if d := m.doing(s); d != "" {
-		label := "Focus"
-		if strings.TrimSpace(s.Focus) == "" {
-			label = "Session"
-		}
-		if st := stageLabel(s.Stage); st != "" {
-			label += " · " + st
-		}
-		b = append(b, sDim.Render(label), lipgloss.NewStyle().Width(inner).Render(d), "")
-	}
-	if svc := m.servicesFor(s); len(svc) > 0 {
-		b = append(b, sDim.Render("Running"))
-		for _, x := range svc {
-			b = append(b, lipgloss.NewStyle().Foreground(cGood).Render(fmt.Sprintf("  :%-6d", x.Port))+sDim.Render(fit(clean(x.Cmd)+"  pid "+fmt.Sprint(x.PID), inner-10)))
-		}
-		b = append(b, "")
-	}
-
+	// What it is doing right now leads: that is what you came to see.
+	b = append(b, m.nowLines(t, inner)...)
 	ns := m.panelNeeds()
 	if len(ns) == 0 {
-		b = append(b, sDim.Render("Nothing waiting on you."), "", sDim.Render("c: its timeline, and chat"))
+		b = append(b, sDim.Render("Nothing waiting on you · c: its timeline"))
 	} else {
 		title := fmt.Sprintf("Waiting on you · %d", len(ns))
 		b = append(b, lipgloss.NewStyle().Foreground(cBad).Bold(true).Render(title), "")
@@ -94,6 +78,10 @@ func (m model) panelView(w, h int) string {
 			}
 			b = append(b, body)
 		}
+	}
+
+	if p := m.panelPorts(s); p != "" {
+		b = append(b, "", sDim.Render("Ports  ")+lipgloss.NewStyle().Foreground(cGood).Width(inner-7).Render(p))
 	}
 
 	// The bottom: reply box, close confirmation, or nothing.
@@ -140,3 +128,66 @@ func (m model) panelView(w, h int) string {
 }
 
 func ansiStrip(s string) string { return ansi.Strip(s) }
+
+// nowLines: its state, its latest move, what you last asked it, and its focus.
+func (m model) nowLines(t tile, inner int) []string {
+	s := t.seat
+	wrap := lipgloss.NewStyle().Width(inner)
+	state := ""
+	switch {
+	case t.gone:
+		state = "not running"
+	case s.Activity == "working":
+		state = lipgloss.NewStyle().Foreground(cGood).Render("● working")
+	case s.Activity == "waiting":
+		state = lipgloss.NewStyle().Foreground(cBad).Render("◐ waiting for you in its window")
+	case s.Activity == "idle":
+		state = sDim.Render("○ idle since " + ago(m.snap.Now, s.ActivityAt) + " ago")
+	}
+	if st := stageLabel(s.Stage); st != "" {
+		if state != "" {
+			state += sDim.Render(" · ")
+		}
+		state += sAccent.Render(st)
+	}
+	var b []string
+	if state != "" {
+		b = append(b, state, "")
+	}
+	n := m.now[s.Addr]
+	if n.Doing != "" {
+		b = append(b, sDim.Render("Latest"), wrap.Render(n.Doing), "")
+	}
+	if n.Asked != "" {
+		b = append(b, sDim.Render("You asked"), wrap.Render(trunc(n.Asked, 240)), "")
+	}
+	if d := m.doing(s); d != "" {
+		label := "Focus"
+		if strings.TrimSpace(s.Focus) == "" {
+			label = "Session"
+		}
+		b = append(b, sDim.Render(label), wrap.Render(d), "")
+	}
+	return b
+}
+
+func trunc(s string, n int) string {
+	if r := []rune(s); len(r) > n {
+		return string(r[:n]) + "…"
+	}
+	return s
+}
+
+// panelPorts is its ports on one line, leaving out the Docker VM's, which
+// every agent in a folder with containers would otherwise share.
+func (m model) panelPorts(s Seat) string {
+	var p []string
+	for _, x := range m.servicesFor(s) {
+		c := strings.ToLower(x.Cmd)
+		if strings.Contains(c, "orbstack") || strings.Contains(c, "docker") || strings.Contains(c, "vpnkit") || strings.Contains(c, "com.docke") {
+			continue
+		}
+		p = append(p, fmt.Sprintf(":%d %s", x.Port, clean(x.Cmd)))
+	}
+	return strings.Join(p, "  ")
+}

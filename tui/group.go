@@ -7,13 +7,15 @@ import (
 	"strings"
 )
 
-// g cycles how the grid groups agents: by repo (the default: every agent has
-// one), lane, tool, Mac, or not at all. The choice is remembered.
+// g cycles how the grid groups agents: by what needs action (the default:
+// needs you, working, idle), repo, stage, lane, tool, Mac, or not at all. The
+// choice is remembered.
 
 type groupBy int
 
 const (
-	byRepo groupBy = iota
+	byState groupBy = iota
+	byRepo
 	byStage
 	byLane
 	byTool
@@ -23,7 +25,7 @@ const (
 )
 
 func (g groupBy) String() string {
-	return [...]string{"repo", "stage", "lane", "tool", "Mac", "nothing"}[g]
+	return [...]string{"what needs action", "repo", "stage", "lane", "tool", "Mac", "nothing"}[g]
 }
 
 // prefsFile keeps the TUI's own settings, apart from the bus.
@@ -68,7 +70,7 @@ func loadGroupBy() groupBy {
 			return g
 		}
 	}
-	return byRepo
+	return byState
 }
 
 func saveGroupBy(g groupBy) { savePrefs(func(p *prefs) { p.GroupBy = g.String() }) }
@@ -145,4 +147,33 @@ func stageLabel(s string) string {
 		return "Done"
 	}
 	return ""
+}
+
+// The "what needs action" groups, in the order they show.
+var stateOrder = []string{"Needs you", "Working", "Idle", "Quiet"}
+
+func stateRank(name string) int {
+	for i, n := range stateOrder {
+		if n == name {
+			return i
+		}
+	}
+	return len(stateOrder)
+}
+
+// stateOf sorts an agent by what it asks of you: needs you, working (its
+// hooks say so, or it touched the bus in the last 5 minutes), idle (seen in
+// the last 2 hours), or quiet.
+func (m model) stateOf(t tile, needs int) string {
+	s := t.seat
+	age := m.snap.Now - s.Epoch
+	switch {
+	case needs > 0:
+		return "Needs you"
+	case s.Activity == "working", s.Activity == "" && age < 5*60:
+		return "Working"
+	case age < 2*3600:
+		return "Idle"
+	}
+	return "Quiet"
 }

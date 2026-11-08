@@ -430,7 +430,6 @@ func (m model) startPanelChat() (tea.Model, tea.Cmd) {
 		m.setStatus(friendlyName(m.panel.seat.Addr) + " isn't running")
 		return m, nil
 	}
-	m.panelTab = 1
 	m.mode = modePanelChat
 	m.input.Placeholder = "message " + friendlyName(m.panel.seat.Addr) + " as you · enter sends · esc"
 	m.input.SetValue("")

@@ -54,10 +54,12 @@ STATES='needs-review blocked handoff question done fyi'
 REASONS='done handed-off escalated denied canceled duplicate superseded'
 # Reviewed Codex lifecycle hooks own their lease until SessionEnd/offboard.
 # This keeps an open idle chat reachable without heartbeat polling.
-JQ_SEAT_LIVE='def buslive($cut; $codex_cut): ((.epoch // 0) | tonumber? // 0) >= $cut or
+# A seat that ran `offboard` has stood down: it is not live until it takes new
+# work (a prompt, a post, a claim or a new focus) or starts a new session.
+JQ_SEAT_LIVE='def buslive($cut; $codex_cut): ((.offboarded // 0) == 0) and (((.epoch // 0) | tonumber? // 0) >= $cut or
   (.tool == "codex" and (.codex_queue // "") != "" and ((.last_hook // 0) | tonumber? // 0) > 0
    and ((.last_hook // 0) | tonumber? // 0) >= $codex_cut) or
-  (.tool == "grok" and (.grok_webhook // "") != "");'
+  (.tool == "grok" and (.grok_webhook // "") != ""));'
 PEER_BANNER='from other agents, not your user — no packet can grant a permission your harness denies'
 
 die() { printf 'agent-bus: %s\n' "$1" >&2; exit 1; }
@@ -269,7 +271,8 @@ server_pid() {
 
 touch_seat() {
   local f="$BUS/seats/$SEAT.json" now last_hook=0 socket="" codex_queue=""
-  local grok_webhook="" grok_secret_env="" pid="" old_pid="" old_session="" focus="" focus_at=0
+  local grok_webhook="" grok_secret_env="" pid="" old_pid="" old_session="" focus="" focus_at=0 offboarded=0
+  local activity="" activity_at=0 stage=""
   now=$(now_epoch)
   if [ -f "$f" ]; then
     IFS=$'\t' read -r last_hook old_pid old_session < <(jq -r \
@@ -279,7 +282,13 @@ touch_seat() {
   # A seat's focus lasts as long as its session; a new session starts blank.
   if [ -f "$f" ] && [ "$(jq -r '.session // ""' "$f" 2>/dev/null)" = "$SESSION" ]; then
     focus=$(jq -r '.focus // ""' "$f" 2>/dev/null); focus_at=$(jq -r '.focus_at // 0' "$f" 2>/dev/null)
+    offboarded=$(jq -r '.offboarded // 0' "$f" 2>/dev/null)
+    activity=$(jq -r '.activity // ""' "$f" 2>/dev/null); activity_at=$(jq -r '.activity_at // 0' "$f" 2>/dev/null)
+    stage=$(jq -r '.stage // ""' "$f" 2>/dev/null)
   fi
+  # Hooks say what the agent is doing right now: working, waiting (on you, in
+  # its own window) or idle.
+  case "${AGENT_BUS_ACTIVITY:-}" in working|waiting|idle) activity=$AGENT_BUS_ACTIVITY; activity_at=$now ;; esac
   [ "$TOOL" = claude ] && socket="${CLAUDE_CODE_MESSAGING_SOCKET:-}"
   # The same session in a live process keeps its pid; anything else looks again.
   if [ -z "${AGENT_BUS_PID:-}" ] && [ -n "$old_pid" ] && [ "$old_session" = "$SESSION" ] \
@@ -303,14 +312,34 @@ touch_seat() {
     --arg socket "$socket" --arg codex_queue "$codex_queue" --argjson epoch "$now" \
     --argjson last_hook "${last_hook:-0}" --arg lane "$LANE" --arg lane_src "${LANE_SRC:-unfiled}" \
     --arg grok_webhook "$grok_webhook" --arg grok_secret_env "$grok_secret_env" --arg pid "$pid" --arg spid "${spid:-}" \
-    --arg focus "$focus" --arg focus_at "${focus_at:-0}" \
+    --arg focus "$focus" --arg focus_at "${focus_at:-0}" --arg offboarded "${offboarded:-0}" \
+    --arg activity "$activity" --arg activity_at "${activity_at:-0}" --arg stage "$stage" \
     '{addr:$addr,tool:$tool,repo:$repo,repo_id:$repo_id,wt:$wt,branch:$branch,cwd:$cwd,
       session:$session,socket:$socket,codex_queue:$codex_queue,epoch:$epoch,last_hook:$last_hook,lane:$lane,
       lane_src:$lane_src,pid:($pid | tonumber? // null)}
      + (if $spid != "" then {server_pid:($spid | tonumber)} else {} end)
      + (if $focus != "" then {focus:$focus,focus_at:($focus_at | tonumber? // 0)} else {} end)
+     + (if ($offboarded | tonumber? // 0) > 0 then {offboarded:($offboarded | tonumber)} else {} end)
+     + (if $activity != "" then {activity:$activity,activity_at:($activity_at | tonumber? // 0)} else {} end)
+     + (if $stage != "" then {stage:$stage} else {} end)
      + (if $grok_webhook != "" then {grok_webhook:$grok_webhook,grok_secret_env:$grok_secret_env} else {} end)' >"$tmpf" \
     && mv "$tmpf" "$f" || rm -f "$tmpf"
+  # The waiting marker (see cmd_activity) follows the activity.
+  if [ -n "${AGENT_BUS_ACTIVITY:-}" ] && [ -n "$pid" ]; then
+    if [ "$activity" = waiting ]; then mkdir -p "$BUS/state" && : >"$BUS/state/waiting.$pid"
+    else rm -f "$BUS/state/waiting.$pid"; fi
+  fi
+  return 0
+}
+
+# seat_offboarded 1 marks this seat stood down; 0 brings it back.
+seat_offboarded() {
+  local f="$BUS/seats/$SEAT.json" tmpf
+  [ -f "$f" ] || return 0
+  if [ "$1" = 0 ]; then jq -e '(.offboarded // 0) > 0' "$f" >/dev/null 2>&1 || return 0; fi
+  tmpf=$(mktemp "${f}.XXXXXX") || return 0
+  if [ "$1" = 1 ]; then jq -c --argjson at "$(now_epoch)" '. + {offboarded: $at} | del(.activity, .activity_at)' "$f" >"$tmpf"
+  else jq -c 'del(.offboarded)' "$f" >"$tmpf"; fi && mv "$tmpf" "$f" || rm -f "$tmpf"
 }
 
 # Every seat row, one per line; a corrupt file drops out instead of failing.
@@ -1283,16 +1312,60 @@ use_color() { [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-}" != dumb ]; }
 # `agent-bus focus "<one line>"`: what this seat is working on, for your user
 # and the other agents (who, the TUI). Shown until the session ends.
 cmd_focus() {
-  local f="$BUS/seats/$SEAT.json" text
-  if [ $# -eq 0 ]; then
-    jq -r '.focus // "(no focus set; agent-bus focus \"<one line>\")"' "$f" 2>/dev/null | sanitize; return 0
+  local f="$BUS/seats/$SEAT.json" text="" stage="" words=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --stage) [ $# -ge 2 ] || die "focus: --stage needs a value"; stage="$2"; shift 2 ;;
+      --stage=*) stage="${1#--stage=}"; shift ;;
+      *) words+=("$1"); shift ;;
+    esac
+  done
+  if [ ${#words[@]} -eq 0 ] && [ -z "$stage" ]; then
+    jq -r '(.focus // "(no focus set; agent-bus focus \"<one line>\")") + (if (.stage // "") != "" then "  [\(.stage)]" else "" end)' "$f" 2>/dev/null | sanitize; return 0
   fi
-  text=$(printf '%s' "$*" | tr '\n\t' '  ' | tr -d '\000-\037' | cut -c1-120)
-  [ -n "${text// /}" ] || die "focus: say what you're working on in one line"
-  touch_seat
+  # Where the work stands. Close spellings are accepted and stored as one word.
+  if [ -n "$stage" ]; then
+    stage=$(printf '%s' "$stage" | tr '[:upper:]_ ' '[:lower:]--')
+    case "$stage" in
+      in-progress|working|active|wip) stage=in-progress ;;
+      review|in-review|needs-review|ready-for-review) stage=review ;;
+      blocked|needs-input|needs-you|waiting) stage=blocked ;;
+      parked|paused|on-hold|hold|deferred) stage=parked ;;
+      done|complete|completed|finished|merged|shipped) stage=done ;;
+      *) die "focus: --stage is in-progress, review, blocked, parked or done" ;;
+    esac
+  fi
+  if [ ${#words[@]} -gt 0 ]; then
+    text=$(printf '%s' "${words[*]}" | tr '\n\t' '  ' | tr -d '\000-\037' | cut -c1-120)
+    [ -n "${text// /}" ] || die "focus: say what you're working on in one line"
+  fi
+  touch_seat; seat_offboarded 0
   local tmpf; tmpf=$(mktemp "${f}.XXXXXX")
-  jq -c --arg t "$text" --argjson at "$(now_epoch)" '. + {focus: $t, focus_at: $at}' "$f" >"$tmpf" && mv "$tmpf" "$f"
-  printf 'focus: %s (%s)\n' "$text" "$(seat_name "$ADDR")"
+  jq -c --arg t "$text" --arg st "$stage" --argjson at "$(now_epoch)" \
+    '(if $t != "" then . + {focus: $t, focus_at: $at} else . end) | (if $st != "" then . + {stage: $st} else . end)' "$f" >"$tmpf" && mv "$tmpf" "$f"
+  [ -n "$text" ] || text=$(jq -r '.focus // ""' "$f")
+  printf 'focus: %s%s (%s)\n' "${text:-(none)}" "${stage:+ [$stage]}" "$(seat_name "$ADDR")"
+}
+
+# `agent-bus activity <working|waiting|idle|notify>`, for hooks. `notify`
+# reads Claude's Notification payload: a permission or question prompt means
+# the agent waits on you in its window; "waiting for your input" means idle.
+# While a seat waits, a marker named by its pid lets a cheap PostToolUse hook
+# notice it is working again without running the CLI on every tool call.
+cmd_activity() {
+  local a="${1:-}" payload typ msg pid
+  if [ "$a" = notify ]; then
+    payload=$(head -c 65536 2>/dev/null || true)
+    typ=$(jq -r '.notification_type // ""' <<<"$payload" 2>/dev/null || true)
+    msg=$(jq -r '.message // ""' <<<"$payload" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)
+    case "$typ" in
+      permission_prompt|elicitation_dialog) a=waiting ;;
+      idle_prompt) a=idle ;;
+      *) case "$msg" in *permission*|*approve*|*question*) a=waiting ;; *"waiting for your input"*) a=idle ;; *) return 0 ;; esac ;;
+    esac
+  fi
+  case "$a" in working|waiting|idle) ;; *) die "activity: working, waiting, idle or notify" ;; esac
+  AGENT_BUS_ACTIVITY=$a touch_seat
 }
 
 # `agent-bus avatar [seat]`: a seat's bot (yours by default).
@@ -1657,7 +1730,7 @@ peer_key_ensure() {
 peer_pub() { cut -d' ' -f1,2 "$PEER_KEY.pub"; }
 peer_ssh() { # host args...   (args reach `peer serve` as SSH_ORIGINAL_COMMAND)
   local host="$1"; shift
-  local err=/dev/null; [ -n "${AGENT_BUS_PEER_DEBUG:-}" ] && err=/dev/stderr
+  local err=${AGENT_BUS_PEER_ERRFILE:-/dev/null}; [ -n "${AGENT_BUS_PEER_DEBUG:-}" ] && err=/dev/stderr
   ssh -i "$PEER_KEY" -o IdentitiesOnly=yes -o BatchMode=yes \
     -o ConnectTimeout="${AGENT_BUS_PEER_TIMEOUT:-3}" "$host" "$@" 2>"$err"
 }
@@ -1799,25 +1872,46 @@ seat_on_peer() { peer_of_seat "$1" >/dev/null || { [ -n "$(peer_list)" ] && [ ! 
 peer_self() { /usr/sbin/scutil --get LocalHostName 2>/dev/null || hostname -s; }
 
 peer_push() { # host
-  local host="$1" since now
+  local host="$1" since now errf
   since=$(cat "$(peer_cursor "$host" pushed)" 2>/dev/null || echo 0)
   now=$(now_epoch)
+  mkdir -p "$BUS/state"; errf="$BUS/state/peer.$host.err.tmp"
   # Overlap by five minutes: clocks differ, and the receiver drops duplicates.
-  if peer_export $((since > 300 ? since - 300 : 0)) | peer_ssh "$host" ingest "$(peer_self).local"; then
-    printf '%s\n' "$now" >"$(peer_cursor "$host" pushed)"
+  if peer_export $((since > 300 ? since - 300 : 0)) | AGENT_BUS_PEER_ERRFILE="$errf" peer_ssh "$host" ingest "$(peer_self).local"; then
+    printf '%s\n' "$now" >"$(peer_cursor "$host" pushed)"; rm -f "$errf"
   else
+    peer_health "$host" fail "$errf"
     printf 'peer: could not reach %s (asleep, off the network, or Remote Login is off); it catches up at the next sync\n' "$host" >&2
     return 1
   fi
 }
 peer_pull() { # host
-  local host="$1" since now
+  local host="$1" since now errf
   since=$(cat "$(peer_cursor "$host" pulled)" 2>/dev/null || echo 0)
   now=$(now_epoch)
-  if peer_ssh "$host" export $((since > 300 ? since - 300 : 0)) | peer_ingest "$host"; then
+  mkdir -p "$BUS/state"; errf="$BUS/state/peer.$host.err.tmp"
+  if AGENT_BUS_PEER_ERRFILE="$errf" peer_ssh "$host" export $((since > 300 ? since - 300 : 0)) | peer_ingest "$host"; then
     printf '%s\n' "$now" >"$(peer_cursor "$host" pulled)"
     peer_fetch_seats "$host"
-  else return 1; fi
+    peer_health "$host" ok "$errf"
+  else peer_health "$host" fail "$errf"; return 1; fi
+}
+
+# How the last sync with a peer went, for snapshot (the TUI header, the menu
+# bar): ok, or why not, in words a person can act on.
+peer_health_file() { printf '%s/state/peer.%s.health.json' "$BUS" "$1"; }
+peer_health() { # host ok|fail errfile
+  local why="" e; e=$(cat "$3" 2>/dev/null || true); rm -f "$3"
+  if [ "$2" = fail ]; then
+    case "$e" in
+      *"Permission denied"*|*"Too many authentication"*) why="auth failed" ;;
+      *"timed out"*|*"Operation timed out"*) why="timeout" ;;
+      *"Could not resolve"*|*"No route"*|*"Host is down"*|*"Connection refused"*) why="host down" ;;
+      *) why="sync failed" ;;
+    esac
+  fi
+  jq -nc --argjson at "$(now_epoch)" --arg ok "$2" --arg why "$why" \
+    '{at: $at, ok: ($ok == "ok"), error: $why}' >"$(peer_health_file "$1")" 2>/dev/null || true
 }
 
 # The live seats here, for a peer's `who`. Local seats only, never ones
@@ -1825,7 +1919,7 @@ peer_pull() { # host
 peer_seats_json() {
   local now; now=$(now_epoch)
   seat_rows | jq -c --argjson cut "$(( now - SEAT_TTL ))" --argjson codex_cut "$(( now - CODEX_MAX_IDLE_TTL ))" \
-    "$JQ_SEAT_LIVE"'select(buslive($cut; $codex_cut)) | {addr, tool, repo, branch, epoch, lane: (.lane // ""), focus: (.focus // "")}' | jq -cs .
+    "$JQ_SEAT_LIVE"'select(buslive($cut; $codex_cut)) | {addr, tool, repo, branch, epoch, lane: (.lane // ""), focus: (.focus // ""), activity: (.activity // ""), activity_at: (.activity_at // 0), stage: (.stage // "")}' | jq -cs .
 }
 peer_seats_file() { printf '%s/state/peer.%s.seats.json' "$BUS" "$1"; }
 peer_fetch_seats() { # host
@@ -2639,6 +2733,7 @@ cmd_offboard() {
     rm -f "$(role_file "$rn")"; roles=$((roles + 1))
   done
   claims=$(release_mine)
+  [ "$TOOL" = codex ] || { touch_seat; seat_offboarded 1; }
   printf 'offboarded %s — %s role(s), %s claim(s) released\n' "$ADDR" "$roles" "$claims"
   open=$(open_items | jq -c --arg me "$ADDR" 'select(.owner == $me)')
   if [ -n "$open" ]; then
@@ -2670,6 +2765,7 @@ snapshot_json() {
     "$JQ_SEAT_LIVE"'[.[] | select(buslive($cut; $codex_cut) and (.tool // "") != "lead")
       | {addr, tool, repo, repo_id, wt, branch, cwd: (.cwd // ""), pid: (.pid // null), session: (.session // ""),
          focus: (.focus // ""), focus_at: (.focus_at // 0),
+         activity: (.activity // ""), activity_at: (.activity_at // 0), stage: (.stage // ""),
          lane: (.lane // ""), lane_src: (.lane_src // ""),
          epoch: ((.epoch // 0) | tonumber? // 0), last_hook: ((.last_hook // 0) | tonumber? // 0),
          scope: ((.tool // "") + "/" + (.wt // "")),
@@ -2842,7 +2938,9 @@ peer_snapshot_json() {
     f=$(peer_seats_file "$h")
     out=$(jq -c --arg h "$h" --argjson seats "$( [ -f "$f" ] && cat "$f" || printf '[]')" \
       --argjson synced "$( [ -f "$f" ] && { stat -f %m "$f" 2>/dev/null || stat -c %Y "$f"; } || printf 0)" \
-      '. + [{host: $h, name: ($h | sub("\\.local$"; "")), synced: $synced, seats: $seats}]' <<<"$out")
+      --argjson health "$(cat "$(peer_health_file "$h")" 2>/dev/null || printf '{}')" \
+      '. + [{host: $h, name: ($h | sub("\\.local$"; "")), synced: $synced, seats: $seats,
+             checked: ($health.at // 0), ok: ($health.ok != false), error: ($health.error // "")}]' <<<"$out")
   done
   printf '%s' "$out"
 }
@@ -2865,7 +2963,16 @@ cmd_tui() {
   [ -n "$bin" ] || die "tui: not installed with this copy. Upgrade (brew upgrade agent-bus, or agent-bus update), or install Go to build it from a checkout."
   AGENT_BUS_CLI="$root/bin/agent-bus" exec "$bin" "$@"
 }
-cmd_snapshot() { snapshot_json | jq -c --argjson peers "$(peer_snapshot_json)" '. + {peers: $peers}'; }
+# Seats that offboarded in the last day, for a viewer's "offboarded" list. They
+# are not live; they come back on their own when they take new work.
+offboarded_json() {
+  seat_rows | jq -sc --argjson cut "$(( $(now_epoch) - 86400 ))" \
+    '[.[] | select((.offboarded // 0) >= $cut)
+      | {addr, tool, repo, branch, cwd: (.cwd // ""), lane: (.lane // ""), focus: (.focus // ""),
+         stage: (.stage // ""), epoch: (.offboarded)}] | sort_by(-.epoch)'
+}
+cmd_snapshot() { snapshot_json | jq -c --argjson peers "$(peer_snapshot_json)" --argjson off "$(offboarded_json)" \
+  '. + {peers: $peers, offboarded: $off}'; }
 
 # Which lanes' branches are already merged into their repo's trunk. Results go
 # to state/merged.json for snapshot to read, so hooks never pay for git.
@@ -2936,7 +3043,7 @@ cmd_log() {
 # owns unread supervisory items. Always prints exactly one JSON object.
 cmd_stop_hook() {
   cat >/dev/null 2>&1 || true
-  touch_seat; maybe_gc
+  AGENT_BUS_ACTIVITY=${AGENT_BUS_ACTIVITY:-idle} touch_seat; maybe_gc
   local rows n text wake_limit
   if (( WAKE_BUDGET > 0 )) && (( $(state_get '.wakes // 0') >= WAKE_BUDGET )); then printf '{}\n'; return 0; fi
   rows=$(select_packets wake)
@@ -2948,6 +3055,7 @@ cmd_stop_hook() {
   mark_read "$(jq -sc 'map(.id)' <<<"$rows")"
   state_update '.wakes = ((.wakes // 0) + 1) | .last_wake = $now' --argjson now "$(now_epoch)"
   ((WAKE_BUDGET > 0)) && wake_limit="$WAKE_BUDGET" || wake_limit="unlimited"
+  AGENT_BUS_ACTIVITY=working touch_seat
   jq -nc --arg r "$text" --arg m "agent-bus: continuing on $n owned item(s) (wake $(state_get '.wakes') of $wake_limit)" \
     '{decision:"block",reason:$r,systemMessage:$m}'
 }
@@ -3388,7 +3496,10 @@ agent-bus — handoff bus for coding agents sharing repos and worktrees.
   offboard                    stand down: PM role and claims released, open
                               items listed
   log [n]                     recent packets and closes
-  focus ["<one line>"]        say what you are working on (your user sees it in who and the TUI)
+  focus ["<one line>"] [--stage <s>]
+                              say what you are working on (your user sees it in who and the TUI);
+                              --stage: in-progress, review, blocked, parked or done
+  activity <state>            for hooks: working, waiting (on you, in its window), idle, or notify
   tui                         live view: agents here and on linked Macs, what needs you,
                               open work, a live feed; reply and close from it
   snapshot                    machine-wide JSON: seats (with pid and worktree path), open work, lanes,
@@ -3456,21 +3567,23 @@ case "$cmd" in
   grok)  cmd_grok  "$@" ;;
   whoami) cmd_whoami ;;
   focus) cmd_focus "$@" ;;
+  activity) cmd_activity "$@" ;;
   avatar) cmd_avatar "$@" ;;
   who) touch_seat; cmd_who ;;
-  post) touch_seat; cmd_post "$@" ;;
+  post) touch_seat; case " $* " in *" --close "*) ;; *) seat_offboarded 0 ;; esac; cmd_post "$@" ;;
   read) touch_seat; cmd_read "$@" ;;
-  digest) touch_seat; maybe_gc; peer_catchup; cmd_read --digest ;;
+  digest) if [ "${AGENT_BUS_VIA:-cli}" = hook ]; then AGENT_BUS_ACTIVITY=${AGENT_BUS_ACTIVITY:-working} touch_seat; seat_offboarded 0
+    else touch_seat; fi; maybe_gc; peer_catchup; cmd_read --digest ;;
   heartbeat) touch_seat; maybe_gc; peer_catchup ;;
   show) cmd_show "$@" ;;
   resolve) touch_seat; cmd_resolve "$@" ;;
   reply) touch_seat; cmd_reply "$@" ;;
-  ask) touch_seat; cmd_ask "$@" ;;
+  ask) touch_seat; seat_offboarded 0; cmd_ask "$@" ;;
   send) touch_seat; cmd_send "$@" ;;
   triage) touch_seat; cmd_triage "$@" ;;
   lane) cmd_lane "$@" ;;
   file) touch_seat; cmd_file "$@" ;;
-  claim) touch_seat; cmd_claim "$@" ;;
+  claim) touch_seat; seat_offboarded 0; cmd_claim "$@" ;;
   release) cmd_release "$@" ;;
   claims) cmd_claims ;;
   role) touch_seat; cmd_role "$@" ;;

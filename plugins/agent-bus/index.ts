@@ -151,7 +151,10 @@ function runner(directory: string) {
         ...(sid ? { OPENCODE_SESSION_ID: sid } : {}),
       }
     },
-    digest: (sessionID: string) => run(["digest"], sessionID),
+    // activity: what the agent is doing now. A prompt (the default) means
+    // working; first sight of a session means idle.
+    digest: (sessionID: string, activity = "working") =>
+      runIn(directory, ["digest"], { ...env(sessionID), AGENT_BUS_ACTIVITY: activity }),
     offboard: (sessionID: string) => run(["offboard"], sessionID),
     /**
      * Ask the CLI whether this seat should be continued, and deliver the
@@ -308,7 +311,7 @@ const v2: Plugin.Plugin = {
       verdict.set(sessionID, mine)
       if (mine && bus.track(sessionID)) {
         // SessionStart analog, on first sight rather than on session.created.
-        const digest = await bus.digest(sessionID)
+        const digest = await bus.digest(sessionID, "idle")
         if (digest) await inject(sessionID, digest, false)
       }
       return mine

@@ -199,6 +199,12 @@ and update it when your focus changes:
 agent-bus focus "Wiring the invoices API to the new client"
 ```
 
+Say where the work stands when that changes, so your user sees it at a glance:
+
+```sh
+agent-bus focus --stage review     # in-progress, review, blocked, parked or done
+```
+
 Each agent also has a name made from its address (`agent-bus avatar` shows
 yours, like "Brave Otter"). Use it when you talk about an agent to your user.
 

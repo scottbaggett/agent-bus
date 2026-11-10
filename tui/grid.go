@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	tea "github.com/charmbracelet/bubbletea"
 	"sort"
 	"strings"
 
@@ -21,6 +22,7 @@ const (
 type tile struct {
 	seat Seat
 	peer string // the Mac it's on, "" for this one
+	off  bool   // it offboarded (shown only under ^)
 	gone bool   // not running, but still waiting on you
 }
 
@@ -49,8 +51,17 @@ func (m model) needs() map[string][]need {
 	for _, it := range m.snap.Open {
 		subj[it.ID] = it
 	}
+	live := map[string]bool{}
+	for _, s := range m.snap.Seats {
+		live[s.Addr] = true
+	}
 	for _, a := range m.snap.Attention {
 		if a.Kind != "needs-you" || a.From == "" || a.ID == "" || seen[a.ID] {
+			continue
+		}
+		// A stale ask from an agent that has exited can't be acted on: answering
+		// reaches no one. It stays in `agent-bus triage`, not on the grid.
+		if it, ok := subj[a.ID]; ok && it.Stale && !live[a.From] {
 			continue
 		}
 		seen[a.ID] = true
@@ -69,10 +80,50 @@ func (m model) needs() map[string][]need {
 		seen[it.ID] = true
 		out[it.From] = append(out[it.From], need{ID: it.ID, From: it.From, State: it.State, Subject: it.Subject, Epoch: it.Epoch})
 	}
+	// An agent stopped on a permission or question prompt in its own window
+	// needs you too, though it never said so on the bus.
+	for _, s := range m.allSeats() {
+		if s.Activity == "waiting" {
+			out[s.Addr] = append(out[s.Addr], need{ID: liveID + s.Addr, From: s.Addr, State: "waiting",
+				Subject: "waiting for you in its window", Epoch: s.ActivityAt})
+		}
+	}
 	for k := range out {
 		sort.SliceStable(out[k], func(i, j int) bool { return out[k][i].Epoch > out[k][j].Epoch })
 	}
 	return out
+}
+
+// liveID marks a need that comes from an agent's live state, not a bus item:
+// it can't be answered or closed here, only gone to.
+const liveID = "live:"
+
+func isLive(n need) bool { return strings.HasPrefix(n.ID, liveID) }
+
+// allSeats is this Mac's agents and the linked Macs'.
+func (m model) allSeats() []Seat {
+	if m.snap == nil {
+		return nil
+	}
+	out := append([]Seat(nil), m.snap.Seats...)
+	for _, p := range m.snap.Peers {
+		out = append(out, p.Seats...)
+	}
+	return out
+}
+
+// activityDot is a tile's live state: green working, red waiting on you,
+// grey idle; nothing when its hooks haven't said.
+func activityDot(s Seat) string {
+	switch s.Activity {
+	case "working":
+		return lipgloss.NewStyle().Foreground(cGood).Render("●") + " "
+	case "waiting":
+		return lipgloss.NewStyle().Foreground(cBad).Render("◐") + " "
+	case "idle":
+		return sDim.Render("○") + " "
+	}
+	return ""
 }
 
 func (m model) needsYou() map[string]int {
@@ -86,6 +137,22 @@ func (m model) needsYou() map[string]int {
 // tiles orders every agent by lane: lanes that need you first, then the most
 // recently active; agents without a lane last.
 func (m model) tiles() ([]tile, []laneGroup) {
+	if m.showOff && m.snap != nil {
+		var ts []tile
+		var g laneGroup
+		g.name = "offboarded"
+		for _, o := range m.snap.Offboarded {
+			if q := strings.TrimSpace(m.query); q != "" && !m.matches(tile{seat: o}, q) {
+				continue
+			}
+			g.tiles = append(g.tiles, len(ts))
+			ts = append(ts, tile{seat: o, off: true})
+		}
+		if len(ts) == 0 {
+			return nil, nil
+		}
+		return ts, []laneGroup{g}
+	}
 	if m.snap == nil {
 		return nil, nil
 	}
@@ -127,14 +194,17 @@ func (m model) tiles() ([]tile, []laneGroup) {
 		}
 		all = keep
 	}
-	byLane := map[string]*laneGroup{}
+	byKey := map[string]*laneGroup{}
 	var order []string
 	for i, t := range all {
-		l := t.seat.Lane
-		g := byLane[l]
+		l := m.groupBy.key(t)
+		if m.groupBy == byState {
+			l = m.stateOf(t, needs[t.seat.Addr])
+		}
+		g := byKey[l]
 		if g == nil {
 			g = &laneGroup{name: l}
-			byLane[l] = g
+			byKey[l] = g
 			order = append(order, l)
 		}
 		g.tiles = append(g.tiles, i)
@@ -144,7 +214,10 @@ func (m model) tiles() ([]tile, []laneGroup) {
 		}
 	}
 	sort.SliceStable(order, func(i, j int) bool {
-		a, b := byLane[order[i]], byLane[order[j]]
+		a, b := byKey[order[i]], byKey[order[j]]
+		if m.groupBy == byState {
+			return stateRank(a.name) < stateRank(b.name)
+		}
 		if (a.name == "") != (b.name == "") {
 			return b.name == ""
 		}
@@ -156,7 +229,7 @@ func (m model) tiles() ([]tile, []laneGroup) {
 	var tiles []tile
 	var groups []laneGroup
 	for _, l := range order {
-		g := byLane[l]
+		g := byKey[l]
 		// Within a lane: needs you first, then most recent.
 		sort.SliceStable(g.tiles, func(i, j int) bool {
 			a, b := all[g.tiles[i]], all[g.tiles[j]]
@@ -192,8 +265,36 @@ type placed struct{ x, y int }
 // group is a header over its tiles. It returns the rendered lines and where
 // each tile landed, for scrolling and moving the selection.
 func (m model) gridLayout(w int) ([]string, []placed) {
+	// Laying out and drawing every tile is the costly part of a frame, and a
+	// burst of wheel or key events asks for many frames: reuse the last
+	// layout while nothing it depends on has changed.
+	key := fmt.Sprintf("%d|%d|%p|%s|%d|%v|%p|%p|%p|%p|%d|%d", w, m.cursor[paneAgents], m.snap, m.query, m.groupBy, m.showOff,
+		m.now, m.apps, m.titles, m.services, len(m.services), len(m.now))
+	if c := m.layout; c != nil && c.key == key {
+		return c.lines, c.pos
+	}
+	lines, pos := m.layoutGrid(w)
+	if m.layout != nil {
+		*m.layout = layoutCache{key, lines, pos}
+	}
+	return lines, pos
+}
+
+type layoutCache struct {
+	key   string
+	lines []string
+	pos   []placed
+}
+
+func (m model) layoutGrid(w int) ([]string, []placed) {
 	tiles, groups := m.tiles()
 	if len(tiles) == 0 {
+		switch {
+		case m.showOff:
+			return []string{sDim.Render("no agent offboarded in the last day · ^ goes back")}, nil
+		case strings.TrimSpace(m.query) != "":
+			return []string{sDim.Render("no agent matches /" + m.query + " · esc clears")}, nil
+		}
 		return []string{sDim.Render("no agents running")}, nil
 	}
 	needs := m.needsYou()
@@ -227,7 +328,7 @@ func (m model) gridLayout(w int) ([]string, []placed) {
 		x0 := shelfX + gap
 		name := g.name
 		if name == "" {
-			name = "no lane"
+			name = m.groupBy.emptyLabel()
 		}
 		head := sHeader.Render(name)
 		if g.needs > 0 {
@@ -344,7 +445,7 @@ func (m model) findSeat(addr string) (Seat, string, bool) {
 
 func (m model) renderTile(t tile, selected bool, needs int) string {
 	s := t.seat
-	idle := t.gone || m.snap.Now-s.Epoch > 30*60
+	idle := t.gone || t.off || (s.Activity != "working" && m.snap.Now-s.Epoch > 30*60)
 	art := avatarArt(s.Addr, toolOf(s), idle && !selected && needs == 0)
 	art = lipgloss.PlaceHorizontal(tileInner, lipgloss.Center, art)
 
@@ -354,23 +455,33 @@ func (m model) renderTile(t tile, selected bool, needs int) string {
 	}
 	meta := ago(m.snap.Now, s.Epoch)
 	switch {
+	case t.off:
+		meta = "offboarded " + ago(m.snap.Now, s.Epoch) + " ago"
 	case t.gone:
 		meta = "not running"
 	case t.peer != "":
 		meta = t.peer + " · " + meta
 	}
-	if on := workingOn(s); on != "" && !t.gone {
+	// What it's on, unless the group heading already says it.
+	if on := workingOn(s); on != "" && !t.gone && (m.groupBy == byState || on != m.groupBy.key(t)) {
 		meta = on + " · " + meta
 	}
 	center := func(st string) string { return lipgloss.PlaceHorizontal(tileInner, lipgloss.Center, st) }
 	shrink := func(st string) string { return fit(st, min(tileInner, lipgloss.Width(st))) }
 	// What it's doing, in up to two lines.
-	doing := wrapLines(m.doing(s), tileInner, 2)
+	doing := wrapLines(m.tileText(t), tileInner, 2)
 	for len(doing) < 2 {
 		doing = append(doing, "")
 	}
-	metaLine := sDim.Render(shrink(meta))
-	if svc := m.servicesFor(s); len(svc) > 0 {
+	dot := activityDot(s)
+	if t.gone {
+		dot = ""
+	}
+	if st := stageChip(s.Stage); st != "" && m.groupBy != byStage {
+		meta = st + " · " + meta
+	}
+	metaLine := dot + sDim.Render(fit(meta, min(tileInner-lipgloss.Width(dot), lipgloss.Width(meta))))
+	if svc := m.ownPorts(s); len(svc) > 0 {
 		p := ports(svc)
 		metaLine = lipgloss.NewStyle().Foreground(cGood).Render(shrink(p)) + sDim.Render(" · "+ago(m.snap.Now, s.Epoch))
 		if lipgloss.Width(metaLine) > tileInner {
@@ -474,7 +585,9 @@ func (m model) selectedLine(w int) string {
 	if d := m.doing(s); d != "" {
 		parts = append(parts, d)
 	}
-	if svc := m.servicesFor(s); len(svc) > 0 {
+	if n := m.now[s.Addr]; n.Doing != "" {
+		parts = append(parts, n.Doing)
+	} else if svc := m.ownPorts(s); len(svc) > 0 {
 		parts = append(parts, lipgloss.NewStyle().Foreground(cGood).Render(ports(svc)))
 	}
 	if t.peer != "" {
@@ -540,4 +653,95 @@ func wrapLines(s string, w, n int) []string {
 		lines = lines[:n]
 	}
 	return lines
+}
+
+// needOrder is the agents that need you, newest ask first: the numbers in the
+// header.
+func (m model) needOrder() []string {
+	type row struct {
+		addr string
+		at   int64
+	}
+	var rows []row
+	for a, ns := range m.needs() {
+		var at int64
+		for _, n := range ns {
+			at = max(at, n.Epoch)
+		}
+		rows = append(rows, row{a, at})
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].at != rows[j].at {
+			return rows[i].at > rows[j].at
+		}
+		return rows[i].addr < rows[j].addr
+	})
+	out := make([]string, len(rows))
+	for i, r := range rows {
+		out[i] = r.addr
+	}
+	return out
+}
+
+// goToNeed selects the i-th agent that needs you and opens its panel; one
+// waiting in its own window goes straight to its app.
+func (m model) goToNeed(i int) (tea.Model, tea.Cmd) {
+	order := m.needOrder()
+	if i < 0 || i >= len(order) {
+		return m, nil
+	}
+	if m.query != "" {
+		m.query = "" // the agent may be filtered out
+	}
+	tiles, _ := m.tiles()
+	for j, t := range tiles {
+		if t.seat.Addr == order[i] {
+			m.cursor[paneAgents] = j
+			mm, cmd := m.openPanel()
+			m = mm.(model)
+			if ns := m.needs()[t.seat.Addr]; len(ns) > 0 && isLive(ns[0]) {
+				return m.jumpToApp()
+			}
+			return m, cmd
+		}
+	}
+	return m, nil
+}
+
+// peerHealth is a linked Mac in the header: its name, and when it last synced
+// or why it couldn't.
+func (m model) peerHealth(p Peer) string {
+	switch {
+	case !p.OK && p.Error != "":
+		return lipgloss.NewStyle().Foreground(cWarn).Render(p.Name + " ✗ " + p.Error)
+	case p.Synced > 0:
+		return p.Name + sDim.Render(" ✓ "+ago(m.snap.Now, p.Synced))
+	}
+	return p.Name + sDim.Render(" not synced yet")
+}
+
+// stageChip is a short word for where its work stands, on the tile.
+func stageChip(s string) string {
+	switch s {
+	case "review":
+		return "review"
+	case "blocked":
+		return "blocked"
+	case "parked":
+		return "parked"
+	case "done":
+		return "done"
+	}
+	return ""
+}
+
+// tileText is the two lines under a robot's name: its latest move while it
+// works (what you'd want to know at a glance), else its focus or session title.
+func (m model) tileText(t tile) string {
+	s := t.seat
+	if n := m.now[s.Addr]; n.Doing != "" && !t.gone && !t.off &&
+		(s.Activity == "working" || s.Activity == "waiting" || (s.Activity == "" && m.snap.Now-s.Epoch < 5*60)) {
+		return n.Doing
+	}
+	return m.doing(s)
 }

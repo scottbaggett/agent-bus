@@ -46,6 +46,9 @@ func workingOn(s Seat) string {
 		if s.Repo != "" && s.Repo != "-" {
 			return s.Repo
 		}
+		if b == "-" || strings.HasPrefix(b, "detached") {
+			return ""
+		}
 		return b
 	}
 	for _, p := range []string{"feature/", "feat/", "fix/", "chore/", "docs/"} {

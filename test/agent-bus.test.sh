@@ -177,8 +177,41 @@ assert_has "who shows a seat's focus" "Wiring the invoices API" "$(raw_seat foc1
 assert_eq "snapshot carries focus" "Wiring the invoices API" \
   "$("$BIN" snapshot | jq -r '.seats[] | select(.wt == "focwt") | .focus')"
 assert_eq "focus survives the seat's other commands" "Wiring the invoices API" "$(raw_seat foc1 codex focwt focus)"
+assert_has "focus takes a stage" "[review]" "$(raw_seat foc1 codex focwt focus --stage needs-review)"
+assert_eq "the stage keeps the focus and is in the snapshot" "Wiring the invoices API review" \
+  "$("$BIN" snapshot | jq -r '.seats[] | select(.wt == "focwt") | "\(.focus) \(.stage)"')"
+assert_has "an unknown stage is refused" "in-progress, review" "$(raw_seat foc1 codex focwt focus --stage soon 2>&1 || true)"
 assert_has "a seat without a focus is asked for one" "agent-bus focus" "$(raw_seat foc2 claude focwt2 digest 2>/dev/null)"
 assert_lacks "a seat with a focus is not asked again" "agent-bus focus \"" "$(raw_seat foc1 codex focwt digest 2>/dev/null)"
+# offboard: the seat stands down and leaves who/snapshot until it takes new work.
+raw_seat off1 claude offwt focus "Done with the docs pass" >/dev/null
+raw_seat off1 claude offwt offboard >/dev/null
+assert_lacks "an offboarded seat leaves who" "offwt" "$(raw_seat off1 claude offwt who)"
+assert_eq "an offboarded seat leaves the snapshot" "" "$("$BIN" snapshot | jq -r '.seats[] | select(.wt == "offwt") | .addr')"
+assert_eq "and is listed as offboarded" "Done with the docs pass" "$("$BIN" snapshot | jq -r '.offboarded[] | select(.addr | contains("offwt")) | .focus')"
+raw_seat off1 claude offwt read --peek >/dev/null
+assert_eq "reading does not bring it back" "" "$("$BIN" snapshot | jq -r '.seats[] | select(.wt == "offwt") | .addr')"
+AGENT_BUS_VIA=hook raw_seat off1 claude offwt digest >/dev/null 2>&1
+assert_eq "a new prompt brings it back" "offwt" "$("$BIN" snapshot | jq -r '.seats[] | select(.wt == "offwt") | .wt')"
+raw_seat off1 claude offwt offboard >/dev/null
+raw_seat off1 claude offwt focus "Picking up the API docs" >/dev/null
+assert_eq "a new focus brings it back" "offwt" "$("$BIN" snapshot | jq -r '.seats[] | select(.wt == "offwt") | .wt')"
+# activity: hooks say whether an agent is working, waiting on you, or idle.
+act() { "$BIN" snapshot | jq -r '.seats[] | select(.wt == "actwt") | .activity'; }
+AGENT_BUS_PID=999991 AGENT_BUS_VIA=hook raw_seat act1 claude actwt digest >/dev/null 2>&1
+assert_eq "a prompt means working" "working" "$(act)"
+printf '{"notification_type":"permission_prompt","message":"Claude needs your permission to use Bash"}' \
+  | AGENT_BUS_PID=999991 AGENT_BUS_VIA=hook raw_seat act1 claude actwt activity notify
+assert_eq "a permission prompt means waiting on you" "waiting" "$(act)"
+assert_eq "waiting leaves a marker for the cheap PostToolUse check" "yes" "$([ -e "$BUS_HOME/state/waiting.999991" ] && echo yes)"
+printf '{"message":"Claude is waiting for your input"}' | AGENT_BUS_PID=999991 raw_seat act1 claude actwt activity notify
+assert_eq "an idle prompt means idle" "idle" "$(act)"
+assert_eq "the marker goes when it stops waiting" "" "$([ -e "$BUS_HOME/state/waiting.999991" ] && echo yes)"
+AGENT_BUS_PID=999991 raw_seat act1 claude actwt activity working
+AGENT_BUS_PID=999991 raw_seat act1 claude actwt read --peek >/dev/null
+assert_eq "other commands keep the activity" "working" "$(act)"
+AGENT_BUS_PID=999991 AGENT_BUS_VIA=hook raw_seat act1 claude actwt stop-hook </dev/null >/dev/null
+assert_eq "a turn's end means idle" "idle" "$(act)"
 nm=$("$BIN" avatar codex/api.1 | tail -1)
 assert_has "every seat has a stable name" "· codex/api.1" "$nm"
 assert_eq "the same name every time" "$nm" "$("$BIN" avatar codex/api.1 | tail -1)"
@@ -1064,6 +1097,10 @@ assert_has "by name" "$oc" "$out"
 assert_eq "snapshot lists the linked Mac and its agents, for the TUI" "bmac $oc" \
   "$(pa snapshot | jq -r '.peers[] | "\(.name) \(.seats[0].addr)"')"
 mkdir -p "$PA/nossh"; printf '#!/bin/sh\nexit 255\n' >"$PA/nossh/ssh"; chmod +x "$PA/nossh/ssh"
+mkdir -p "$PA/denyssh"; printf '#!/bin/sh\necho "Permission denied (publickey)." >&2; exit 255\n' >"$PA/denyssh/ssh"; chmod +x "$PA/denyssh/ssh"
+PATH="$PA/denyssh:$PATH" pa peer sync >/dev/null 2>&1 || true
+assert_eq "snapshot says why the last sync with a Mac failed" "false auth failed" \
+  "$(pa snapshot | jq -r '.peers[] | "\(.ok) \(.error)"')"
 out=$(AGENT_BUS_NO_PUSH=0 PATH="$PA/nossh:$PATH" pa post --to "$oc" -m "# hi" 2>&1 || true)
 assert_has "a post names the Mac its recipient is on" "is on bmac; sending it there" "$out"
 # Catch-up runs from the hooks at most once a minute, in the background.

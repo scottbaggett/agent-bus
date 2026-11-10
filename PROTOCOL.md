@@ -442,12 +442,23 @@ looks dead.
   as `command="… agent-bus peer serve",restrict … agent-bus-peer:<host>`.
   `peer serve` reads `SSH_ORIGINAL_COMMAND` and runs only `version`, `who`,
   `seats`, `ingest <from>`, `export <epoch>` and `check <host>`, each word
-  shape-checked. `peer remove` deletes the line.
+  shape-checked. `peer remove` deletes the line. A bus that is not
+  `~/.agents/bus` (`AGENT_BUS_HOME`) pairs as itself: its forced command
+  carries `AGENT_BUS_HOME=<path>`, its marker is
+  `agent-bus-peer:<host>:<hash of the path>`, and `peer add` asks the other
+  Mac for the same path under its own `$HOME`. `remove` and `uninstall` touch
+  only the running bus's lines.
 - **Sync.** The ledger is append-only, so a merge appends the lines the
   receiver lacks (checked against the ledger and its archive). Message bodies
-  travel with their rows. `post` pushes in the foreground and prints the far
-  side's delivery lines; other writes push in the background. Linking starts
-  at the current time: history stays on the machine that made it.
+  travel with their rows. Every write, `post` included, pushes in the
+  background (`tmp/peer-push.log` has the far side's delivery lines). Linking
+  starts at the current time: history stays on the machine that made it.
+- **Trust.** A peer's payload is checked on both export and ingest. A row is
+  kept only if it is a JSON object whose ids match the packet-id shape, whose
+  `from`/`by`/`addr`/`holder` are seat addresses, and (for a `msg`) whose
+  state is a known one; the rest are dropped without stopping the sync. Bodies
+  are copied only for accepted `msg` rows, by id, and only from regular files:
+  a symlink in the payload is never followed.
 - **Delivery.** The receiver wakes its own owners of new messages less than
   15 minutes old, the same way a local post does.
 - **Catch-up.** The `digest` and `heartbeat` hooks start a background

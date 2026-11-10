@@ -1166,7 +1166,7 @@ INSTALL_URL="https://raw.githubusercontent.com/${AGENT_BUS_REPO:-scottbaggett/ag
 # Agents on this machine, as install-hooks.sh flags.
 host_flags() {
   local f=''
-  { [ -d "$HOME/.claude" ] || command -v claude >/dev/null 2>&1; } && f="$f --claude"
+  { [ -d "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" ] || command -v claude >/dev/null 2>&1; } && f="$f --claude"
   { [ -d "$HOME/.config/opencode" ] || command -v opencode >/dev/null 2>&1; } && f="$f --opencode"
   { [ -d "${CODEX_HOME:-$HOME/.codex}" ] && command -v python3 >/dev/null 2>&1; } && f="$f --codex"
   printf '%s' "$f"
@@ -1202,8 +1202,10 @@ cmd_uninstall() {
   local root; root=$(self_root)
   # Linked Macs' keys come out with the install: nothing keeps a way in.
   local h; for h in $(peer_list); do peer_unauthorize "$h"; done
+  # And any line left by a peer this bus no longer lists. Another bus's lines
+  # (AGENT_BUS_HOME) are its own to remove.
   if [ -f "$HOME/.ssh/authorized_keys" ] && grep -q ' agent-bus-peer:' "$HOME/.ssh/authorized_keys"; then
-    { grep -v ' agent-bus-peer:' "$HOME/.ssh/authorized_keys" || :; } >"$HOME/.ssh/authorized_keys.agent-bus.tmp" \
+    awk -v re="^agent-bus-peer:[^:]+$(peer_bus_tag)\$" '$NF !~ re' "$HOME/.ssh/authorized_keys" >"$HOME/.ssh/authorized_keys.agent-bus.tmp" \
       && mv "$HOME/.ssh/authorized_keys.agent-bus.tmp" "$HOME/.ssh/authorized_keys"
   fi
   if is_brew; then
@@ -1553,11 +1555,7 @@ cmd_post() {
   fi
   [ "${USER_SENT:-0}" = 1 ] && src="from your user"
   deliver "$rec" "$src" "$resume"
-  if [ "${AGENT_BUS_NO_PEERS:-0}" != 1 ] && [ -n "$(peer_list)" ]; then
-    local h; for h in $(peer_list); do peer_push "$h" || :; done
-    LEDGER_DIRTY=0
-  fi
-  return 0
+  return 0   # peers get it from peer_autopush at exit, in the background
 }
 
 # The first work item in a repo with no rules set: say, once, what the default
@@ -1665,23 +1663,45 @@ peer_ssh() { # host args...   (args reach `peer serve` as SSH_ORIGINAL_COMMAND)
 }
 valid_host() { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$ ]]; }
 
-# Let a peer's key in, for agent-bus sync only. One line per peer, replaced on
-# re-pairing.
+# A bus that is not ~/.agents/bus pairs as itself: its path goes into the
+# forced command, and a tag made from the path into the key line's marker, so
+# two buses on one Mac never share a line or land in each other's ledger.
+peer_bus_abs() { (cd "$BUS" 2>/dev/null && pwd -P) || printf '%s' "$BUS"; }
+peer_bus_default() { [ "$(peer_bus_abs)" = "$( (cd "$HOME/.agents/bus" 2>/dev/null && pwd -P) || printf '%s' "$HOME/.agents/bus")" ]; }
+peer_bus_tag() { peer_bus_default || printf ':%s' "$(peer_bus_abs | shasum -a 256 | cut -c1-8)"; }
+peer_marker() { printf 'agent-bus-peer:%s%s' "$1" "$(peer_bus_tag)"; }
+# The env words that point a command at this bus; empty for the default one.
+# They sit inside authorized_keys quotes and a remote shell line, so the path
+# may hold nothing either would read as syntax.
+peer_bus_env() { # [remote]: for the other Mac, the same place under its own $HOME
+  peer_bus_default && return 0
+  local b home; b=$(peer_bus_abs); home=$( (cd "$HOME" && pwd -P) )
+  [[ "$b" =~ ^/[A-Za-z0-9._/@+-]+$ ]] \
+    || die "peer: this bus is at $b; peering needs a path of letters, digits and . _ - @ + only"
+  if [ "${1:-}" = remote ] && [ "${b#"$home"/}" != "$b" ]; then printf ' AGENT_BUS_HOME=$HOME/%s' "${b#"$home"/}"
+  else printf ' AGENT_BUS_HOME=%s' "$b"; fi
+}
+# Key lines other than the one whose last word is exactly $1.
+peer_ak_without() { awk -v m="$1" '$NF != m' "$2"; }
+
+# Let a peer's key in, for agent-bus sync only. One line per peer and bus,
+# replaced on re-pairing.
 peer_authorize() { # name pubkey
-  local name="$1" pub="$2" ak="$HOME/.ssh/authorized_keys"
+  local name="$1" pub="$2" ak="$HOME/.ssh/authorized_keys" benv
   [[ "$pub" =~ ^ssh-ed25519\ [A-Za-z0-9+/]+=*$ ]] || die "peer: not an ed25519 public key"
   valid_host "$name" || die "peer: bad host name: $name"
+  benv=$(peer_bus_env) || exit 1
   mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
   touch "$ak" && chmod 600 "$ak"
-  { grep -vF " agent-bus-peer:$name" "$ak" || :; } >"$ak.agent-bus.tmp"
+  peer_ak_without "$(peer_marker "$name")" "$ak" >"$ak.agent-bus.tmp"
   # by name, through PEER_PATH: survives moving between brew and the curl install
-  printf 'command="env PATH=%s agent-bus peer serve",restrict %s agent-bus-peer:%s\n' "$PEER_PATH" "$pub" "$name" >>"$ak.agent-bus.tmp"
+  printf 'command="env PATH=%s%s agent-bus peer serve",restrict %s %s\n' "$PEER_PATH" "$benv" "$pub" "$(peer_marker "$name")" >>"$ak.agent-bus.tmp"
   mv "$ak.agent-bus.tmp" "$ak"
 }
 peer_unauthorize() { # name
   local ak="$HOME/.ssh/authorized_keys"
   [ -f "$ak" ] || return 0
-  { grep -vF " agent-bus-peer:$1" "$ak" || :; } >"$ak.agent-bus.tmp" && mv "$ak.agent-bus.tmp" "$ak"
+  peer_ak_without "$(peer_marker "$1")" "$ak" >"$ak.agent-bus.tmp" && mv "$ak.agent-bus.tmp" "$ak"
 }
 peer_record() { # host: add to peers; history stays where it was made
   peer_list | grep -qxF "$1" || printf '%s\n' "$1" >>"$PEERS_FILE"
@@ -1708,14 +1728,34 @@ peer_serve() {
 
 LEDGER_DIRTY=0
 
+# A ledger row fit to cross between Macs. Rows from a peer are another
+# machine's word: ids become paths ($BUS/msg/<id>.md) and seat names land in
+# live sessions, so anything that is not JSON, or whose ids and seats are not
+# shaped like ours, is dropped. `to` may be a seat's display name, so it is
+# only kept free of control characters.
+JQ_PEER_ROW='
+  def pid: type == "string" and test("^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$");
+  def paddr: type == "string" and test("^(@[A-Za-z0-9._-]{1,64}|[a-z][a-z0-9_-]{0,31}/[A-Za-z0-9._@+-]{1,160})$");
+  def pto: type == "string" and length <= 200 and (test("[[:cntrl:]]") | not);
+  def peer_ok: type == "object" and (.kind | type == "string") and ((.epoch // 0) | type == "number")
+    and all(.id, .msg, .re, .review_of, .supersedes; . == null or pid)
+    and all(.from, .by, .addr, .holder; . == null or paddr)
+    and (.to == null or (.to | pto))
+    and (.kind != "msg" or ((.id | pid) and (.from | paddr) and (.to | pto)
+                            and (.state as $s | ($states | split(" ") | index($s)) != null)));
+  . as $raw | (fromjson? // empty) | select(peer_ok and (.epoch // 0) >= $since) | $raw'
+peer_rows() { # since file: its rows that pass, as they were written
+  jq -rR --argjson since "$1" --arg states "$STATES" "$JQ_PEER_ROW" "$2" 2>/dev/null || :
+}
+
 # Rows from the live ledger since an epoch, and the bodies of their messages,
 # as a tar stream on stdout.
 peer_export() { # since
-  local since="${1:-0}" d; mkdir -p "$BUS/tmp"; d=$(mktemp -d "$BUS/tmp/peer.XXXXXX") || return 1
+  local since="${1:-0}" d id; mkdir -p "$BUS/tmp"; d=$(mktemp -d "$BUS/tmp/peer.XXXXXX") || return 1
   mkdir -p "$d/msg"
-  jq -c --argjson s "$since" 'select((.epoch // 0) >= $s)' "$LEDGER" >"$d/rows.jsonl" 2>/dev/null || :
+  peer_rows "$since" "$LEDGER" >"$d/rows.jsonl"
   jq -r 'select(.kind == "msg") | .id' "$d/rows.jsonl" | while IFS= read -r id; do
-    [ -f "$BUS/msg/$id.md" ] && cp "$BUS/msg/$id.md" "$d/msg/"
+    if valid_id "$id" && [ -f "$BUS/msg/$id.md" ] && [ ! -L "$BUS/msg/$id.md" ]; then cp "$BUS/msg/$id.md" "$d/msg/"; fi
   done
   tar -C "$d" -cf - rows.jsonl msg
   rm -rf "$d"
@@ -1724,16 +1764,24 @@ peer_export() { # since
 # Take a tar from peer_export on stdin: append the rows this bus lacks, copy
 # their bodies, then wake the agents here that own new messages.
 peer_ingest() { # from-host
-  local from="${1:-a peer}" d new row
+  local from="${1:-a peer}" d new row id f
   mkdir -p "$BUS/tmp"; d=$(mktemp -d "$BUS/tmp/peer.XXXXXX") || return 1
   tar -C "$d" -xf - || { rm -rf "$d"; die "peer ingest: bad payload"; }
-  [ -d "$d/msg" ] && for f in "$d"/msg/*.md; do
-    [ -f "$f" ] && [ ! -f "$BUS/msg/$(basename "$f")" ] && cp "$f" "$BUS/msg/"
-  done
+  # Only plain files: a link in the payload would have cp or awk read
+  # whatever it points at on this Mac, and the next export send it back.
+  [ -f "$d/rows.jsonl" ] && [ ! -L "$d/rows.jsonl" ] || { rm -rf "$d"; die "peer ingest: bad payload"; }
+  peer_rows 0 "$d/rows.jsonl" >"$d/rows.ok"
+  # Bodies only for the messages that passed, by id, never by what the tar lists.
+  if [ -d "$d/msg" ] && [ ! -L "$d/msg" ]; then
+    jq -r 'select(.kind == "msg") | .id' "$d/rows.ok" | while IFS= read -r id; do
+      f="$d/msg/$id.md"
+      if valid_id "$id" && [ -f "$f" ] && [ ! -L "$f" ] && [ ! -e "$BUS/msg/$id.md" ]; then cp "$f" "$BUS/msg/$id.md"; fi
+    done
+  fi
   bus_lock "$LEDGER" 10
   local have=("$LEDGER"); [ -f "$BUS/ledger.archive.jsonl" ] && have+=("$BUS/ledger.archive.jsonl")
   touch "$LEDGER"
-  new=$(awk 'FILENAME != ARGV[ARGC-1] { seen[$0]; next } !($0 in seen) { seen[$0]; print }' "${have[@]}" "$d/rows.jsonl")
+  new=$(awk 'FILENAME != ARGV[ARGC-1] { seen[$0]; next } !($0 in seen) { seen[$0]; print }' "${have[@]}" "$d/rows.ok")
   [ -n "$new" ] && printf '%s\n' "$new" >>"$LEDGER"
   bus_unlock "$LEDGER"
   rm -rf "$d"
@@ -1879,11 +1927,12 @@ cmd_peer() {
         die "peer add: Remote Login is off on this Mac, so $host can't reach back. Turn it on: System Settings > General > Sharing > Remote Login"
       fi
       peer_key_ensure
+      local renv; renv=$(peer_bus_env remote) || exit 1
       printf 'linking with %s. ssh may ask for your password on %s, once.\n' "$host" "$host"
       # Your own ssh login (password or key), once: install our key there, get theirs.
       # shellcheck disable=SC2046 # the key is two words on purpose: type and body
       out=$(ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 "$host" \
-              env "PATH=$PEER_PATH" agent-bus peer accept "$(peer_self).local" $(peer_pub) 2>/dev/null); code=$?
+              env "PATH=$PEER_PATH"$renv agent-bus peer accept "$(peer_self).local" $(peer_pub) 2>/dev/null); code=$?
       case "$code" in
         0) ;;
         127) die "peer add: agent-bus isn't installed on $host. Install it there: brew install scottbaggett/tap/agent-bus" ;;
@@ -3032,7 +3081,7 @@ cmd_doctor() {
   good=$(jq -cR 'fromjson? // empty' "$LEDGER" | wc -l | tr -d ' ')
   printf '\nledger   %s rows%s\n' "$total" "$( ((total > good)) && echo ", $((total - good)) unparseable (skipped)")"
   printf '\nhosts:\n'
-  local cs="${AGENT_BUS_CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
+  local cs="${AGENT_BUS_CLAUDE_SETTINGS:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json}"
   if jq -e '[.hooks // {} | .. | .command? // empty | select(contains("agent-bus") and contains("stop-hook"))] | length > 0' \
     "$cs" >/dev/null 2>&1; then printf '  claude    ok (hooks in %s)\n' "$cs"
   else printf '  claude    not installed — agent-bus hooks --claude\n'; fi
@@ -3049,7 +3098,7 @@ cmd_doctor() {
   # Standing instructions that tell agents to post to @here keep a flood going
   # that nobody acts on: Codex's AGENTS.md did, for 1,375 posts.
   local inst
-  for inst in "${CODEX_HOME:-$HOME/.codex}/AGENTS.md" "$HOME/.claude/CLAUDE.md" \
+  for inst in "${CODEX_HOME:-$HOME/.codex}/AGENTS.md" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/CLAUDE.md" \
               "$HOME/.config/opencode/AGENTS.md" "${TOP:-.}/AGENTS.md" "${TOP:-.}/CLAUDE.md"; do
     [ -f "$inst" ] && grep -q -- '--to @here' "$inst" 2>/dev/null \
       && printf '  warning   %s tells agents to post --to @here, which wakes nobody; point it at a seat or @pm\n' "$inst"

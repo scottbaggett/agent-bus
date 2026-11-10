@@ -29,7 +29,8 @@ ROOT=$(stable_root)
 if [ -n "${AGENT_BUS_BIN:-}" ]; then BIN="$AGENT_BUS_BIN"
 elif [ -x "$ROOT/bin/agent-bus" ]; then BIN="$ROOT/bin/agent-bus"
 else BIN="$(command -v agent-bus || echo "$HOME/.local/bin/agent-bus")"; fi
-CLAUDE_SETTINGS="$HOME/.claude/settings.json"
+CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+CLAUDE_SETTINGS="$CLAUDE_DIR/settings.json"
 OPENCODE_DIR="$HOME/.config/opencode"
 PLUGIN_SRC="$ROOT/plugins/agent-bus"
 CODEX_SETTINGS="${AGENT_BUS_CODEX_SETTINGS:-${CODEX_HOME:-$HOME/.codex}/hooks.json}"
@@ -142,7 +143,8 @@ remove_legacy() {
 }
 
 # The /agent-bus skill, linked (not copied) so `git pull` keeps it current.
-# Claude Code and OpenCode both read ~/.claude/skills; Codex reads its own.
+# Claude Code reads its config dir's skills (CLAUDE_CONFIG_DIR, else ~/.claude);
+# OpenCode reads ~/.claude/skills; Codex reads its own.
 # The old `handoff` name is linked too, but never over something already there.
 link_skill() { # dir name
   local dest="$1/$2" src="$ROOT/skills/$2"
@@ -162,7 +164,8 @@ link_skill() { # dir name
 }
 install_skills() {
   local dirs=''
-  { ((do_claude)) || ((do_opencode)); } && dirs="$HOME/.claude/skills"
+  ((do_claude)) && dirs="$CLAUDE_DIR/skills"
+  ((do_opencode)) && [ "$dirs" != "$HOME/.claude/skills" ] && dirs="$dirs $HOME/.claude/skills"
   ((do_codex)) && dirs="$dirs ${CODEX_HOME:-$HOME/.codex}/skills"
   local d
   for d in $dirs; do link_skill "$d" agent-bus; link_skill "$d" handoff; done

@@ -36,6 +36,7 @@ const (
 	modeChat
 	modeOpen
 	modeSearch
+	modeOffboard
 )
 
 type model struct {
@@ -76,6 +77,7 @@ type model struct {
 	openItems  []openItem
 	openSel    int
 	query      string // "/" search over the grid
+	groupBy    groupBy
 }
 
 type snapMsg struct {
@@ -132,7 +134,7 @@ const panelMin = 44
 
 // panelW is the side panel's width when it is open, 0 otherwise.
 func (m model) panelW() int {
-	if m.mode != modePanel && m.mode != modeReply && m.mode != modeConfirm && m.mode != modeOpen {
+	if m.mode != modePanel && m.mode != modeReply && m.mode != modeConfirm && m.mode != modeOpen && m.mode != modeOffboard {
 		return 0
 	}
 	w := m.w * 2 / 5
@@ -205,6 +207,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
+
+	case offboardSent:
+		return m.offboardDone(msg), loadCmd()
 
 	case chatSent:
 		m.chatSending = false
@@ -386,7 +391,7 @@ func (m model) mouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	// the border and padding (2).
 	if i := m.tileAt(gw, gh, msg.X-2, msg.Y-2); i >= 0 {
 		m.cursor[paneAgents] = i
-		if m.mode == modeReply || m.mode == modeConfirm {
+		if m.mode == modeReply || m.mode == modeConfirm || m.mode == modeOffboard {
 			m.input.Blur()
 		}
 		return m.openPanel()
@@ -404,6 +409,8 @@ func (m model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.openKey(k)
 	case modeChat:
 		return m.chatKey(k)
+	case modeOffboard:
+		return m.offboardKey(k)
 	case modeHelp:
 		m.mode = modeNormal
 		return m, nil
@@ -472,6 +479,8 @@ func (m model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.openChat(m.panel.seat, m.panel.peer)
 		case "o":
 			return m.startOpen(m.panel)
+		case "O":
+			return m.startOffboard()
 		case "left", "right", "h", "l":
 			// Fall through to the grid: move and follow with the panel.
 		default:
@@ -484,6 +493,12 @@ func (m model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case "/":
 		return m.startSearch()
+	case "O":
+		return m.startOffboard()
+	case "g":
+		m.groupBy = (m.groupBy + 1) % groupModes
+		m.cursor[paneAgents] = 0
+		m.setStatus("grouped by " + m.groupBy.String())
 	case "esc":
 		if m.query != "" {
 			m.query = ""
@@ -656,8 +671,7 @@ func (m model) box(title, body string, w, h int, focus bool) string {
 }
 
 func (m model) headerView() string {
-	host, _ := os.Hostname()
-	host = strings.TrimSuffix(strings.SplitN(host, ".", 2)[0], ".local")
+	host := localHost()
 	tiles, _ := m.tiles()
 	agents := 0
 	for _, t := range tiles {
@@ -743,7 +757,7 @@ func (m model) footerView() string {
 	if m.err != nil {
 		return lipgloss.NewStyle().Foreground(cBad).Render(fit(" refresh failed: "+m.err.Error(), m.w))
 	}
-	keys := []string{"arrows or click: pick an agent", "/: search", "enter: details", "o: open in…", "c: timeline & chat", "?: help", "q: quit"}
+	keys := []string{"arrows or click: pick an agent", "/: search", "enter: details", "o: open in…", "c: timeline & chat", "O: offboard", "g: grouped by " + m.groupBy.String(), "?: help", "q: quit"}
 	if m.query != "" {
 		keys = append([]string{sAccent.Render("/" + m.query), "esc: clear"}, keys[1:]...)
 	}
@@ -754,9 +768,11 @@ func (m model) footerView() string {
 	case modeOpen:
 		keys = []string{"↑↓ or number: pick", "enter: open", "esc: back"}
 	case modePanel:
-		keys = []string{"↑↓ item", "r answer", "x close it", "c timeline & chat", "o open in…", "←→ next agent", "esc back"}
+		keys = []string{"↑↓ item", "r answer", "x close it", "c timeline & chat", "o open in…", "O offboard", "←→ next agent", "esc back"}
 	case modeReply:
 		keys = []string{"enter sends and closes it", "esc cancels"}
+	case modeOffboard:
+		keys = []string{"y asks it to hand on or close its work and run agent-bus offboard", "any other key cancels"}
 	case modeConfirm:
 		keys = []string{"y done", "c canceled", "n denied", "any other key keeps it"}
 	}
@@ -776,6 +792,9 @@ func (m model) helpView() string {
 		"  c                its timeline: everything it sent, got, closed or decided;",
 		"                   ↑↓ moves through it, and you can message it from there",
 		"  o                open its folder in Finder, Zed, Cursor… or its ports in a browser",
+		"  g                group by lane, tool, repo, Mac, or nothing",
+		"  O                offboard it: ask it to hand on or close its work",
+		"                   and run agent-bus offboard",
 		"",
 		"  in the panel:  ↑↓ item · r answer (and close) · x close · c chat",
 		"",

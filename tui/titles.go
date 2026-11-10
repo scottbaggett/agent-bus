@@ -16,7 +16,7 @@ import (
 
 // What each agent says it's doing: the title of its own session, read
 // (read-only) from where each tool keeps it.
-//   claude:   ~/.claude/projects/*/<session>.jsonl  (custom-title, ai-title)
+//   claude:   $CLAUDE_CONFIG_DIR or ~/.claude: projects/*/<session>.jsonl  (custom-title, ai-title)
 //   opencode: ~/.local/share/opencode/opencode.db   (session_v2.title)
 //   codex:    ~/.codex/session_index.jsonl          (thread_name)
 
@@ -67,11 +67,28 @@ type cachedTitle struct {
 	t string
 }
 
+// Where Claude Code keeps its sessions: CLAUDE_CONFIG_DIR when set, and
+// ~/.claude, since seats on one bus may run under either.
+func claudeDirs() []string {
+	dirs := []string{}
+	if d := strings.TrimRight(os.Getenv("CLAUDE_CONFIG_DIR"), "/"); d != "" {
+		dirs = append(dirs, d)
+	}
+	if def := filepath.Join(homeDir(), ".claude"); len(dirs) == 0 || dirs[0] != def {
+		dirs = append(dirs, def)
+	}
+	return dirs
+}
+
 func claudeTitle(session string) string {
 	if strings.ContainsAny(session, "/\\*?[") {
 		return ""
 	}
-	matches, _ := filepath.Glob(filepath.Join(homeDir(), ".claude", "projects", "*", session+".jsonl"))
+	var matches []string
+	for _, d := range claudeDirs() {
+		m, _ := filepath.Glob(filepath.Join(d, "projects", "*", session+".jsonl"))
+		matches = append(matches, m...)
+	}
 	if len(matches) == 0 {
 		return ""
 	}

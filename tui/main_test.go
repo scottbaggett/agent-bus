@@ -49,9 +49,14 @@ func TestNeedsGroupByAgentAndKeepExitedOnes(t *testing.T) {
 			{ID: "b", From: "claude/web.2", To: "lead/x.1", State: "handoff", Subject: "done"},
 			{ID: "c", From: "codex/api.1", To: "claude/web.2", Subject: "not for you"},
 			{ID: "d", From: "codex/api.1", To: "@lead", Subject: "old", Stale: true},
+			{ID: "e", From: "claude/gone.3", To: "@lead", Subject: "days old", Stale: true},
 		},
+		Attention: []Att{{Kind: "needs-you", ID: "e", From: "claude/gone.3", Text: "claude/gone.3 asks you: days old"}},
 	}
 	n := m.needs()
+	if len(n["claude/gone.3"]) != 0 {
+		t.Fatalf("a stale ask from an exited agent still counts: %+v", n["claude/gone.3"])
+	}
 	if len(n["codex/api.1"]) != 1 || n["codex/api.1"][0].ID != "a" {
 		t.Fatalf("codex needs: %+v", n["codex/api.1"])
 	}

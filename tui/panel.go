@@ -35,6 +35,9 @@ func (m model) panelView(w, h int) string {
 		where = sDim.Render(where)
 	}
 	info = append(info, where)
+	if a, ok := m.appOf(t); ok {
+		info = append(info, "", lipgloss.NewStyle().Foreground(cAccent).Bold(true).Render("⏎ open "+a.Name))
+	}
 	head := lipgloss.JoinHorizontal(lipgloss.Top, avatar(s), "  ", strings.Join(info, "\n"))
 	b = append(b, head, "")
 	if d := m.doing(s); d != "" {
@@ -54,7 +57,7 @@ func (m model) panelView(w, h int) string {
 
 	ns := m.panelNeeds()
 	if len(ns) == 0 {
-		b = append(b, sDim.Render("Nothing waiting on you."), "", sDim.Render("c or enter: its timeline, and chat"))
+		b = append(b, sDim.Render("Nothing waiting on you."), "", sDim.Render("c: its timeline, and chat"))
 	} else {
 		title := fmt.Sprintf("Waiting on you · %d", len(ns))
 		b = append(b, lipgloss.NewStyle().Foreground(cBad).Bold(true).Render(title), "")
@@ -90,6 +93,8 @@ func (m model) panelView(w, h int) string {
 		foot = []string{sAccent.Render("Your answer to " + friendlyName(s.Addr)), m.input.View()}
 	case modeConfirm:
 		foot = []string{lipgloss.NewStyle().Foreground(cWarn).Render(fit("Close it?  y done · c canceled · n denied", inner))}
+	case modeOffboard:
+		foot = []string{offboardPrompt(friendlyName(s.Addr), inner)}
 	case modeOpen:
 		foot = append(foot, sAccent.Render("Open in…"))
 		for i, it := range m.openItems {

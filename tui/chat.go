@@ -100,7 +100,7 @@ func loadChat(bus, addr string) tea.Cmd {
 					continue
 				}
 				subj, ours := mine[r.Msg]
-				if r.By != addr && !ours {
+				if addr != "" && r.By != addr && !ours {
 					continue
 				}
 				if subj == "" {
@@ -109,7 +109,7 @@ func loadChat(bus, addr string) tea.Cmd {
 				out = append(out, chatMsg{ID: r.Msg, Epoch: r.Epoch, Kind: "resolve", From: r.By, Subject: subj, Reason: r.Reason,
 					Mine: strings.HasPrefix(r.By, "lead/")})
 				continue
-			case !strings.Contains(line, addr):
+			case addr != "" && !strings.Contains(line, addr):
 				continue
 			}
 			if json.Unmarshal([]byte(line), &r) != nil {
@@ -117,14 +117,14 @@ func loadChat(bus, addr string) tea.Cmd {
 			}
 			switch r.Kind {
 			case "msg":
-				if r.From != addr && !addressedTo(r.To, addr) {
+				if addr != "" && r.From != addr && !addressedTo(r.To, addr) {
 					continue
 				}
 				mine[r.ID] = r.Subject
 				out = append(out, chatMsg{ID: r.ID, Epoch: r.Epoch, Kind: "msg", From: r.From, To: r.To, State: r.State,
 					Subject: r.Subject, Close: r.Close, Mine: fromYou(r), ToYou: toYou(r.To)})
 			case "decision":
-				if r.By != addr {
+				if addr != "" && r.By != addr {
 					continue
 				}
 				out = append(out, chatMsg{ID: r.ID, Epoch: r.Epoch, Kind: "decision", From: r.By, Subject: r.Text, Body: r.Why})
@@ -175,6 +175,23 @@ func (m *model) openChat(s Seat, peer string) tea.Cmd {
 	return tea.Batch(loadChat(m.snap.Bus, s.Addr), textinput.Blink)
 }
 
+// openActivity is the same screen over every agent: the whole bus, newest at
+// the bottom, read-only.
+func (m *model) openActivity() tea.Cmd {
+	m.mode = modeChat
+	m.chatSeat, m.chatPeer = Seat{}, ""
+	m.chatMsgs = nil
+	m.chatStamp = ""
+	m.chatNote = ""
+	m.chatSel, m.chatFollow = 0, true
+	m.input.SetValue("")
+	m.input.Blur()
+	m.chatView = viewport.New(m.w/2, m.chatHeight())
+	return loadChat(m.snap.Bus, "")
+}
+
+func (m model) allActivity() bool { return m.mode == modeChat && m.chatSeat.Addr == "" }
+
 func (m model) chatHeight() int { return max(3, m.h-6) }
 
 // party names the other side of a message: you, a broadcast, or an agent.
@@ -196,12 +213,21 @@ func (m model) rowLabel(c chatMsg) (string, lipgloss.Style) {
 	switch c.Kind {
 	case "resolve":
 		who := "closed"
-		if c.From != m.chatSeat.Addr {
+		if m.allActivity() || c.From != m.chatSeat.Addr {
 			who = party(c.From) + " closed"
 		}
 		return "✓ " + who, lipgloss.NewStyle().Foreground(cGood)
 	case "decision":
+		if m.allActivity() {
+			return "◆ " + party(c.From) + " decided", sAccent
+		}
 		return "◆ decided", sAccent
+	}
+	if m.allActivity() {
+		if c.Mine {
+			return "you → " + party(c.To), lipgloss.NewStyle().Foreground(cAccent).Bold(true)
+		}
+		return party(c.From) + " → " + party(c.To), sText
 	}
 	if c.From == m.chatSeat.Addr {
 		return "→ " + party(c.To), sText
@@ -226,7 +252,11 @@ func (m *model) renderChat() {
 	m.chatView.Width, m.chatView.Height = dw-4, m.chatHeight()-2
 	m.input.Width = m.w - 6
 	if m.chatSel < 0 || m.chatSel >= len(m.chatMsgs) {
-		m.chatView.SetContent(sDim.Render("Nothing on the bus from or to " + friendlyName(m.chatSeat.Addr) + " yet.\nSay something below."))
+		if m.allActivity() {
+			m.chatView.SetContent(sDim.Render("Nothing on the bus yet."))
+		} else {
+			m.chatView.SetContent(sDim.Render("Nothing on the bus from or to " + friendlyName(m.chatSeat.Addr) + " yet.\nSay something below."))
+		}
 		return
 	}
 	c := m.chatMsgs[m.chatSel]
@@ -304,7 +334,15 @@ func (m model) chatKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "shift+down", "ctrl+d":
 		m.chatView.HalfPageDown()
 		return m, nil
+	case "q":
+		if m.allActivity() {
+			m.mode = modeNormal
+			return m, nil
+		}
 	case "enter":
+		if m.allActivity() {
+			return m, nil
+		}
 		v := strings.TrimSpace(m.input.Value())
 		if v == "" {
 			return m, nil
@@ -313,6 +351,9 @@ func (m model) chatKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.chatSending = true
 		m.chatFollow = true
 		return m, sendChat(m.chatSeat.Addr, v)
+	}
+	if m.allActivity() {
+		return m, nil
 	}
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(k)
@@ -323,6 +364,10 @@ func (m model) chatScreen() string {
 	s := m.chatSeat
 	lw, dw := m.chatWidths()
 	h := m.chatHeight()
+	labelW := 18
+	if m.allActivity() {
+		labelW = 34
+	}
 
 	// Header: who, what it's on, where, when.
 	name := lipgloss.NewStyle().Foreground(lipgloss.Color(avatarColor(toolOf(s)))).Bold(true).Render(friendlyName(s.Addr))
@@ -340,10 +385,13 @@ func (m model) chatScreen() string {
 		parts = append(parts, sDim.Render(seen))
 	}
 	title := " " + fit(strings.Join(parts, sDim.Render(" · ")), m.w-2)
+	if m.allActivity() {
+		title = " " + sAccent.Render("All activity") + sDim.Render(fmt.Sprintf(" · every message, close and decision on the bus · %d", len(m.chatMsgs)))
+	}
 
 	// The timeline, newest at the bottom, scrolled to the selection.
 	inner := lw - 4
-	rows := h - 2
+	rows := h
 	var lines []string
 	if len(m.chatMsgs) == 0 {
 		lines = append(lines, sDim.Render("No activity yet."))
@@ -362,8 +410,8 @@ func (m model) chatScreen() string {
 		if c.Kind == "resolve" {
 			state = c.Reason
 		}
-		row := sDim.Render(fmt.Sprintf("%-6s", when(c.Epoch))) + st.Render(fit(label, 18)) + " " +
-			kindStyle(c.State).Render(fit(state, 12)) + " " + fit(clean(strings.TrimLeft(c.Subject, "# ")), max(4, inner-38))
+		row := sDim.Render(fmt.Sprintf("%-6s", when(c.Epoch))) + st.Render(fit(label, labelW)) + " " +
+			kindStyle(c.State).Render(fit(state, 12)) + " " + fit(clean(strings.TrimLeft(c.Subject, "# ")), max(4, inner-20-labelW))
 		if i == m.chatSel {
 			row = sSel.Render(fit(ansiStrip(row), inner))
 		}
@@ -379,6 +427,10 @@ func (m model) chatScreen() string {
 
 	prompt := sAccent.Render(" › ") + m.input.View()
 	help := " ↑↓ timeline · pgup pgdn · shift+↑↓ scroll entry · enter sends as you · esc back"
+	if m.allActivity() {
+		prompt = sDim.Render(" to message an agent, open its timeline with c")
+		help = " ↑↓ timeline · pgup pgdn · shift+↑↓ scroll entry · esc back"
+	}
 	foot := sDim.Render(fit(help, m.w))
 	switch {
 	case m.chatSending:

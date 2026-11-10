@@ -49,8 +49,17 @@ func (m model) needs() map[string][]need {
 	for _, it := range m.snap.Open {
 		subj[it.ID] = it
 	}
+	live := map[string]bool{}
+	for _, s := range m.snap.Seats {
+		live[s.Addr] = true
+	}
 	for _, a := range m.snap.Attention {
 		if a.Kind != "needs-you" || a.From == "" || a.ID == "" || seen[a.ID] {
+			continue
+		}
+		// A stale ask from an agent that has exited can't be acted on: answering
+		// reaches no one. It stays in `agent-bus triage`, not on the grid.
+		if it, ok := subj[a.ID]; ok && it.Stale && !live[a.From] {
 			continue
 		}
 		seen[a.ID] = true
@@ -127,14 +136,14 @@ func (m model) tiles() ([]tile, []laneGroup) {
 		}
 		all = keep
 	}
-	byLane := map[string]*laneGroup{}
+	byKey := map[string]*laneGroup{}
 	var order []string
 	for i, t := range all {
-		l := t.seat.Lane
-		g := byLane[l]
+		l := m.groupBy.key(t)
+		g := byKey[l]
 		if g == nil {
 			g = &laneGroup{name: l}
-			byLane[l] = g
+			byKey[l] = g
 			order = append(order, l)
 		}
 		g.tiles = append(g.tiles, i)
@@ -144,7 +153,7 @@ func (m model) tiles() ([]tile, []laneGroup) {
 		}
 	}
 	sort.SliceStable(order, func(i, j int) bool {
-		a, b := byLane[order[i]], byLane[order[j]]
+		a, b := byKey[order[i]], byKey[order[j]]
 		if (a.name == "") != (b.name == "") {
 			return b.name == ""
 		}
@@ -156,7 +165,7 @@ func (m model) tiles() ([]tile, []laneGroup) {
 	var tiles []tile
 	var groups []laneGroup
 	for _, l := range order {
-		g := byLane[l]
+		g := byKey[l]
 		// Within a lane: needs you first, then most recent.
 		sort.SliceStable(g.tiles, func(i, j int) bool {
 			a, b := all[g.tiles[i]], all[g.tiles[j]]
@@ -227,7 +236,7 @@ func (m model) gridLayout(w int) ([]string, []placed) {
 		x0 := shelfX + gap
 		name := g.name
 		if name == "" {
-			name = "no lane"
+			name = m.groupBy.emptyLabel()
 		}
 		head := sHeader.Render(name)
 		if g.needs > 0 {
@@ -359,7 +368,8 @@ func (m model) renderTile(t tile, selected bool, needs int) string {
 	case t.peer != "":
 		meta = t.peer + " · " + meta
 	}
-	if on := workingOn(s); on != "" && !t.gone {
+	// What it's on, unless the group heading already says it.
+	if on := workingOn(s); on != "" && !t.gone && on != m.groupBy.key(t) {
 		meta = on + " · " + meta
 	}
 	center := func(st string) string { return lipgloss.PlaceHorizontal(tileInner, lipgloss.Center, st) }
@@ -370,7 +380,7 @@ func (m model) renderTile(t tile, selected bool, needs int) string {
 		doing = append(doing, "")
 	}
 	metaLine := sDim.Render(shrink(meta))
-	if svc := m.servicesFor(s); len(svc) > 0 {
+	if svc := m.ownPorts(s); len(svc) > 0 {
 		p := ports(svc)
 		metaLine = lipgloss.NewStyle().Foreground(cGood).Render(shrink(p)) + sDim.Render(" · "+ago(m.snap.Now, s.Epoch))
 		if lipgloss.Width(metaLine) > tileInner {

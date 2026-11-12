@@ -361,6 +361,66 @@ assert_has "lane PM cannot close other lanes' items" "not its sender" "$out"
 assert_has "lane PM packets are marked as the PM's" "from the PM your user put in charge" \
   "$(lp post --to "$L1" --state handoff -m '# lane task' >/dev/null; l1 read --peek)"
 assert_has "offboard releases the lane PM role" "1 role(s)" "$(lp offboard)"
+
+# --- nested lanes: a PM supervises its lane and every lane under it ---
+ap() { seat ap claude wap "$@"; }
+w1() { seat w1 opencode ww1 "$@"; }
+w2() { seat w2 opencode ww2 "$@"; }
+sp() { seat sp claude wsp "$@"; }
+AP=$(addr ap); W1=$(addr w1); W2=$(addr w2); SP=$(addr sp)
+ap lane area >/dev/null; w1 lane tk-101 >/dev/null; w2 lane tk-202 >/dev/null
+out=$(w2 lane tk-101 under tk-202 2>&1 || true)
+assert_has "a seat outside a lane cannot move it" "may move it" "$out"
+assert_has "a seat files its own lane under a parent" "lane @tk-101 is under @area" "$(w1 lane tk-101 under area)"
+out=$(w1 lane area under tk-101 2>&1 || true)
+assert_has "a lane cannot go under its own child" "already under @area" "$out"
+out=$(w1 lane tk-101 under tk-101 2>&1 || true)
+assert_has "a lane cannot go under itself" "cannot sit under itself" "$out"
+ap role pm --lane area >/dev/null
+assert_has "the lane above answers as PM" "lane PM: $AP" "$(w1 digest 2>&1; w1 whoami)"
+nid=$(w1 post --to "$W2" --state needs-review -m $'# child review\n\nx' | idof)
+xid=$(w2 post --to "$W1" --state blocked -m $'# outside stuck\n\nx' | idof)
+out=$(ap read --peek)
+assert_has "a parent PM gets a copy of a child lane's work" "child review" "$out"
+assert_lacks "a parent PM does not see lanes outside its tree" "outside stuck" "$out"
+qid=$(w1 post --to @pm --state question -m $'# ask up\n\nx' | idof)
+assert_has "@pm from a child lane reaches the parent PM" "ask up" "$(ap read --peek)"
+out=$(ap triage --lane area)
+assert_has "triage on a parent lane includes its children" "child review" "$out"
+assert_has "the parent PM owns @pm from a child" "owner $AP" "$out"
+assert_lacks "triage on a parent lane skips other trees" "outside stuck" "$out"
+w1 read >/dev/null; w2 read >/dev/null
+ap post --to @area -m $'# area news\n\nhi' >/dev/null
+assert_has "@parent reaches seats in child lanes" "area news" "$(w1 read --peek)"
+assert_lacks "@parent skips lanes outside the tree" "area news" "$(w2 read --peek)"
+assert_has "a parent PM's packets are marked as the PM's" "from the PM your user put in charge" \
+  "$(ap post --to "$W1" --state handoff -m '# child task' >/dev/null; w1 read --peek)"
+assert_has "a parent PM can close a child lane's items" "resolved $nid (done)" "$(ap resolve "$nid" --reason done)"
+out=$(ap resolve "$xid" --reason done 2>&1 || true)
+assert_has "a parent PM cannot close items outside its tree" "not its sender" "$out"
+# The nearest PM acts; the PMs above still see it.
+sp lane tk-101 >/dev/null; sp role pm --lane tk-101 >/dev/null
+sp read >/dev/null; ap read >/dev/null
+w1 post --to @pm --state question -m $'# ask nearest\n\nx' >/dev/null
+assert_has "@pm goes to the nearest PM" "owner $SP" "$(sp triage --lane tk-101 | grep -B2 -A2 'ask nearest')"
+assert_has "the PM above still gets a copy" "ask nearest" "$(ap read --peek)"
+sp role pm --lane tk-101 --clear >/dev/null
+# A launcher nests a lane through the environment.
+w3() { AGENT_BUS_LANE=tk-303 AGENT_BUS_LANE_PARENT=area seat w3 opencode ww3 "$@"; }
+w3 who >/dev/null
+out=$(ap lanes --json)
+assert_eq "AGENT_BUS_LANE_PARENT files a new lane under its parent" "area" "$(jq -r '.[] | select(.lane == "tk-303") | .parent' <<<"$out")"
+assert_eq "snapshot gives a lane's path from the top" "area/tk-101" "$(jq -r '.[] | select(.lane == "tk-101") | .path | join("/")' <<<"$out")"
+assert_eq "snapshot names the PM who answers for a child lane" "$AP" "$(jq -r '.[] | select(.lane == "tk-101") | .sup' <<<"$out")"
+out=$(ap lanes)
+assert_has "lanes prints children under their parent" "    @tk-101" "$out"
+w1 post --to "$W2" --state blocked -m $'# child leftover\n\nx' >/dev/null
+out=$(ap lane area done --reason done)
+assert_has "closing a parent lane leaves its children's items" "child leftover" "$(ap triage --lane tk-101)"
+assert_has "a parent PM can close a child lane" "lane @tk-101 done (merged)" "$(ap lane tk-101 done --reason merged)"
+assert_has "under --clear lifts a lane to the top" "top-level lane" "$(w1 lane tk-101 under --clear)"
+assert_eq "a cleared lane has no parent" "null" "$(ap lanes --json | jq -r '[.[] | select(.lane == "tk-303" or .lane == "tk-101")] | map(select(.lane == "tk-101"))[0].parent // "null"')"
+ap offboard >/dev/null
 assert_has "lane PM is gone" "no PM registered for lane @spaces" "$(lp role --lane spaces)"
 l1 lane --clear >/dev/null
 assert_has "a seat can leave its lane" "lane     (none)" "$(l1 whoami)"

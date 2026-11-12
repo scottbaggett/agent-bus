@@ -329,6 +329,7 @@ touch_seat() {
     if [ "$activity" = waiting ]; then mkdir -p "$BUS/state" && : >"$BUS/state/waiting.$pid"
     else rm -f "$BUS/state/waiting.$pid"; fi
   fi
+  [ -z "${AGENT_BUS_LANE_PARENT:-}" ] || auto_parent
   return 0
 }
 
@@ -394,7 +395,32 @@ valid_lane() {
 # Grok Bot seat names share the same alphabet as lanes, also used as the wt component.
 valid_grok_name() { [[ "$1" =~ ^[a-z0-9][a-z0-9_-]{0,30}$ ]]; }
 lane_pm_file() { printf '%s/state/roles/%s.lane.%s.pm' "$BUS" "$(slugify "$REPO_ID")" "$1"; }
-lane_pm_seat() { local f; f=$(lane_pm_file "$1"); if [ -f "$f" ]; then head -1 "$f" | tr -d '\n'; fi; return 0; }
+# The PM registered on this very lane, if any.
+lane_pm_own() { local f; f=$(lane_pm_file "$1"); if [ -f "$f" ]; then head -1 "$f" | tr -d '\n'; fi; return 0; }
+# {lane: parent} for this repo, from `lane` rows: the latest row per lane wins
+# and an empty parent clears it.
+lane_parents() {
+  [ -f "$LEDGER" ] || { printf '{}'; return 0; }
+  jq -nRc --arg rid "$REPO_ID" 'reduce (inputs | fromjson? // empty
+      | select(.kind == "lane" and has("parent") and (.repo_id // "") == $rid)) as $r ({};
+        if $r.parent == "" then del(.[$r.lane]) else .[$r.lane] = $r.parent end)' "$LEDGER" 2>/dev/null || printf '{}'
+}
+# A lane and the lanes above it, nearest first, one per line.
+lane_chain() { jq -rn --arg l "$1" --argjson parents "$(lane_parents)" "$JQ_UP"'up($l)[]'; }
+# The PM who answers for a lane: its own, else the nearest one above it.
+lane_pm_seat() {
+  local l p
+  for l in $(lane_chain "$1"); do
+    p=$(lane_pm_own "$l"); if [ -n "$p" ]; then printf '%s' "$p"; return 0; fi
+  done
+  return 0
+}
+# Whether this seat is PM of lane $1 or of any lane above it.
+pm_over() {
+  local l
+  for l in $(lane_chain "$1"); do [ "$(lane_pm_own "$l")" = "$ADDR" ] && return 0; done
+  return 1
+}
 # {lane: pm-address} for this repo; always an object.
 lane_pms() {
   local f l
@@ -489,6 +515,7 @@ def lane_rows($L): reduce ($L | to_entries[] | select(.value.kind == "lane")) as
   | .[$k] = ((.[$k] // {state: "open", sweeps: []})
       + (if $r.state then {state: $r.state, reason: ($r.reason // null), by: $r.by, at: $r.epoch} else {} end)
       + (if $r.title then {title: $r.title} else {} end)
+      + (if ($r | has("parent")) then {parent: $r.parent} else {} end)
       | if ($r.close_before // 0) > 0 then .sweeps += [{before: $r.close_before, pos: $e.key}] else . end));
 def closed($L): file_map($L) as $fm | lane_rows($L) as $lr
   | reduce ($L[] | if .kind == "resolve" then .msg
@@ -503,7 +530,15 @@ def closed($L): file_map($L) as $fm | lane_rows($L) as $lr
            | $m.id) as $i (.; .[$i] = true) end;
 '
 
-JQ_LIB="$JQ_LANE$JQ_SEAT_LIVE$JQ_CLOSE"'
+# Lanes nest: a lane may sit under another (`lane <name> under <parent>`), and
+# a PM of any lane supervises every lane beneath it. $parents maps lane ->
+# parent for this repo. up: a lane and the lanes above it, nearest first; a
+# loop in the data stops at the first repeat.
+JQ_UP='
+def up($l): [limit(16; $l | select(. != "") | recurse(($parents[.] // "") | select(. != "")))]
+  | reduce .[] as $x ([]; if index($x) then . else . + [$x] end);
+'
+JQ_LIB="$JQ_LANE$JQ_SEAT_LIVE$JQ_CLOSE$JQ_UP"'
 def clean: tostring | gsub("[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]"; "");
 def same_repo($me): if (.repo_id // "") != "" then .repo_id == $me.repo_id else .repo == $me.repo end;
 def authored($me): .from == $me.addr or ($me.session != "local" and (.session // "") == $me.session);
@@ -513,10 +548,13 @@ def is_pm($me): $pm != "" and $pm == $me.addr;
 def is_lead($me): ($me.tool // "") == "lead";
 # The seat holding the named role a packet is addressed to (@release), or "".
 def role_holder: (.to // "") as $t | if ($t | startswith("@")) then ($roles[$t[1:]] // "") else "" end;
-# The lanes a packet belongs to: the lane it was sent to, then the sender'"'"'s.
-def lanes_of: [((.to // "") | select(startswith("@")) | .[1:]), (.lane // "")] | map(select(. != ""));
+# The lanes a packet belongs to: the lane it was sent to, then the sender'"'"'s,
+# each followed by the lanes above it.
+def lanes_of: [((.to // "") | select(startswith("@")) | .[1:]), (.lane // "")] | map(select(. != "") | up(.)[])
+  | reduce .[] as $x ([]; if index($x) then . else . + [$x] end);
 def lane_pm_of: first(lanes_of[] | ($lanepms[.] // empty)) // "";
-# The repo PM supervises everything; a lane PM only its lane.
+# The repo PM supervises everything; a lane PM its lane and the lanes under it.
+# lane_pm_of is the nearest PM: the one expected to act.
 def pm_for($me): is_pm($me) or (lanes_of | any(($lanepms[.] // "") == $me.addr));
 def seatme: {addr, scope: ((.tool // "") + "/" + (.wt // "")), session: (.session // "local"),
              repo, repo_id, wt, lane: (.lane // "")};
@@ -532,15 +570,16 @@ def owns($me):
 def gets($me):
   owns($me) or .to == "@all"
   or (same_repo($me) and (.to == "@repo" or (.to == "@here" and .wt == $me.wt)
-      or ((.to // "") | startswith("@") and (.[1:] == $me.lane or ($lanepms[.[1:]] // "") == $me.addr))));
-def from_pm($me): .from == $pm or ($me.lane != "" and .from == ($lanepms[$me.lane] // ""));
+      or ((.to // "") | startswith("@") and ((.[1:] as $t | up($me.lane) | index($t) != null)
+          or ($lanepms[.[1:]] // "") == $me.addr))));
+def from_pm($me): .from as $f | $f == $pm or ($f != "" and any(up($me.lane)[]; ($lanepms[.] // "") == $f));
 '
 
 # Run a jq program over the parsed ledger, bound to $L. Unparseable rows drop.
 lq() {
   local prog="$1" now; shift
   now=$(now_epoch)
-  jq -nRrc --arg pm "$(pm_seat)" --argjson lanepms "$(lane_pms)" --argjson me "$ME" \
+  jq -nRrc --arg pm "$(pm_seat)" --argjson lanepms "$(lane_pms)" --argjson parents "$(lane_parents)" --argjson me "$ME" \
     --argjson codex_cut "$(( now - CODEX_MAX_IDLE_TTL ))" --argjson roles "$(role_map)" "$@" \
     "$JQ_LIB [inputs | fromjson? // empty] as \$L | $prog" "$LEDGER"
 }
@@ -721,7 +760,7 @@ live_heir() {
 # report: one JSON row each.
 owner_rows() {
   local now; now=$(now_epoch)
-  seat_rows | jq -c -n --argjson m "$1" --arg pm "$(pm_seat)" --argjson lanepms "$(lane_pms)" --argjson roles "$(role_map)" \
+  seat_rows | jq -c -n --argjson m "$1" --arg pm "$(pm_seat)" --argjson lanepms "$(lane_pms)" --argjson parents "$(lane_parents)" --argjson roles "$(role_map)" \
     --argjson cut "$(( now - SEAT_TTL ))" \
     --argjson codex_cut "$(( now - CODEX_MAX_IDLE_TTL ))" "$JQ_LIB"'
     [inputs | select(buslive($cut; $codex_cut) and (.tool // "") != "lead")
@@ -850,7 +889,7 @@ codex_end_session() (
 # Registered Grok Bot seats that own the given packet record.
 grok_targets() {
   local now; now=$(now_epoch)
-  seat_rows | jq -nc --argjson m "$1" --arg pm "$(pm_seat)" --argjson lanepms "$(lane_pms)" --argjson roles "$(role_map)" \
+  seat_rows | jq -nc --argjson m "$1" --arg pm "$(pm_seat)" --argjson lanepms "$(lane_pms)" --argjson parents "$(lane_parents)" --argjson roles "$(role_map)" \
     --argjson cut "$(( now - SEAT_TTL ))" \
     --argjson codex_cut "$(( now - CODEX_MAX_IDLE_TTL ))" "$JQ_LIB"'
     [inputs | select(.tool == "grok" and buslive($cut; $codex_cut) and (.grok_webhook // "") != "")
@@ -1100,7 +1139,7 @@ cmd_grok() {
 
 codex_targets() {
   local now; now=$(now_epoch)
-  seat_rows | jq -nc --argjson m "$1" --arg pm "$(pm_seat)" --argjson lanepms "$(lane_pms)" --argjson roles "$(role_map)" \
+  seat_rows | jq -nc --argjson m "$1" --arg pm "$(pm_seat)" --argjson lanepms "$(lane_pms)" --argjson parents "$(lane_parents)" --argjson roles "$(role_map)" \
     --argjson cut "$(( now - SEAT_TTL ))" \
     --argjson codex_cut "$(( now - CODEX_MAX_IDLE_TTL ))" "$JQ_LIB"'
     [inputs | select(.tool == "codex" and buslive($cut; $codex_cut) and (.codex_queue // "") != "")
@@ -2554,7 +2593,7 @@ cmd_role() {
       "$([ -n "$cur" ] && [ "$cur" != "$ADDR" ] && echo " (took over from $cur)")" "$name"
     return 0
   fi
-  if [ -n "$lane" ]; then f=$(lane_pm_file "$lane"); cur=$(lane_pm_seat "$lane"); label="lane @$lane"
+  if [ -n "$lane" ]; then f=$(lane_pm_file "$lane"); cur=$(lane_pm_own "$lane"); label="lane @$lane"
   else f=$(pm_file); cur=$(pm_seat); label="$REPO"; fi
   if ((clear)); then
     [ -n "$cur" ] || { printf 'no PM registered for %s\n' "$label"; return 0; }
@@ -2574,7 +2613,7 @@ cmd_role() {
   printf '%s' "$ADDR" >"$f"
   printf 'PM for %s: %s%s\n' "$label" "$ADDR" "$([ -n "$cur" ] && [ "$cur" != "$ADDR" ] && echo " (took over from $cur)")"
   if [ -n "$lane" ]; then
-    printf 'now receiving needs-review, blocked, handoff, question from seats in lane @%s and sent to @%s\n' "$lane" "$lane"
+    printf 'now receiving needs-review, blocked, handoff, question from seats in lane @%s and the lanes under it, and sent to @%s\n' "$lane" "$lane"
   else
     printf 'now receiving needs-review, blocked, handoff, question from any worktree\n'
   fi
@@ -2592,9 +2631,46 @@ cmd_role() {
 }
 
 # Join, show or leave a lane: the feature this seat is working on.
-# Who may change a lane's lifecycle: the lead, the repo PM, or that lane's PM.
+# Who may change a lane's lifecycle: the lead, the repo PM, or a PM of that
+# lane or of a lane above it.
 lane_standing() {
-  [ "$TOOL" = lead ] || [ "$ADDR" = "$(pm_seat)" ] || [ "$ADDR" = "$(lane_pm_seat "$1")" ]
+  [ "$TOOL" = lead ] || [ "$ADDR" = "$(pm_seat)" ] || pm_over "$1"
+}
+
+# `lane <name> under <parent>` nests a lane; `under --clear` lifts it back to
+# the top. One ledger row, like every other lane change. A seat may file its
+# own lane; anyone else needs standing over the lane or over the new parent.
+lane_under() {
+  local name="$1" parent="${2:-}"
+  valid_lane "$name" || die "lane: '$name' is not a lane name"
+  [ -n "$parent" ] || die "lane: usage — agent-bus lane <name> under <parent> | --clear"
+  if [ "$parent" = --clear ]; then parent=''
+  else
+    valid_lane "$parent" || die "lane: '$parent' is not a lane name"
+    [ "$parent" != "$name" ] || die "lane: @$name cannot sit under itself"
+    if lane_chain "$parent" | grep -qxF -- "$name"; then die "lane: @$parent is already under @$name"; fi
+  fi
+  [ "$LANE" = "$name" ] || lane_standing "$name" || { [ -n "$parent" ] && lane_standing "$parent"; } \
+    || die "lane: only a seat in @$name, the lead, the repo PM or a PM over @$name${parent:+ or @$parent} may move it"
+  lane_parent_row "$name" "$parent"
+  if [ -n "$parent" ]; then
+    local pm; pm=$(lane_pm_seat "$name")
+    printf 'lane @%s is under @%s%s\n' "$name" "$parent" "${pm:+ (PM: $pm)}"
+  else printf 'lane @%s is a top-level lane\n' "$name"; fi
+}
+lane_parent_row() {
+  ledger_append "$(jq -nc --arg lane "$1" --arg parent "$2" --arg repo_id "$REPO_ID" --arg repo "$REPO" --arg by "$ADDR" \
+    --argjson epoch "$(now_epoch)" '{kind:"lane",lane:$lane,repo_id:$repo_id,repo:$repo,by:$by,epoch:$epoch,parent:$parent}')"
+}
+# AGENT_BUS_LANE_PARENT files a seat's lane under a parent the first time the
+# seat is seen there, so a launcher nests a ticket lane without a command. It
+# never moves a lane that already has a parent.
+auto_parent() {
+  local parent="${AGENT_BUS_LANE_PARENT:-}"
+  [ -n "$parent" ] && [ -n "$LANE" ] && [ "$parent" != "$LANE" ] && valid_lane "$parent" || return 0
+  [ "$(jq -r --arg l "$LANE" '.[$l] // ""' <<<"$(lane_parents)")" = "" ] || return 0
+  if lane_chain "$parent" | grep -qxF -- "$LANE"; then return 0; fi
+  lane_parent_row "$LANE" "$parent"
 }
 
 # Days, as "7d" or "7", to seconds.
@@ -2628,7 +2704,9 @@ lane_lifecycle() {
     title) [ -n "$title" ] || die "lane title: needs --title" ;;
     *) die "lane: usage — agent-bus lane <name> done|park|reopen|sweep|title [--reason r] [--older Nd] [--title t]" ;;
   esac
-  n=$(open_items "$name" | jq -s --argjson b "$before" '[.[] | select((.epoch // 0) <= $b)] | length')
+  # Only this lane's own items close; lanes under it keep theirs.
+  n=$(open_items "$name" | jq -s --argjson b "$before" --arg n "$name" \
+    '[.[] | select((.epoch // 0) <= $b and (.lane == $n or .to == ("@" + $n)))] | length')
   ledger_append "$(jq -nc --arg lane "$name" --arg repo_id "$REPO_ID" --arg repo "$REPO" --arg state "$state" \
     --arg reason "$reason" --arg title "$title" --arg by "$ADDR" --argjson before "$before" --argjson epoch "$(now_epoch)" \
     '{kind:"lane",lane:$lane,repo_id:$repo_id,repo:$repo,by:$by,epoch:$epoch}
@@ -2657,6 +2735,7 @@ cmd_file() {
 }
 
 cmd_lane() {
+  if [ "${2:-}" = under ]; then lane_under "$1" "${3:-}"; return; fi
   if [ $# -ge 2 ] && [ "${2#-}" = "$2" ]; then lane_lifecycle "$@"; return; fi
   case "${1:-}" in
     '') if [ -n "$LANE" ]; then printf '%s (%s)\n' "$LANE" "$LANE_SRC"; else printf '(none — branch %s carries no ticket)\n' "$BRANCH"; fi ;;
@@ -2761,14 +2840,18 @@ snapshot_json() {
     def live($a): $seats | any(.addr == $a or .scope == $a);
     [inputs | fromjson? // empty] as $L
     | closed($L) as $c | file_map($L) as $fm | lane_rows($L) as $lr
-    | ($seats | map({(.addr): .}) | add // {}) as $by
+    # A lane and the lanes above it, nearest first (see JQ_UP), per repo.
+    | def chain($rid; $l): [limit(16; $l | select(. != "") | recurse(($lr[$rid + ":" + .].parent // "") | select(. != "")))]
+        | reduce .[] as $x ([]; if index($x) then . else . + [$x] end);
+      ($seats | map({(.addr): .}) | add // {}) as $by
     | (reduce ($L[] | select(.kind == "msg")) as $m ({}; .[$m.id] = ($m.subject // ""))) as $subj
     | [$L[] | select(.kind == "msg" and sup and ($c[.id] | not) and ((.probe // false) | not))
         | . + {lane: item_lane($fm)}
         | (.repo_id // "") as $rid | ($lanepms[$rid] // {}) as $lp | .id as $id
         | (if .to == "@lead" or .assign == "@lead" then "lead"
            elif ((.to // "") | startswith("@")) then
-             ([(($roles[$rid] // {})[.to[1:]] // empty), (.to[1:] | $lp[.] // empty), ($lp[.lane] // empty),
+             ([(($roles[$rid] // {})[.to[1:]] // empty), first(chain($rid; .to[1:])[] | $lp[.] // empty),
+               first(chain($rid; .lane)[] | $lp[.] // empty),
                ($pms[$rid] // empty), "(no PM)"] | first)
            else .to end) as $o
         | {id, epoch: (.epoch // 0), from, to, state, subject: (.subject // ""), repo: (.repo // "-"),
@@ -2790,7 +2873,11 @@ snapshot_json() {
     | ($open | group_by((.repo_id) + ":" + .lane) | map({key: ((.[0].repo_id) + ":" + .[0].lane), value: .}) | from_entries) as $byLane
     | ($seats | map(select(.lane != "")) | group_by((.repo_id // "") + ":" + .lane)
        | map({key: (((.[0].repo_id) // "") + ":" + .[0].lane), value: .}) | from_entries) as $seatsByLane
-    | ([$byLane, $seatsByLane] | map(keys) | add | unique) as $keys
+    # Every lane with work or seats, plus the lanes above them, so the tree is whole.
+    | ([$byLane, $seatsByLane] | map(keys) | add | unique
+       | . + [.[] | split(":") as $kp | $kp[0] as $rid | chain($rid; $kp[1:] | join(":"))[1:][] | $rid + ":" + .]
+       | unique) as $keys
+    | ([$seats[], $open[]] | map({(.repo_id // ""): .repo}) | add // {}) as $repoName
     | ([$L[] | select(.kind == "decision" and (.supersedes // "") != "") | .supersedes] | map({(.): true}) | add // {}) as $gone
     | ([$L[] | select(.kind == "decision" and ($gone[.id] | not))]
        | group_by((.repo_id // "") + ":" + (.lane // "")) | map({key: ((.[0].repo_id // "") + ":" + (.[0].lane // "")),
@@ -2798,10 +2885,13 @@ snapshot_json() {
     | [$keys[] | . as $k | ($byLane[$k] // []) as $items | ($seatsByLane[$k] // []) as $ls
         | ($k | split(":")) as $kp | $kp[0] as $rid | ($kp[1:] | join(":")) as $lane
         | ($lr[$k] // {state: "open"}) as $row
-        | ([$items[].repo, $ls[].repo] | map(select(. != null)) | first // "-") as $repo
+        | ([$items[].repo, $ls[].repo] | map(select(. != null)) | first // $repoName[$rid] // "-") as $repo
+        | (chain($rid; $lane) | reverse) as $path
         | ([($act[$k].last // 0), ($items | map(.epoch) | max // 0), ($ls | map(.epoch) | max // 0)] | max) as $last
         | ($merged[$k].merged // false) as $isMerged
-        | {key: $k, repo: $repo, repo_id: $rid, lane: $lane, project: project_of($repo; $lane),
+        | {key: $k, repo: $repo, repo_id: $rid, lane: $lane, project: project_of($repo; $path[0]),
+           parent: ($path[-2:-1][0] // null), path: $path,
+           sup: (first(chain($rid; $lane)[] | ($lanepms[$rid] // {})[.] // empty) // null),
            title: ($row.title // null), state: $row.state, open: ($items | length),
            gone: ($items | map(select(.gone)) | length),
            oldest: ($items | map(.epoch) | min // null), last: $last,
@@ -2966,10 +3056,13 @@ cmd_lanes() {
   if ((json)); then jq -c '.lanes' <<<"$snap"; return; fi
   jq -r --arg rid "$REPO_ID" --argjson all "$all" --argjson now "$(now_epoch)" '
     def age($e): if $e == null then "-" else ($now - $e) as $s | if $s < 3600 then "\($s / 60 | floor)m" elif $s < 86400 then "\($s / 3600 | floor)h" else "\($s / 86400 | floor)d" end end;
-    [.lanes[] | select($all == 1 or .repo_id == $rid) | select(.health != "quiet")]
+    [.lanes[] | select($all == 1 or .repo_id == $rid)] as $mine
+    # A quiet lane still shows when a lane under it does.
+    | [$mine[] | select(.health != "quiet") | .repo_id as $r | .path[] | $r + ":" + .] as $shown
+    | [$mine[] | select(.key as $k | $shown | index($k))]
     | if length == 0 then "no lanes with open work or live seats" else
       (group_by(.project)[] | "\n\(.[0].project)",
-        (sort_by(-.open)[] | "  @\(.lane)\(if .title then " — " + .title else "" end)  [\(.health)]  \(.open) open\(
+        (sort_by(.path | join("/"))[] | "  \([range((.path | length) - 1)] | map("  ") | join(""))@\(.lane)\(if .title then " — " + .title else "" end)  [\(.health)]  \(.open) open\(
            if .gone > 0 then " (\(.gone) ownerless)" else "" end), \(.seats | length) seat(s), last \(age(.last))\(
            if .pm then ", PM " + .pm else "" end)"))
       end' <<<"$snap" | sanitize
@@ -3428,6 +3521,12 @@ agent-bus — handoff bus for coding agents sharing repos and worktrees.
                               STALE
   lane [<name> | --clear]     show or set this seat's lane (default: from the
                               branch's ticket key, e.g. eng-142)
+  lane <name> under <parent> | --clear
+                              nest a lane under another: a PM of a lane also
+                              supervises every lane beneath it, @pm goes to the
+                              nearest PM up the tree, and @<parent> reaches the
+                              seats in its child lanes (AGENT_BUS_LANE_PARENT
+                              files a new seat's lane the same way)
   lane <name> done|park|reopen|sweep|title [--reason r] [--older Nd] [--title t]
                               lane lifecycle (lead, repo PM or lane PM): done
                               closes its open items, sweep those older than

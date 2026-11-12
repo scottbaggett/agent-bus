@@ -3055,7 +3055,7 @@ cmd_lanes() {
   local snap; snap=$(snapshot_json)
   if ((json)); then jq -c '.lanes' <<<"$snap"; return; fi
   jq -r --arg rid "$REPO_ID" --argjson all "$all" --argjson now "$(now_epoch)" '
-    def age($e): if $e == null then "-" else ($now - $e) as $s | if $s < 3600 then "\($s / 60 | floor)m" elif $s < 86400 then "\($s / 3600 | floor)h" else "\($s / 86400 | floor)d" end end;
+    def age($e): if $e == null or $e == 0 then "-" else ($now - $e) as $s | if $s < 3600 then "\($s / 60 | floor)m" elif $s < 86400 then "\($s / 3600 | floor)h" else "\($s / 86400 | floor)d" end end;
     [.lanes[] | select($all == 1 or .repo_id == $rid)] as $mine
     # A quiet lane still shows when a lane under it does.
     | [$mine[] | select(.health != "quiet") | .repo_id as $r | .path[] | $r + ":" + .] as $shown

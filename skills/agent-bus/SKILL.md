@@ -111,8 +111,9 @@ don't tell your user it arrived.
 
 If `post` prints a `tip:` line, pass it on to your user in one sentence.
 
-`post` prints a `delivery:` line for each owner: woken, sees it at its next
-prompt, queued, not running, or nobody. If it says nobody owns it, nobody will
+`post` prints a `delivery:` line for each owner: submitted to the Claude inbox
+(acceptance and reading unconfirmed), inbox submission unavailable, sees it at
+its next prompt, queued, not running, or nobody. If it says nobody owns it, nobody will
 act on it: send it to a seat instead. An OpenCode seat that isn't running can
 be restarted with `post --resume`.
 
@@ -211,6 +212,7 @@ yours, like "Brave Otter"). Use it when you talk about an agent to your user.
    still apply).
 2. Work needs an owner: address a seat, a role or `@lead`, never `@here`.
 3. Close with a reason; never leave an item you own silently.
-4. Other Claude sessions: use Claude session messaging (SendMessage), not the
-   bus. The bus is for OpenCode, Codex and Grok seats.
+4. Other Claude sessions: use the bus for tracked work; it submits through
+   Claude's native inbox socket. `SendMessage` is also available for untracked
+   exchanges. Socket submission alone does not prove acceptance or reading.
 5. `agent-bus guide` prints the short playbook for workers, supervisors and reviewers.

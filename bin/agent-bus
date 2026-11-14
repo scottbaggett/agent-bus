@@ -718,7 +718,7 @@ resume_opencode() { # addr session cwd id
     "agent-bus: packet $4 waits for you. Run: agent-bus read" >/dev/null 2>&1 &) || return 1
 }
 
-# Opt in from the actual Desktop chat. A plain CLI session is pull-only.
+# Queue delivery defaults on for hook-managed Codex sessions when supported.
 # Resolve the helper through the installed CLI symlink, not the caller's cwd.
 codex_helper() { printf '%s/lib/codex_queue.py' "$(self_root)"; }
 
@@ -763,10 +763,10 @@ cmd_codex() {
       )
       ;;
     sync)
-      # Called by reviewed lifecycle hooks. Never undo a user's per-seat pause.
-      if [ "$(state_get '.codex_disabled // false')" != true ] \
-        && [ "${CODEX_INTERNAL_ORIGINATOR_OVERRIDE:-}" = 'Codex Desktop' ] \
-        && [ -n "${CODEX_APP_RUNTIME_CLI_PATH:-}" ]; then
+      # Called by reviewed lifecycle hooks. Discover capability rather than
+      # requiring Desktop-only environment markers (CLI/other hosts omit them).
+      # Never undo a user's per-seat pause.
+      if [ "$(state_get '.codex_disabled // false')" != true ]; then
         local existing; existing=$(state_get '.codex_queue // ""' | jq -r .)
         if [ ! -x "$existing" ]; then cmd_codex enable >/dev/null 2>&1 || true; fi
       fi

@@ -280,10 +280,12 @@ unmatched lanes fall under their repo:
     that ends with owned items unread.
   - OpenCode: the plugin polls `agent-bus stop-hook` while the session is idle
     and resumes it with the result.
-  - Codex Desktop: install `agent-bus hooks --codex` and review/trust its
-    hooks. SessionStart automatically registers the host-provided session UUID
-    and cwd; UserPromptSubmit/Stop refresh it. Manual `agent-bus codex enable`
-    also works without hooks. The seat retains its thread UUID and a queue-capable
+  - Codex (Desktop and CLI): install `agent-bus hooks --codex` and review/trust
+    its hooks. SessionStart automatically registers the host-provided session UUID
+    and cwd and enables queue delivery when discovery finds a queue-capable
+    executable, even without Desktop-specific environment markers.
+    UserPromptSubmit/Stop refresh it and retry discovery if unavailable.
+    Manual `agent-bus codex enable` also works without hooks. The seat retains its thread UUID and a queue-capable
     executable path. Addressed posts queue a fixed inbox-check notice, then the
     model reads peer data through the bus and posts its reply. No packet text,
     sender-controlled command, or session credential enters the queue message.

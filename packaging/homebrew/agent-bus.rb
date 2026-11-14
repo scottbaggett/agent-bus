@@ -5,7 +5,7 @@
 class AgentBus < Formula
   desc "File-backed handoff bus for coding agents sharing repos and worktrees"
   homepage "https://github.com/scottbaggett/agent-bus"
-  url "https://github.com/scottbaggett/agent-bus/archive/refs/tags/v0.5.0.tar.gz"
+  url "https://github.com/scottbaggett/agent-bus/archive/refs/tags/v0.5.1.tar.gz"
   sha256 "0000000000000000000000000000000000000000000000000000000000000000"
 
   depends_on "go" => :build

@@ -58,7 +58,7 @@ every prompt, and resumes the session when it's idle and owns new work.
   until it takes another turn.
 - Idle polling runs every 2s (`AGENT_BUS_OPENCODE_POLL_MS`).
 
-## Codex Desktop
+## Codex (Desktop and CLI)
 
 **Install:** `agent-bus hooks --codex` (the installer does this), then review and trust the four
 agent-bus hooks in Codex (`/hooks`), then restart or resume the chat so its
@@ -66,7 +66,11 @@ startup hook runs. Codex asks for trust again whenever a hook definition
 changes; the installer never edits trust settings, and it leaves your other
 Codex hooks and the Claude/OpenCode setup alone.
 
-**Use:** each chat registers itself on startup. Packets are **not** injected:
+**Use:** each session automatically enables queue delivery on startup when a
+queue-capable Codex executable is available. Desktop environment markers are
+not required. An explicit `agent-bus codex disable` stays paused across hook
+events; `enable` resumes it. If discovery fails, the session remains pull-only
+and later hooks retry. Packets are **not** injected:
 the chat is told at session start to run `agent-bus read`, and when it owns new
 work while idle, Codex's queue delivers a fixed "check your inbox" notice
 (Codex picks it up within about 10s). Reply with the normal
@@ -82,8 +86,9 @@ agent-bus codex enable       # resume, or connect manually without hooks
 - Requires Python 3 and a queue-capable Codex executable on the sending
   machine. Discovery tries the Desktop runtime, then known app bundles, then
   PATH (which may hold an older CLI); set `AGENT_BUS_CODEX_BIN` to override.
-- The Desktop app and the chat must stay loaded to be woken. Archived or
-  unloaded chats, app restart recovery and busy-turn ordering are untested.
+- The receiving Desktop chat or CLI session must stay loaded to be woken.
+  Archived or unloaded chats, app restart recovery and busy-turn ordering are
+  untested.
 - A queued notice proves Codex accepted it, not that the chat ran. A read or a
   reply on the bus is the proof. Accepted notices can't be recalled.
 - Notices never carry packet text and grant no permission.

@@ -668,14 +668,15 @@ hand on:         agent-bus post --re <id> --close handed-off --to <seat> --state
 
 # ------------------------------------------------------------------- push
 
-# Wake an idle Claude session by writing an inbox frame to its socket. A
-# data-free connect first tells a live listener from a stale socket file.
+# Submit a notification through Claude Code's native inbox socket. Socket
+# submission is not an acknowledgement: inbound policy may hold or refuse it.
+# Connect only once the complete newline-delimited frame is ready.
 poke_seat() {
   local sock="$1" text="$2"
   command -v nc >/dev/null 2>&1 && [ -S "$sock" ] || return 1
-  nc -U "$sock" -w 1 </dev/null >/dev/null 2>&1 || return 1
-  jq -nc --arg c "$text" '{type:"user",from:"agent-bus",message:{content:$c}}' \
-    | nc -U "$sock" -w 2 >/dev/null 2>&1 || true
+  local frame
+  frame=$(jq -nc --arg c "$text" '{type:"user",from:"agent-bus",message:{content:$c}}') || return 1
+  printf '%s\n' "$frame" | nc -U "$sock" -w 2 >/dev/null 2>&1
 }
 
 # The live seat that took over from a gone seat: same tool and worktree in
@@ -1410,12 +1411,13 @@ unowned_hint() { # state to
 }
 
 cmd_post() {
-  local to='' state='fyi' subject='' body='' bodyfile='' touched='[]' re='' close='' allow_claude=0
+  local to='' state='fyi' subject='' body='' bodyfile='' touched='[]' re='' close=''
   local resume="${AGENT_BUS_RESUME:-0}"
   local review_arg='' review_of='' review=''
 
   while [ $# -gt 0 ]; do
-    if [ "$1" = --allow-claude ]; then allow_claude=1; shift; continue; fi
+    # Compatibility with existing callers; Claude-to-Claude posts are allowed.
+    if [ "$1" = --allow-claude ]; then shift; continue; fi
     if [ "$1" = --resume ]; then resume=1; shift; continue; fi
     [ $# -ge 2 ] || die "post: $1 needs a value"
     case "$1" in
@@ -1442,12 +1444,6 @@ cmd_post() {
 
   in_list "$state" "$STATES" || die "post: --state must be one of: $STATES"
   [ -n "$to" ] || die "post: --to is required — a seat from 'agent-bus who', @pm, a lane, or @here|@repo|@all to broadcast"
-  # Claude sessions talk to each other natively; the bus is for non-Claude seats.
-  case "$to" in claude/*)
-    if [ "$TOOL" = claude ] && ((!allow_claude)); then
-      die "post: $to is a Claude session — use Claude session messaging (SendMessage) instead, or --allow-claude if the bus is intended"
-    fi ;;
-  esac
   case "$to" in
     @here|@repo|@all|@lead) ;;
     @pm) [ -n "$(pm_seat)" ] || { [ -n "$LANE" ] && [ -n "$(lane_pm_seat "$LANE")" ]; } \
@@ -1591,8 +1587,8 @@ deliver() { # rec src resume
       claude)
         if poke_seat "$(jq -r '.socket // ""' <<<"$row")" \
              "agent-bus: packet $id for $addr from $ADDR [$state] — $src. Run: agent-bus read (from $(jq -r '.cwd // "its worktree"' <<<"$row"))"; then
-          printf 'delivery: %s — woken\n' "$addr"
-        else printf 'delivery: %s — sees it at its next prompt\n' "$addr"; fi ;;
+          printf 'delivery: %s — submitted to Claude inbox (acceptance and reading unconfirmed)\n' "$addr"
+        else printf 'delivery: %s — inbox submission unavailable; packet retained for its next prompt or bus read\n' "$addr"; fi ;;
       opencode)
         local ps_; ps_=$(pid_state "$(jq -r '.pid // ""' <<<"$row")")
         if [ "$ps_" = yes ]; then
@@ -3342,8 +3338,7 @@ agent-bus — handoff bus for coding agents sharing repos and worktrees.
   who                         live seats, the PM, open-work count, claims
   post [flags]                send a packet
       --to <seat|scope|@role|@lane|@pm|@lead|@here|@repo|@all>     required
-      --allow-claude          let a Claude seat post to another Claude seat
-                              (otherwise refused: use Claude session messaging)
+      --allow-claude          compatibility flag (Claude-to-Claude is allowed)
       --state needs-review|blocked|handoff|question|done|fyi   default fyi
       -m <body> | --file <f> | stdin    --subject <s>    --touched a,b | auto
       --re <id>               reply to a packet

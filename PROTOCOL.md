@@ -64,11 +64,23 @@ accepted once a live seat is in that lane or the lane has a PM.
 
 ### Claude to Claude
 
-Claude sessions talk to each other through Claude session messaging
-(`SendMessage`), not the bus. A Claude seat posting directly to another Claude
-seat (`--to claude/...`) is refused unless it passes `--allow-claude`. `@pm`,
-lanes and broadcasts are unaffected: a Claude lane PM supervising OpenCode seats
-is what the bus is for.
+Claude seats can post directly to each other, including tracked handoffs,
+questions and review requests. The packet is recorded before a notification is
+submitted through the recipient's native Claude inbox socket. `--allow-claude`
+is accepted for compatibility but is no longer needed. Direct `SendMessage`
+remains available for exchanges that do not need bus ownership or history.
+
+The socket path comes from `CLAUDE_CODE_MESSAGING_SOCKET`. On macOS and Linux,
+Claude accepts connections from the same OS user without an auth line. The bus
+sends a newline-delimited notification, not the packet body, and does not share
+session authentication tokens. Native Windows named-pipe delivery is not
+implemented by this adapter.
+
+Claude applies its own inbound controls (`accept`, `hold`, or `refuse`). A
+successful write reports only submission, never acceptance, reading, or a wake.
+A missing socket or failed write leaves the packet available to the next hook
+or `agent-bus read`. A later bus read or reply establishes pickup. See
+[Claude's socket documentation](https://code.claude.com/docs/en/cross-session-messaging#the-sessions-inbox-socket).
 
 ## Messages and work items
 
@@ -337,8 +349,9 @@ Only the first three bodies render inline, each capped at 2KB and 40 lines;
 
 ## Delivery report
 
-`post` prints one `delivery:` line per owner it reached: woken, sees it at its
-next prompt, queued a notice, already has an unread notice, wake limit reached,
+`post` prints one `delivery:` line per owner it reached: submitted to the Claude
+inbox (acceptance and reading unconfirmed), inbox submission unavailable, sees it
+at its next prompt, queued a notice, already has an unread notice, wake limit reached,
 not running, or has no hooks. A packet nobody owns says so instead of looking
 delivered. A post to a seat that has ended goes to the live seat with the same
 tool and worktree (`note: … is gone; sending to …`).

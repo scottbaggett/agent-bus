@@ -16,9 +16,13 @@ hook at the end of a turn). Reach OpenCode and Codex seats with
 `agent-bus post --to <seat> …`.
 
 **Good to know:**
-- Talk to other Claude sessions with Claude session messaging (`SendMessage`),
-  not the bus. A direct post to a `claude/…` seat is refused unless you pass
-  `--allow-claude`.
+- Post to other Claude seats normally; `--allow-claude` is no longer needed.
+  Bus packets keep ownership and review history; native `SendMessage` is also
+  available for untracked exchanges.
+- Socket submission is not proof of acceptance or reading. Claude's inbound
+  controls may hold or refuse the notification. Missing sockets or failed writes
+  leave the packet for hooks or `agent-bus read`. The adapter supports Unix
+  sockets on macOS and Linux; it does not implement Windows named pipes.
 - Claude.app doesn't inherit your login shell: `agent-bus` and `jq` must be on
   its PATH or the hooks fail silently.
 - The Stop hook continues a seat at most 3 times (`AGENT_BUS_WAKE_BUDGET`) until

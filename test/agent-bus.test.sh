@@ -30,13 +30,8 @@ export AGENT_BUS_BRANCH=develop
 export AGENT_BUS_POLICY_OWNER=pm AGENT_BUS_POLICY_REVIEW=none
 
 # Fixture seats: seat <name> <tool> <worktree> <cmd...>
-# Fixture seats are mostly claude, so their posts pass --allow-claude; the
-# refusal itself is tested with raw_seat.
 raw_seat() { local s="$1" t="$2" w="$3"; shift 3; AGENT_BUS_SESSION="$s" AGENT_BUS_TOOL="$t" AGENT_BUS_WT="$w" "$BIN" "$@"; }
-seat() {
-  local s="$1" t="$2" w="$3"; shift 3
-  if [ "${1:-}" = post ]; then shift; raw_seat "$s" "$t" "$w" post --allow-claude "$@"; else raw_seat "$s" "$t" "$w" "$@"; fi
-}
+seat() { raw_seat "$@"; }
 pm() { seat pm claude pmwt "$@"; }
 a() { seat a claude wa "$@"; }
 b() { seat b opencode wa "$@"; }
@@ -94,10 +89,13 @@ assert_has "a broadcast stays readable" "just context" "$(b read --peek)"
 b read >/dev/null
 out=$(a post -m x 2>&1 || true)
 assert_has "post without --to is refused" "--to is required" "$out"
-out=$(raw_seat a claude wa post --to "$C" -m x 2>&1 || true)
-assert_has "claude to claude is refused" "use Claude session messaging (SendMessage)" "$out"
-assert_has "--allow-claude overrides" "posted" "$(raw_seat a claude wa post --allow-claude --to "$C" -m '# allowed')"
-assert_has "claude may post to an opencode seat" "posted" "$(raw_seat a claude wa post --to "$B" -m '# to oc')"
+rid=$(raw_seat a claude wa post --to "$C" --state needs-review -m 'native handoff' | idof)
+assert_eq "Claude-to-Claude post records its recipient and state" "$C needs-review" \
+  "$(jq -r --arg id "$rid" 'select(.id == $id) | .to + " " + .state' "$BUS_HOME/ledger.jsonl")"
+assert_has "recipient can pick up the Claude review" "$rid" "$(c read --peek)"
+compat=$(raw_seat a claude wa post --allow-claude --to "$C" -m 'compatibility' | idof)
+assert_eq "legacy flag still records a packet" 1 \
+  "$(jq -s --arg id "$compat" '[.[] | select(.id == $id and .kind == "msg")] | length' "$BUS_HOME/ledger.jsonl")"
 c read >/dev/null; b read >/dev/null
 
 # --- PM: role, auto-CC, ownership ---
@@ -576,9 +574,14 @@ d = sys.argv[1]
 def serve(name):
     p = os.path.join(d, name); s = socket.socket(socket.AF_UNIX); s.bind(p); s.listen(8)
     while True:
-        c, _ = s.accept(); data = c.recv(65536); c.close()
+        c, _ = s.accept()
+        with open(p + ".connections", "a") as f:
+            f.write("1\n")
+        with c, c.makefile("rb") as stream:
+            data = stream.readline()
         if data:
-            open(p + ".log", "ab").write(data)
+            with open(p + ".log", "ab") as f:
+                f.write(data)
 for n in ("owner", "bystander"):
     threading.Thread(target=serve, args=(n,), daemon=True).start()
 threading.Event().wait()
@@ -590,14 +593,48 @@ PY
   O1=$(addr seat o1 claude wp)
   out=$(AGENT_BUS_NO_PUSH=0 seat o3 claude wx post --to "$O1" --state needs-review -m '# wake owner')
   sleep 0.3
-  assert_has "post wakes the idle owner" "delivery: $O1 — woken" "$out"
-  assert_has "owner got an inbox frame" "agent-bus read" "$(cat "$SOCKD/owner.log" 2>/dev/null)"
+  rid=$(idof <<<"$out")
+  assert_eq "owner receives one complete native inbox frame" 'user agent-bus' \
+    "$(jq -r '.type + " " + .from' "$SOCKD/owner.log")"
+  assert_eq "one post opens one socket connection" 1 "$(wc -l <"$SOCKD/owner.connections" | tr -d ' ')"
+  assert_has "notification references the stored packet" "$rid" "$(jq -r '.message.content' "$SOCKD/owner.log")"
+  assert_has "socket submission leaves packet unread for pickup" "$rid" "$(seat o1 claude wp read --peek)"
+  seat o1 claude wp read >/dev/null
+  assert_eq "recipient read records pickup of the packet" true \
+    "$(jq --arg id "$rid" '.read | index($id) != null' "$BUS_HOME/state/$(printf '%s' "$O1" | tr '/' '_').json")"
+  # A stale Unix socket has a path but no listener. Failed submission must
+  # retain the packet and leave it available to hooks/read.
+  python3 - "$SOCKD/stale" <<'PY_SOCKET'
+import socket, sys
+s = socket.socket(socket.AF_UNIX)
+s.bind(sys.argv[1])
+s.close()
+PY_SOCKET
+  CLAUDE_CODE_MESSAGING_SOCKET="$SOCKD/stale" seat stale claude ws who >/dev/null
+  STALE=$(addr seat stale claude ws)
+  failed=$(AGENT_BUS_NO_PUSH=0 seat o3 claude wx post --to "$STALE" --state question -m 'retained on socket failure' | idof)
+  assert_eq "failed socket submission persists the packet" 1 \
+    "$(jq -Rsc --arg id "$failed" '[split("\n")[] | fromjson? | select(.id == $id and .kind == "msg")] | length' "$BUS_HOME/ledger.jsonl")"
+  assert_has "failed socket submission stays readable" "$failed" "$(seat stale claude ws read --peek)"
+  # A successful probe used to mask a failed second connection. Force the
+  # actual transport to fail and assert that the adapter returns failure.
+  mkdir "$SOCKD/bin"
+  printf '#!/bin/sh\nexit 1\n' >"$SOCKD/bin/nc"
+  chmod +x "$SOCKD/bin/nc"
+  transport_status=0
+  sed -n '/^poke_seat()/,/^}/p' "$BIN" >"$SOCKD/poke.sh"
+  ( source "$SOCKD/poke.sh"
+    PATH="$SOCKD/bin:$PATH" poke_seat "$SOCKD/owner" 'transport failure'
+  ) || transport_status=$?
+  assert_eq "adapter propagates failed transport status" 1 "$transport_status"
+  transport_failed=$(PATH="$SOCKD/bin:$PATH" AGENT_BUS_NO_PUSH=0 seat o3 claude wx post --to "$O1" -m 'failed write' | idof)
+  assert_has "transport failure retains the unread packet" "$transport_failed" "$(seat o1 claude wp read --peek)"
+  assert_eq "failed transport sends no additional frame" 1 "$(wc -l <"$SOCKD/owner.log" | tr -d ' ')"
   assert_eq "bystander got nothing" "" "$(cat "$SOCKD/bystander.log" 2>/dev/null)"
   out=$(AGENT_BUS_NO_PUSH=0 seat o3 claude wp post --to @here --state needs-review -m '# broadcast review' 2>/dev/null)
-  assert_lacks "broadcast review wakes no bystander" "— woken" "$out"
+  assert_eq "broadcast review opens no bystander socket" "" "$(cat "$SOCKD/bystander.connections" 2>/dev/null)"
   out=$(AGENT_BUS_NO_PUSH=0 seat o3 claude wp post --to @here -m '# broadcast fyi')
-  assert_lacks "a broadcast fyi wakes nobody" "— woken" "$out"
-  assert_has "post says a broadcast reaches nobody" "nobody owns this, so nobody is woken" "$out"
+  assert_eq "broadcast fyi opens no bystander socket" "" "$(cat "$SOCKD/bystander.connections" 2>/dev/null)"
   # A restarted agent's new seat inherits posts sent to the old name.
   seat h1 opencode wheir who >/dev/null
   H1=$(addr seat h1 opencode wheir)

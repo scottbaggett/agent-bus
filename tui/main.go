@@ -61,6 +61,7 @@ type model struct {
 	chatSeat    Seat
 	chatPeer    string
 	chatMsgs    []chatMsg
+	chatBus     []chatMsg // its bus history; chatMsgs adds its transcript
 	chatStamp   string
 	chatView    viewport.Model
 	chatSending bool
@@ -75,8 +76,21 @@ type model struct {
 	scanning   bool
 	openItems  []openItem
 	openSel    int
-	query      string // "/" search over the grid
+	query      string              // "/" search over the grid
+	ctx        map[string]agentCtx // from session transcripts
+	ctxAt      time.Time
+	ctxLoading bool
+	git        map[string]gitInfo
+	view       int  // viewTeams, viewGraph or viewBots
+	showIdle   bool // unfold agents idle over staleAfter
 }
+
+const (
+	viewTeams = iota
+	viewGraph
+	viewBots
+	viewCount
+)
 
 type snapMsg struct {
 	s   *Snapshot
@@ -113,7 +127,8 @@ func newModel() model {
 	ti := textinput.New()
 	ti.CharLimit = 4000
 	ti.Prompt = ""
-	return model{loading: true, input: ti, seen: map[string]time.Time{}, bodies: map[string]string{}, titles: map[string]string{}}
+	return model{loading: true, input: ti, seen: map[string]time.Time{}, bodies: map[string]string{}, titles: map[string]string{},
+		ctx: map[string]agentCtx{}, git: map[string]gitInfo{}}
 }
 
 func (m model) Init() tea.Cmd { return tea.Batch(loadCmd(), tick(), scanServicesCmd()) }
@@ -130,9 +145,28 @@ func (m model) needsCount() int {
 
 const panelMin = 44
 
-// panelW is the side panel's width when it is open, 0 otherwise.
+func (m model) panelOpen() bool {
+	return m.mode == modePanel || m.mode == modeReply || m.mode == modeConfirm || m.mode == modeOpen
+}
+
+// stackAt is the width below which the panel goes under the agents instead
+// of beside them: beside, both would be too narrow to read.
+const stackAt = 140
+
+func (m model) stacked() bool { return m.panelOpen() && m.w < stackAt }
+
+// panelH is the panel's height when it sits under the agents.
+func (m model) panelH() int {
+	if !m.stacked() {
+		return 0
+	}
+	return max(14, m.h*55/100)
+}
+
+// panelW is the side panel's width when it is open beside the agents, 0
+// otherwise.
 func (m model) panelW() int {
-	if m.mode != modePanel && m.mode != modeReply && m.mode != modeConfirm && m.mode != modeOpen {
+	if !m.panelOpen() || m.stacked() {
 		return 0
 	}
 	w := m.w * 2 / 5
@@ -145,16 +179,19 @@ func (m model) panelW() int {
 	return w
 }
 
+// feedH is the LIVE pane's height: at least 6 rows, and whatever the agents
+// pane doesn't need, up to half the screen.
 func (m model) feedH() int {
-	if m.h < 30 {
+	if m.h < 30 || m.stacked() {
 		return 0
 	}
-	return 6
+	need := m.gridNeeded(m.w-m.panelW()-4) + 4 // box, selected line
+	return min(max(6, m.h-2-need), m.h/2)
 }
 
 // gridSize is the grid's inner width and height, inside its box.
 func (m model) gridSize() (int, int) {
-	return m.w - m.panelW() - 4, m.h - 2 /* header+footer */ - m.feedH() - 2 /* box */ - 1 /* selected line */
+	return m.w - m.panelW() - 4, m.h - 2 /* header+footer */ - m.feedH() - m.panelH() - 2 /* box */ - 1 /* selected line */
 }
 
 // ---- update
@@ -175,6 +212,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.titles = msg
 		return m, nil
 
+	case ctxMsg:
+		m.ctx, m.ctxAt, m.ctxLoading = msg, time.Now(), false
+		if m.mode == modeChat {
+			m.mergeTranscript()
+		}
+		return m, nil
+
+	case gitMsg:
+		m.git[msg.addr] = msg.info
+		return m, nil
+
+	case goneTo:
+		m.setStatus(msg.msg)
+		return m, nil
+
 	case servicesMsg:
 		m.scanning = false
 		m.servicesAt = time.Now()
@@ -192,7 +244,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if !m.chatFollow && m.chatSel >= 0 && m.chatSel < len(m.chatMsgs) {
 					keep = m.chatMsgs[m.chatSel].ID + m.chatMsgs[m.chatSel].Kind
 				}
-				m.chatMsgs = msg.msgs
+				m.chatBus = msg.msgs
+				m.mergeTranscript()
 				m.chatSel = len(m.chatMsgs) - 1
 				if keep != "" {
 					for i, c := range m.chatMsgs {
@@ -241,6 +294,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.chatStamp = st
 				cmd = tea.Batch(cmd, loadChat(m.snap.Bus, m.chatSeat.Addr))
 			}
+		}
+		if !m.ctxLoading && m.snap != nil && time.Since(m.ctxAt) > 5*time.Second {
+			m.ctxLoading = true
+			cmd = tea.Batch(cmd, loadCtxCmd(m.snap.Seats, m.snap.Now))
 		}
 		if !m.scanning && time.Since(m.servicesAt) > 10*time.Second {
 			m.scanning = true
@@ -322,6 +379,7 @@ func (m *model) clamp() {
 	if m.cursor[paneAgents] < 0 {
 		m.cursor[paneAgents] = 0
 	}
+	m.fixCursor()
 	if n := len(m.panelNeeds()); m.panelSel >= n {
 		m.panelSel = max(0, n-1)
 	}
@@ -360,7 +418,55 @@ func (m model) openPanel() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.panel, m.panelSel, m.mode = t, 0, modePanel
-	return m, m.loadPanelBody()
+	return m, tea.Batch(m.loadPanelBody(), m.loadGit(t))
+}
+
+// loadGit reads an agent's git and PR state, at most once a minute.
+func (m model) loadGit(t tile) tea.Cmd {
+	if t.peer != "" || t.seat.Cwd == "" {
+		return nil
+	}
+	if g, ok := m.git[t.seat.Addr]; ok && time.Since(g.At) < time.Minute {
+		return nil
+	}
+	return loadGitCmd(t.seat.Addr, t.seat.Cwd)
+}
+
+// act runs the keys that go somewhere: its terminal, editor or PR.
+func (m model) act(key string, t tile) (tea.Model, tea.Cmd) {
+	if t.peer != "" {
+		m.setStatus("✗ it runs on " + t.peer + "; go there to open it")
+		return m, nil
+	}
+	switch key {
+	case "t":
+		m.setStatus("finding its terminal …")
+		return m, goToCmd(t.seat)
+	case "e":
+		if t.seat.Cwd == "" {
+			m.setStatus("✗ no folder for this agent")
+			return m, nil
+		}
+		if err := openEditor(t.seat.Cwd); err != nil {
+			m.setStatus("✗ editor: " + err.Error())
+		} else {
+			m.setStatus("✓ opened " + t.seat.Cwd)
+		}
+		return m, nil
+	case "p":
+		g, ok := m.git[t.seat.Addr]
+		switch {
+		case ok && g.PR != nil:
+			_ = openURL(g.PR.URL)
+			m.setStatus("✓ opened " + g.PR.Kind + " " + g.PR.ref())
+		case ok:
+			m.setStatus("✗ no PR or MR for " + g.Branch)
+		default:
+			m.setStatus("reading its branch … press p again")
+			return m, m.loadGit(t)
+		}
+	}
+	return m, nil
 }
 
 func (m model) mouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
@@ -384,6 +490,9 @@ func (m model) mouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	gw, gh := m.gridSize()
 	// Grid content starts below the header (1) and box border (1), right of
 	// the border and padding (2).
+	if msg.Y-2 >= gh || msg.X-2 >= gw {
+		return m, nil // outside the agents pane
+	}
 	if i := m.tileAt(gw, gh, msg.X-2, msg.Y-2); i >= 0 {
 		m.cursor[paneAgents] = i
 		if m.mode == modeReply || m.mode == modeConfirm {
@@ -472,6 +581,8 @@ func (m model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.openChat(m.panel.seat, m.panel.peer)
 		case "o":
 			return m.startOpen(m.panel)
+		case "t", "e", "p":
+			return m.act(k.String(), m.panel)
 		case "left", "right", "h", "l":
 			// Fall through to the grid: move and follow with the panel.
 		default:
@@ -491,6 +602,14 @@ func (m model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "?":
 		m.mode = modeHelp
+	case "g":
+		m.view = (m.view + 1) % viewCount
+		m.fixCursor()
+	case "z":
+		m.showIdle = !m.showIdle
+		m.fixCursor()
+	case "n":
+		return m.nextNeed()
 	case "left", "h":
 		m.moveGrid(-1, 0, m.gridW())
 	case "right", "l":
@@ -512,6 +631,10 @@ func (m model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if t, ok := m.selectedTile(); ok {
 			mm, _ := m.openPanel()
 			return mm.(model).startOpen(t)
+		}
+	case "t", "e", "p":
+		if t, ok := m.selectedTile(); ok {
+			return m.act(k.String(), t)
 		}
 	}
 	if m.mode == modePanel {
@@ -620,9 +743,13 @@ func (m model) View() string {
 	gw, gh := m.gridSize()
 	pw := m.panelW()
 	agents := m.gridBody(gw, gh) + "\n" + m.selectedLine(gw)
-	body := m.box("AGENTS", agents, m.w-pw, gh+3, m.mode == modeNormal)
+	title := []string{"AGENTS · by team", "AGENTS · graph", "AGENTS · bots by lane"}[m.view] + "  (g: switch view)"
+	body := m.box(title, agents, m.w-pw, gh+3, m.mode == modeNormal)
 	if pw > 0 {
 		body = lipgloss.JoinHorizontal(lipgloss.Top, body, m.panelView(pw, gh+3))
+	}
+	if ph := m.panelH(); ph > 0 {
+		body = lipgloss.JoinVertical(lipgloss.Left, body, m.panelView(m.w, ph))
 	}
 	parts := []string{m.headerView(), body}
 	if fh := m.feedH(); fh > 0 {
@@ -673,6 +800,9 @@ func (m model) headerView() string {
 	} else {
 		parts = append(parts, lipgloss.NewStyle().Foreground(cGood).Render("nothing needs you"))
 	}
+	if n := m.tidyCount(); n > 0 {
+		parts = append(parts, sDim.Render(fmt.Sprintf("%d to tidy (agent-bus attention)", n)))
+	}
 	if len(m.snap.Peers) > 0 {
 		var names []string
 		for _, p := range m.snap.Peers {
@@ -697,6 +827,10 @@ func (m model) feedBody(w, h int) string {
 		return sDim.Render("quiet")
 	}
 	var b []string
+	sel := ""
+	if t, ok := m.selectedTile(); ok {
+		sel = t.seat.Addr
+	}
 	for _, e := range m.snap.Recent {
 		if len(b) >= h {
 			break
@@ -724,6 +858,9 @@ func (m model) feedBody(w, h int) string {
 		if at := m.seen[e.ID+e.Kind]; !at.IsZero() && time.Since(at) < 20*time.Second {
 			mark = sAccent.Render("•") + " "
 		}
+		if sel != "" && (e.From == sel || e.To == sel || m.resolve(e.To) == sel) {
+			mark = sAccent.Render("▸") + " "
+		}
 		line := mark + sDim.Render(t) + "  " + fit(what, w-9)
 		b = append(b, line)
 	}
@@ -743,7 +880,7 @@ func (m model) footerView() string {
 	if m.err != nil {
 		return lipgloss.NewStyle().Foreground(cBad).Render(fit(" refresh failed: "+m.err.Error(), m.w))
 	}
-	keys := []string{"arrows or click: pick an agent", "/: search", "enter: details", "o: open in…", "c: timeline & chat", "?: help", "q: quit"}
+	keys := []string{"↑↓ pick", "enter: details", "t: its terminal", "e: editor", "p: PR/MR", "c: timeline & chat", "n: next needing you", "z: idle", "g: view", "/: search", "?: help"}
 	if m.query != "" {
 		keys = append([]string{sAccent.Render("/" + m.query), "esc: clear"}, keys[1:]...)
 	}
@@ -754,7 +891,7 @@ func (m model) footerView() string {
 	case modeOpen:
 		keys = []string{"↑↓ or number: pick", "enter: open", "esc: back"}
 	case modePanel:
-		keys = []string{"↑↓ item", "r answer", "x close it", "c timeline & chat", "o open in…", "←→ next agent", "esc back"}
+		keys = []string{"t its terminal", "e editor", "p PR/MR", "c timeline & chat", "o open in…", "r answer", "x close", "↑↓ item", "esc back"}
 	case modeReply:
 		keys = []string{"enter sends and closes it", "esc cancels"}
 	case modeConfirm:
@@ -771,16 +908,34 @@ func (m model) helpView() string {
 		"Actions run agent-bus as you (@lead).",
 		"",
 		"  arrows / click   pick an agent",
+		"  n                jump to the next agent waiting on you, and open it",
+		"  z                show or fold agents idle over 90 minutes",
+		"  g                switch view: by team (default) · graph · bots by lane",
+		"",
+		"  By team: a PM's team holds the agents on its lane and on the tickets",
+		"  its focus names; then one group per lane or ticket; then the rest by",
+		"  repo. Seen: green under 10m, plain under 90m, dim beyond. msgs 2h:",
+		"  messages it sent or got, in 15-minute bars.",
+		"  Graph: a solid line means they messaged; dotted, same lane or ticket.",
 		"  enter            open what it needs from you",
 		"  /                search: name, focus, ticket, branch, port (fuzzy)",
-		"  c                its timeline: everything it sent, got, closed or decided;",
-		"                   ↑↓ moves through it, and you can message it from there",
-		"  o                open its folder in Finder, Zed, Cursor… or its ports in a browser",
+		"  t                go to its terminal: the tmux pane or app it runs in",
+		"  e                open its folder in your editor ($AGENT_BUS_EDITOR, else Zed)",
+		"  p                open its branch's merge request (GitLab, via glab) or pull request (GitHub, via gh)",
+		"  c                its timeline: what it was asked and said, its messages",
+		"                   with other sessions and on the bus; message it from there",
+		"  o                everything else: Finder, other apps, its ports in a browser",
+		"",
+		"  State: ● working · ◆ a tool pending for a while (a permission prompt?)",
+		"         ✓ done, at its prompt. Read from its session transcript.",
+		"  Context: how full its context window is, from the tokens its last turn",
+		"  sent. The window is 1M if it ever went past 200k, else 200k (a guess,",
+		"  marked ?); set AGENT_BUS_CONTEXT_WINDOW to fix it.",
 		"",
 		"  in the panel:  ↑↓ item · r answer (and close) · x close · c chat",
 		"",
 		"  A red badge counts what an agent is waiting on you for.",
-		"  Dim bots have been idle 30+ minutes; \"not running\" ones have exited",
+		"  Dim rows and bots have been idle a while; \"not running\" ones have exited",
 		"  but still have something waiting on you.",
 		"",
 		"  ctrl+r refresh · q quit",

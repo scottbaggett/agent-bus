@@ -19,6 +19,15 @@ type Snapshot struct {
 	Attention []Att   `json:"attention"`
 	Recent    []Event `json:"recent"`
 	Peers     []Peer  `json:"peers"`
+	// Roles maps repo id -> role -> seat address, for packets sent to @role.
+	Roles map[string]map[string]string `json:"roles"`
+	Lanes []Lane                       `json:"lanes"`
+}
+
+type Lane struct {
+	Lane  string   `json:"lane"`
+	Seats []string `json:"seats"`
+	PM    string   `json:"pm"`
 }
 
 type Seat struct {
@@ -31,6 +40,7 @@ type Seat struct {
 	Session string `json:"session"`
 	Focus   string `json:"focus"`
 	Epoch   int64  `json:"epoch"`
+	Pid     int    `json:"pid"`
 	Avatar  struct {
 		Color string `json:"color"`
 	} `json:"avatar"`

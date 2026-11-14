@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
 
@@ -148,6 +149,28 @@ func loadChat(bus, addr string) tea.Cmd {
 	}
 }
 
+// mergeTranscript interleaves the bus history with what the agent's
+// transcript shows: prompts, what it said, and messages with other sessions.
+func (m *model) mergeTranscript() {
+	keep := ""
+	if !m.chatFollow && m.chatSel >= 0 && m.chatSel < len(m.chatMsgs) {
+		keep = m.chatMsgs[m.chatSel].ID + m.chatMsgs[m.chatSel].Kind
+	}
+	out := append([]chatMsg(nil), m.chatBus...)
+	for i, e := range m.ctx[m.chatSeat.Addr].Events {
+		out = append(out, chatMsg{ID: fmt.Sprintf("t%d-%d", e.Epoch, i), Epoch: e.Epoch, Kind: e.Kind, From: e.Who, Subject: firstLine(e.Text), Body: e.Text})
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Epoch < out[j].Epoch })
+	m.chatMsgs = out
+	m.chatSel = len(out) - 1
+	for i, c := range out {
+		if keep != "" && c.ID+c.Kind == keep {
+			m.chatSel = i
+		}
+	}
+	m.renderChat()
+}
+
 // sendChat sends as you, through `agent-bus send`, so the agent is told the
 // message is from its user. send needs your terminal on stdin.
 func sendChat(addr, text string) tea.Cmd {
@@ -164,10 +187,11 @@ func (m *model) openChat(s Seat, peer string) tea.Cmd {
 	m.mode = modeChat
 	m.chatSeat, m.chatPeer = s, peer
 	m.chatMsgs = nil
+	m.chatBus = nil
 	m.chatStamp = ""
 	m.chatNote = ""
 	m.chatSel, m.chatFollow = 0, true
-	m.input.Placeholder = "message " + friendlyName(s.Addr) + " as you · enter sends"
+	m.input.Placeholder = "message it as you, via the bus · it sees it on its next turn · enter sends"
 	m.input.SetValue("")
 	m.input.Width = m.w - 6
 	m.input.Focus()
@@ -202,6 +226,14 @@ func (m model) rowLabel(c chatMsg) (string, lipgloss.Style) {
 		return "✓ " + who, lipgloss.NewStyle().Foreground(cGood)
 	case "decision":
 		return "◆ decided", sAccent
+	case "asked":
+		return "▷ prompt", lipgloss.NewStyle().Foreground(cAccent).Bold(true)
+	case "said":
+		return "◁ said", sText
+	case "msg-in":
+		return "← " + sessionName(c.From), sText
+	case "msg-out":
+		return "→ " + sessionName(c.From), sText
 	}
 	if c.From == m.chatSeat.Addr {
 		return "→ " + party(c.To), sText
@@ -210,6 +242,15 @@ func (m model) rowLabel(c chatMsg) (string, lipgloss.Style) {
 		return "← you", lipgloss.NewStyle().Foreground(cAccent).Bold(true)
 	}
 	return "← " + party(c.From), sText
+}
+
+// sessionName shortens a Claude session's name or address for a label.
+func sessionName(s string) string {
+	s = clean(s)
+	if s == "" {
+		return "a session"
+	}
+	return midFit(s, 16)
 }
 
 func when(epoch int64) string {
@@ -226,7 +267,7 @@ func (m *model) renderChat() {
 	m.chatView.Width, m.chatView.Height = dw-4, m.chatHeight()-2
 	m.input.Width = m.w - 6
 	if m.chatSel < 0 || m.chatSel >= len(m.chatMsgs) {
-		m.chatView.SetContent(sDim.Render("Nothing on the bus from or to " + friendlyName(m.chatSeat.Addr) + " yet.\nSay something below."))
+		m.chatView.SetContent(sDim.Render("Nothing from or to " + clean(m.chatSeat.Addr) + " yet: no bus messages, and no transcript to read.\nSay something below."))
 		return
 	}
 	c := m.chatMsgs[m.chatSel]
@@ -245,8 +286,13 @@ func (m *model) renderChat() {
 		meta += " · " + c.Reason
 	}
 	b = append(b, sDim.Render(meta))
-	if c.Kind == "msg" {
-		b = append(b, sDim.Render(fit(clean(c.From)+" → "+clean(c.To), w)))
+	switch c.Kind {
+	case "msg":
+		b = append(b, sDim.Render(fit("on the bus · "+clean(c.From)+" → "+clean(c.To), w)))
+	case "msg-in", "msg-out":
+		b = append(b, sDim.Render(fit("between Claude sessions, not on the bus", w)))
+	case "asked", "said":
+		b = append(b, sDim.Render("from its session transcript"))
 	}
 	b = append(b, "")
 	body := strings.TrimSpace(c.Body)
@@ -304,6 +350,8 @@ func (m model) chatKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "shift+down", "ctrl+d":
 		m.chatView.HalfPageDown()
 		return m, nil
+	case "ctrl+t":
+		return m, goToCmd(m.chatSeat)
 	case "enter":
 		v := strings.TrimSpace(m.input.Value())
 		if v == "" {
@@ -346,7 +394,11 @@ func (m model) chatScreen() string {
 	rows := h - 2
 	var lines []string
 	if len(m.chatMsgs) == 0 {
-		lines = append(lines, sDim.Render("No activity yet."))
+		lines = append(lines, sDim.Render("Nothing yet: no bus messages, and no session transcript to read."))
+		if d := m.doing(m.chatSeat); d != "" {
+			lines = append(lines, "", sDim.Render("It says it's on: ")+sText.Render(d))
+		}
+		lines = append(lines, "", sDim.Render("Seat "+clean(m.chatSeat.Addr)+" · seen "+ago(m.snap.Now, m.chatSeat.Epoch)+" ago · type below to message it."))
 	}
 	off := 0
 	if m.chatSel >= rows {
@@ -359,8 +411,13 @@ func (m model) chatScreen() string {
 		if c.Close != "" {
 			state = "closed " + c.Close
 		}
-		if c.Kind == "resolve" {
+		switch c.Kind {
+		case "resolve":
 			state = c.Reason
+		case "msg-in", "msg-out":
+			state = "session"
+		case "asked", "said":
+			state = "transcript"
 		}
 		row := sDim.Render(fmt.Sprintf("%-6s", when(c.Epoch))) + st.Render(fit(label, 18)) + " " +
 			kindStyle(c.State).Render(fit(state, 12)) + " " + fit(clean(strings.TrimLeft(c.Subject, "# ")), max(4, inner-38))
@@ -378,7 +435,7 @@ func (m model) chatScreen() string {
 		Width(dw-2).Height(h).Padding(0, 1).Render(m.chatView.View())
 
 	prompt := sAccent.Render(" › ") + m.input.View()
-	help := " ↑↓ timeline · pgup pgdn · shift+↑↓ scroll entry · enter sends as you · esc back"
+	help := " ↑↓ timeline · shift+↑↓ scroll entry · enter sends (bus, as you) · ctrl+t its terminal · esc back"
 	foot := sDim.Render(fit(help, m.w))
 	switch {
 	case m.chatSending:

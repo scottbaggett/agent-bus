@@ -5,6 +5,8 @@ import (
 	"sort"
 	"strings"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -185,13 +187,25 @@ func gridCols(w int) int {
 
 const groupGap = 3
 
-// placed is a tile's position in the laid-out grid.
-type placed struct{ x, y int }
+// placed is a tile's position and size in the laid-out view.
+type placed struct{ x, y, w, h int }
 
-// gridLayout flows the lane groups left to right, wrapping like text: each
+// gridLayout lays out the agents pane: the graph of who works with whom, or
+// the bots grouped by lane.
+func (m model) gridLayout(w int) ([]string, []placed) {
+	switch m.view {
+	case viewBots:
+		return m.botLayout(w)
+	case viewGraph:
+		return m.graphLayout(w)
+	}
+	return m.teamsLayout(w)
+}
+
+// botLayout flows the lane groups left to right, wrapping like text: each
 // group is a header over its tiles. It returns the rendered lines and where
 // each tile landed, for scrolling and moving the selection.
-func (m model) gridLayout(w int) ([]string, []placed) {
+func (m model) botLayout(w int) ([]string, []placed) {
 	tiles, groups := m.tiles()
 	if len(tiles) == 0 {
 		return []string{sDim.Render("no agents running")}, nil
@@ -245,7 +259,7 @@ func (m model) gridLayout(w int) ([]string, []placed) {
 					break
 				}
 				ti := g.tiles[i]
-				pos[ti] = placed{x: x0 + c*(tileW+tileGap), y: shelfY + 1 + r*tileH}
+				pos[ti] = placed{x: x0 + c*(tileW+tileGap), y: shelfY + 1 + r*tileH, w: tileW, h: tileH}
 				if c > 0 {
 					cells = append(cells, strings.Repeat(" ", tileGap))
 				}
@@ -283,6 +297,10 @@ func (m *model) moveGrid(dx, dy int, w int) {
 		return
 	}
 	p := pos[cur]
+	if m.view != viewBots {
+		m.moveNear(pos, cur, dx, dy)
+		return
+	}
 	best, bestD := -1, 1<<30
 	for i, q := range pos {
 		if i == cur {
@@ -309,6 +327,100 @@ func (m *model) moveGrid(dx, dy int, w int) {
 		// End of a row: wrap to the next or previous tile.
 		if n := cur + dx; n >= 0 && n < len(pos) {
 			best = n
+		}
+	}
+	if best >= 0 {
+		m.cursor[paneAgents] = best
+	}
+}
+
+// fixCursor moves the selection off an agent the view folded away.
+func (m *model) fixCursor() {
+	if m.snap == nil {
+		return
+	}
+	_, pos := m.gridLayout(m.gridW())
+	cur := m.cursor[paneAgents]
+	if cur >= 0 && cur < len(pos) && pos[cur].w > 0 {
+		return
+	}
+	best := -1
+	for i, p := range pos {
+		if p.w > 0 && (best < 0 || p.y < pos[best].y || (p.y == pos[best].y && p.x < pos[best].x)) {
+			best = i
+		}
+	}
+	if best >= 0 {
+		m.cursor[paneAgents] = best
+	}
+}
+
+// nextNeed selects the next agent waiting on you, in the order the needs
+// band lists them, and opens its panel.
+func (m model) nextNeed() (tea.Model, tea.Cmd) {
+	tiles, _ := m.tiles()
+	type cand struct {
+		i     int
+		epoch int64
+	}
+	var cs []cand
+	for addr, ns := range m.needs() {
+		for i, t := range tiles {
+			if t.seat.Addr == addr && len(ns) > 0 {
+				cs = append(cs, cand{i, ns[0].Epoch})
+			}
+		}
+	}
+	if len(cs) == 0 {
+		m.setStatus("nothing needs you")
+		return m, nil
+	}
+	sort.Slice(cs, func(a, b int) bool { return cs[a].epoch > cs[b].epoch })
+	next := cs[0].i
+	for k, c := range cs {
+		if c.i == m.cursor[paneAgents] {
+			next = cs[(k+1)%len(cs)].i
+		}
+	}
+	if m.showIdle == false {
+		if _, pos := m.gridLayout(m.gridW()); next < len(pos) && pos[next].w == 0 {
+			m.showIdle = true
+		}
+	}
+	m.cursor[paneAgents] = next
+	return m.openPanel()
+}
+
+// tidyCount is how many hygiene items agent-bus flags: merged lanes with open
+// work, orphaned lanes. They don't need you now, but the header says so.
+func (m model) tidyCount() int {
+	n := 0
+	for _, a := range m.snap.Attention {
+		if a.Kind != "needs-you" {
+			n++
+		}
+	}
+	return n
+}
+
+// moveNear moves to the closest agent in a direction, for the graph, where
+// agents don't sit in rows.
+func (m *model) moveNear(pos []placed, cur, dx, dy int) {
+	cx := func(p placed) int { return p.x + p.w/2 }
+	cy := func(p placed) int { return (p.y + p.h/2) * 2 } // cells are tall
+	p := pos[cur]
+	best, bestD := -1, 1<<30
+	for i, q := range pos {
+		if i == cur || q.w == 0 {
+			continue
+		}
+		ex, ey := cx(q)-cx(p), cy(q)-cy(p)
+		along, across := ex*dx+ey*dy, abs(ex*dy)+abs(ey*dx)
+		if along <= 0 {
+			continue
+		}
+		if d := along + 3*across; d < bestD {
+			best, bestD = i, d
 		}
 	}
 	if best >= 0 {
@@ -429,7 +541,7 @@ func (m model) gridOffset(w, h int) int {
 	lines, pos := m.gridLayout(w)
 	off := 0
 	if cur := m.cursor[paneAgents]; cur >= 0 && cur < len(pos) {
-		top, bot := pos[cur].y-1, pos[cur].y+tileH // with its lane header
+		top, bot := pos[cur].y-1, pos[cur].y+pos[cur].h // with its header
 		if bot > h {
 			off = bot - h
 		}
@@ -456,7 +568,7 @@ func (m model) tileAt(w, h, x, y int) int {
 	_, pos := m.gridLayout(w)
 	y += m.gridOffset(w, h)
 	for i, p := range pos {
-		if x >= p.x && x < p.x+tileW && y >= p.y && y < p.y+tileH {
+		if x >= p.x && x < p.x+p.w && y >= p.y && y < p.y+p.h {
 			return i
 		}
 	}

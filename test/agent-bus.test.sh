@@ -569,7 +569,7 @@ assert_has "oversized body is refused" "max 65536" "$out"
 if command -v python3 >/dev/null && command -v nc >/dev/null; then
   SOCKD=$(mktemp -d /tmp/abus.XXXX)
   python3 - "$SOCKD" <<'PY' &
-import os, socket, sys, threading
+import json, os, socket, sys, threading
 d = sys.argv[1]
 def serve(name):
     p = os.path.join(d, name); s = socket.socket(socket.AF_UNIX); s.bind(p); s.listen(8)
@@ -579,6 +579,14 @@ def serve(name):
             f.write("1\n")
         with c, c.makefile("rb") as stream:
             data = stream.readline()
+            # Observe the lease before the sender's transport has completed.
+            if data and os.path.exists(p + ".statepath"):
+                with open(p + ".statepath") as f:
+                    state_path = f.read().strip()
+                with open(state_path) as f:
+                    leases = json.load(f).get("claude_notices", {})
+                with open(p + ".reserved", "w") as f:
+                    json.dump(list(leases), f)
         if data:
             with open(p + ".log", "ab") as f:
                 f.write(data)
@@ -591,6 +599,8 @@ PY
   CLAUDE_CODE_MESSAGING_SOCKET="$SOCKD/owner" seat o1 claude wp who >/dev/null
   CLAUDE_CODE_MESSAGING_SOCKET="$SOCKD/bystander" seat o2 claude wp who >/dev/null
   O1=$(addr seat o1 claude wp)
+  owner_state="$BUS_HOME/state/$(printf '%s' "$O1" | tr '/' '_').json"
+  printf '%s' "$owner_state" >"$SOCKD/owner.statepath"
   out=$(AGENT_BUS_NO_PUSH=0 seat o3 claude wx post --to "$O1" --state needs-review -m '# wake owner')
   sleep 0.3
   rid=$(idof <<<"$out")
@@ -599,9 +609,30 @@ PY
   assert_eq "one post opens one socket connection" 1 "$(wc -l <"$SOCKD/owner.connections" | tr -d ' ')"
   assert_has "notification references the stored packet" "$rid" "$(jq -r '.message.content' "$SOCKD/owner.log")"
   assert_has "socket submission leaves packet unread for pickup" "$rid" "$(seat o1 claude wp read --peek)"
+  assert_eq "hook deferral is reserved before transport completes" true \
+    "$(jq --arg id "$rid" 'index($id) != null' "$SOCKD/owner.reserved")"
+  assert_lacks "digest does not duplicate a fresh socket notification" "$rid" "$(seat o1 claude wp digest)"
+  assert_eq "deferring digest does not acknowledge reading" true \
+    "$(jq --arg id "$rid" '(.read // []) | index($id) == null' "$owner_state")"
+  assert_eq "Stop hook does not duplicate a fresh socket notification" '{}' "$(seat o1 claude wp stop-hook </dev/null)"
+  seat o1 claude wp-sibling who >/dev/null
+  assert_lacks "same-session sibling digest also defers the notified packet" "$rid" "$(seat o1 claude wp-sibling digest)"
   seat o1 claude wp read >/dev/null
   assert_eq "recipient read records pickup of the packet" true \
     "$(jq --arg id "$rid" '.read | index($id) != null' "$BUS_HOME/state/$(printf '%s' "$O1" | tr '/' '_').json")"
+  # A notice may be held/refused/lost. Expiring its lease must restore hook
+  # delivery, including when the session reads from another worktree.
+  expired=$(AGENT_BUS_NO_PUSH=0 seat o3 claude wx post --to "$O1" --state question -m 'unpicked notification' | idof)
+  jq --arg id "$expired" '.claude_notices[$id] = 0' "$owner_state" >"$owner_state.t"
+  mv "$owner_state.t" "$owner_state"
+  assert_has "expired submission recovers through a sibling digest" "$expired" "$(seat o1 claude wp-sibling digest)"
+  assert_eq "fallback digest records actual pickup" true \
+    "$(jq --arg id "$expired" '.read | index($id) != null' "$BUS_HOME/state/$(printf '%s' "$(addr seat o1 claude wp-sibling)" | tr '/' '_').json")"
+  stop_expired=$(AGENT_BUS_NO_PUSH=0 seat o3 claude wx post --to "$O1" --state question -m 'unpicked stop notification' | idof)
+  jq --arg id "$stop_expired" '.claude_notices[$id] = 0' "$owner_state" >"$owner_state.t"
+  mv "$owner_state.t" "$owner_state"
+  assert_has "expired submission recovers through Stop" "$stop_expired" "$(seat o1 claude wp stop-hook </dev/null | jq -r .reason)"
+  sent_frames=$(wc -l <"$SOCKD/owner.log" | tr -d ' ')
   # A stale Unix socket has a path but no listener. Failed submission must
   # retain the packet and leave it available to hooks/read.
   python3 - "$SOCKD/stale" <<'PY_SOCKET'
@@ -616,6 +647,9 @@ PY_SOCKET
   assert_eq "failed socket submission persists the packet" 1 \
     "$(jq -Rsc --arg id "$failed" '[split("\n")[] | fromjson? | select(.id == $id and .kind == "msg")] | length' "$BUS_HOME/ledger.jsonl")"
   assert_has "failed socket submission stays readable" "$failed" "$(seat stale claude ws read --peek)"
+  assert_eq "failed submission releases hook deferral" true \
+    "$(jq --arg id "$failed" '.claude_notices[$id] == null' "$BUS_HOME/state/$(printf '%s' "$STALE" | tr '/' '_').json")"
+  assert_has "failed submission is immediately delivered by a digest" "$failed" "$(seat stale claude ws digest)"
   # A successful probe used to mask a failed second connection. Force the
   # actual transport to fail and assert that the adapter returns failure.
   mkdir "$SOCKD/bin"
@@ -629,7 +663,7 @@ PY_SOCKET
   assert_eq "adapter propagates failed transport status" 1 "$transport_status"
   transport_failed=$(PATH="$SOCKD/bin:$PATH" AGENT_BUS_NO_PUSH=0 seat o3 claude wx post --to "$O1" -m 'failed write' | idof)
   assert_has "transport failure retains the unread packet" "$transport_failed" "$(seat o1 claude wp read --peek)"
-  assert_eq "failed transport sends no additional frame" 1 "$(wc -l <"$SOCKD/owner.log" | tr -d ' ')"
+  assert_eq "failed transport sends no additional frame" "$sent_frames" "$(wc -l <"$SOCKD/owner.log" | tr -d ' ')"
   assert_eq "bystander got nothing" "" "$(cat "$SOCKD/bystander.log" 2>/dev/null)"
   out=$(AGENT_BUS_NO_PUSH=0 seat o3 claude wp post --to @here --state needs-review -m '# broadcast review' 2>/dev/null)
   assert_eq "broadcast review opens no bystander socket" "" "$(cat "$SOCKD/bystander.connections" 2>/dev/null)"

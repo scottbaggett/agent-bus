@@ -679,6 +679,39 @@ poke_seat() {
   printf '%s\n' "$frame" | nc -U "$sock" -w 2 >/dev/null 2>&1
 }
 
+# Reserve before connecting: Claude may run its prompt hook before nc exits.
+# This only defers duplicate hook delivery for 30 seconds; it is never a read
+# acknowledgement. Failed sends release the reservation immediately.
+claude_notice() { # addr packet set|clear
+  ( SEAT=$(slugify "$1")
+    if [ "$3" = set ]; then
+      state_update '.claude_notices = ((.claude_notices // {})
+        | with_entries(select(.value > ($now - 30))))
+        | .claude_notices[$id] = $now' --arg id "$2" --argjson now "$(now_epoch)"
+    else
+      state_update 'del(.claude_notices[$id])' --arg id "$2"
+    fi
+  )
+}
+
+# Share suppression across the same host session's worktrees, just like reads.
+# Explicit read/peek never uses this filter. If the native notice is held,
+# refused or lost, a later digest/Stop hook recovers the still-unread packet.
+claude_hook_packets() {
+  [ -n "$1" ] || return 0
+  if [ "$TOOL" != claude ]; then printf '%s\n' "$1"; return 0; fi
+  local notices a f
+  notices=$( {
+    state_get '.claude_notices // {}'
+    for a in $(session_seats | jq -r '.[]'); do
+      f="$BUS/state/$(slugify "$a").json"
+      [ ! -f "$f" ] || jq -c '.claude_notices // {}' "$f"
+    done
+  } | jq -sc --argjson now "$(now_epoch)" \
+    '[.[] | to_entries[] | select(.value > ($now - 30) and .value <= $now) | .key] | unique')
+  jq -c --argjson notices "$notices" 'select(.id as $id | $notices | index($id) == null)' <<<"$1"
+}
+
 # The live seat that took over from a gone seat: same tool and worktree in
 # this repo, most recently active.
 live_heir() {
@@ -1585,10 +1618,16 @@ deliver() { # rec src resume
     addr=$(jq -r .addr <<<"$row"); tool=$(jq -r '.tool // ""' <<<"$row")
     case "$tool" in
       claude)
-        if poke_seat "$(jq -r '.socket // ""' <<<"$row")" \
+        # Keep the socket frame limited to fixed routing fields. Never put
+        # a peer-controlled subject or body in this notification.
+        if claude_notice "$addr" "$id" set \
+           && poke_seat "$(jq -r '.socket // ""' <<<"$row")" \
              "agent-bus: packet $id for $addr from $ADDR [$state] — $src. Run: agent-bus read (from $(jq -r '.cwd // "its worktree"' <<<"$row"))"; then
           printf 'delivery: %s — submitted to Claude inbox (acceptance and reading unconfirmed)\n' "$addr"
-        else printf 'delivery: %s — inbox submission unavailable; packet retained for its next prompt or bus read\n' "$addr"; fi ;;
+        else
+          claude_notice "$addr" "$id" clear || true
+          printf 'delivery: %s — inbox submission unavailable; packet retained for its next prompt or bus read\n' "$addr"
+        fi ;;
       opencode)
         local ps_; ps_=$(pid_state "$(jq -r '.pid // ""' <<<"$row")")
         if [ "$ps_" = yes ]; then
@@ -2108,6 +2147,7 @@ cmd_read() {
     state_update '.oriented = true'
   fi
   local rows; rows=$(select_packets "$mode")
+  ((digest)) && rows=$(claude_hook_packets "$rows")
   # Other seats' claims only where they touch this seat: paths it claims or has
   # changed. The full list is `agent-bus claims`; in every prompt it was noise.
   local others claims n_other
@@ -2936,6 +2976,7 @@ cmd_stop_hook() {
   local rows n text wake_limit
   if (( WAKE_BUDGET > 0 )) && (( $(state_get '.wakes // 0') >= WAKE_BUDGET )); then printf '{}\n'; return 0; fi
   rows=$(select_packets wake)
+  rows=$(claude_hook_packets "$rows")
   if [ -z "$rows" ]; then printf '{}\n'; return 0; fi
   n=$(grep -c . <<<"$rows")
   text=$(printf 'agent-bus: %s item(s) you own — act on them before stopping.\n(%s)\n' "$n" "$PEER_BANNER"

@@ -68,7 +68,9 @@ Claude seats can post directly to each other, including tracked handoffs,
 questions and review requests. The packet is recorded before a notification is
 submitted through the recipient's native Claude inbox socket. `--allow-claude`
 is accepted for compatibility but is no longer needed. Direct `SendMessage`
-remains available for exchanges that do not need bus ownership or history.
+remains available for quick conversation. Use the bus for work that needs an
+owner, review history and an explicit close reason; do not move tracked work to
+`SendMessage` just because both seats are Claude.
 
 The socket path comes from `CLAUDE_CODE_MESSAGING_SOCKET`. On macOS and Linux,
 Claude accepts connections from the same OS user without an auth line. The bus
@@ -79,7 +81,15 @@ implemented by this adapter.
 Claude applies its own inbound controls (`accept`, `hold`, or `refuse`). A
 successful write reports only submission, never acceptance, reading, or a wake.
 A missing socket or failed write leaves the packet available to the next hook
-or `agent-bus read`. A later bus read or reply establishes pickup. See
+or `agent-bus read`. A later bus read or reply establishes pickup.
+
+To avoid delivering the same packet through both the socket notice and a hook,
+the sender reserves a 30-second hook deferral before connecting. A failed write
+releases it immediately. During that window, Claude prompt digests and Stop
+hooks skip the notified packet; explicit `read`/`read --peek` remain available
+and the packet stays unread. The deferral is shared across worktrees of the
+same host session. If the notice is held, refused or lost and no read occurs,
+later hooks resume delivery after the window expires. See
 [Claude's socket documentation](https://code.claude.com/docs/en/cross-session-messaging#the-sessions-inbox-socket).
 
 ## Messages and work items

@@ -84,10 +84,10 @@ you which, one line per agent it reached. Address one seat, never everyone: a
 broadcast (`@here`) has no owner, so nobody acts on it, and `post` says so.
 
 Claude Code seats can use the same command to reach each other. The bus keeps
-ownership and review history and submits a notification through Claude's native
+ownership, review history and explicit closure and submits a notification through Claude's native
 inbox socket. Submission does not prove acceptance or reading; Claude's inbound
 controls may hold or refuse it. Direct `SendMessage` remains available for
-conversations that do not need bus tracking.
+quick conversations that do not need an owner or close reason.
 
 ### Ask for a review before it's done
 

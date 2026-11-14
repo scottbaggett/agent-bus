@@ -64,11 +64,33 @@ accepted once a live seat is in that lane or the lane has a PM.
 
 ### Claude to Claude
 
-Claude sessions talk to each other through Claude session messaging
-(`SendMessage`), not the bus. A Claude seat posting directly to another Claude
-seat (`--to claude/...`) is refused unless it passes `--allow-claude`. `@pm`,
-lanes and broadcasts are unaffected: a Claude lane PM supervising OpenCode seats
-is what the bus is for.
+Claude seats can post directly to each other, including tracked handoffs,
+questions and review requests. The packet is recorded before a notification is
+submitted through the recipient's native Claude inbox socket. `--allow-claude`
+is accepted for compatibility but is no longer needed. Direct `SendMessage`
+remains available for quick conversation. Use the bus for work that needs an
+owner, review history and an explicit close reason; do not move tracked work to
+`SendMessage` just because both seats are Claude.
+
+The socket path comes from `CLAUDE_CODE_MESSAGING_SOCKET`. On macOS and Linux,
+Claude accepts connections from the same OS user without an auth line. The bus
+sends a newline-delimited notification, not the packet body, and does not share
+session authentication tokens. Native Windows named-pipe delivery is not
+implemented by this adapter.
+
+Claude applies its own inbound controls (`accept`, `hold`, or `refuse`). A
+successful write reports only submission, never acceptance, reading, or a wake.
+A missing socket or failed write leaves the packet available to the next hook
+or `agent-bus read`. A later bus read or reply establishes pickup.
+
+To avoid delivering the same packet through both the socket notice and a hook,
+the sender reserves a 30-second hook deferral before connecting. A failed write
+releases it immediately. During that window, Claude prompt digests and Stop
+hooks skip the notified packet; explicit `read`/`read --peek` remain available
+and the packet stays unread. The deferral is shared across worktrees of the
+same host session. If the notice is held, refused or lost and no read occurs,
+later hooks resume delivery after the window expires. See
+[Claude's socket documentation](https://code.claude.com/docs/en/cross-session-messaging#the-sessions-inbox-socket).
 
 ## Messages and work items
 
@@ -311,10 +333,12 @@ unmatched lanes fall under their repo:
     that ends with owned items unread.
   - OpenCode: the plugin polls `agent-bus stop-hook` while the session is idle
     and resumes it with the result.
-  - Codex Desktop: install `agent-bus hooks --codex` and review/trust its
-    hooks. SessionStart automatically registers the host-provided session UUID
-    and cwd; UserPromptSubmit/Stop refresh it. Manual `agent-bus codex enable`
-    also works without hooks. The seat retains its thread UUID and a queue-capable
+  - Codex (Desktop and CLI): install `agent-bus hooks --codex` and review/trust
+    its hooks. SessionStart automatically registers the host-provided session UUID
+    and cwd and enables queue delivery when discovery finds a queue-capable
+    executable, even without Desktop-specific environment markers.
+    UserPromptSubmit/Stop refresh it and retry discovery if unavailable.
+    Manual `agent-bus codex enable` also works without hooks. The seat retains its thread UUID and a queue-capable
     executable path. Addressed posts queue a fixed inbox-check notice, then the
     model reads peer data through the bus and posts its reply. No packet text,
     sender-controlled command, or session credential enters the queue message.
@@ -368,8 +392,9 @@ Only the first three bodies render inline, each capped at 2KB and 40 lines;
 
 ## Delivery report
 
-`post` prints one `delivery:` line per owner it reached: woken, sees it at its
-next prompt, queued a notice, already has an unread notice, wake limit reached,
+`post` prints one `delivery:` line per owner it reached: submitted to the Claude
+inbox (acceptance and reading unconfirmed), inbox submission unavailable, sees it
+at its next prompt, queued a notice, already has an unread notice, wake limit reached,
 not running, or has no hooks. A packet nobody owns says so instead of looking
 delivered. A post to a seat that has ended goes to the live seat with the same
 tool and worktree (`note: … is gone; sending to …`).
@@ -473,12 +498,23 @@ looks dead.
   as `command="… agent-bus peer serve",restrict … agent-bus-peer:<host>`.
   `peer serve` reads `SSH_ORIGINAL_COMMAND` and runs only `version`, `who`,
   `seats`, `ingest <from>`, `export <epoch>` and `check <host>`, each word
-  shape-checked. `peer remove` deletes the line.
+  shape-checked. `peer remove` deletes the line. A bus that is not
+  `~/.agents/bus` (`AGENT_BUS_HOME`) pairs as itself: its forced command
+  carries `AGENT_BUS_HOME=<path>`, its marker is
+  `agent-bus-peer:<host>:<hash of the path>`, and `peer add` asks the other
+  Mac for the same path under its own `$HOME`. `remove` and `uninstall` touch
+  only the running bus's lines.
 - **Sync.** The ledger is append-only, so a merge appends the lines the
   receiver lacks (checked against the ledger and its archive). Message bodies
-  travel with their rows. `post` pushes in the foreground and prints the far
-  side's delivery lines; other writes push in the background. Linking starts
-  at the current time: history stays on the machine that made it.
+  travel with their rows. Every write, `post` included, pushes in the
+  background (`tmp/peer-push.log` has the far side's delivery lines). Linking
+  starts at the current time: history stays on the machine that made it.
+- **Trust.** A peer's payload is checked on both export and ingest. A row is
+  kept only if it is a JSON object whose ids match the packet-id shape, whose
+  `from`/`by`/`addr`/`holder` are seat addresses, and (for a `msg`) whose
+  state is a known one; the rest are dropped without stopping the sync. Bodies
+  are copied only for accepted `msg` rows, by id, and only from regular files:
+  a symlink in the payload is never followed.
 - **Delivery.** The receiver wakes its own owners of new messages less than
   15 minutes old, the same way a local post does.
 - **Catch-up.** The `digest` and `heartbeat` hooks start a background

@@ -40,7 +40,7 @@ done
 # Hosts on this machine, as install-hooks.sh flags.
 host_flags() {
   local f=''
-  { [ -d "$HOME/.claude" ] || command -v claude >/dev/null 2>&1; } && f="$f --claude"
+  { [ -d "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" ] || command -v claude >/dev/null 2>&1; } && f="$f --claude"
   { [ -d "$HOME/.config/opencode" ] || command -v opencode >/dev/null 2>&1; } && f="$f --opencode"
   { [ -d "${CODEX_HOME:-$HOME/.codex}" ] && command -v python3 >/dev/null 2>&1; } && f="$f --codex"
   printf '%s' "$f"

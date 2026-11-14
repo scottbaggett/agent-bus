@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Behavior checks for opt-in queue delivery and its failure boundaries."""
+"""Behavior checks for automatic queue registration and delivery failure boundaries."""
 import importlib.util
 import json
 import os
@@ -258,7 +258,7 @@ sys.exit(int(os.environ.get('FAKE_QUEUE_EXIT', '0')))
         self.hook('SessionStart')
         self.assertEqual(json.loads(self.cmd('codex','status').stdout)['mode'],'queue_ready')
 
-    def test_hook_rejects_bad_inputs_and_does_not_auto_enable_cli(self):
+    def test_hook_rejects_bad_inputs(self):
         for payload in ['broken',json.dumps({'hook_event_name':'SessionStart','session_id':'bad','cwd':str(self.home)}),
                         json.dumps({'hook_event_name':'SessionStart','session_id':self.thread,'cwd':'/missing'})]:
             result=self.cmd('codex-hook',input=payload)
@@ -266,8 +266,44 @@ sys.exit(int(os.environ.get('FAKE_QUEUE_EXIT', '0')))
         self.assertEqual(list((self.home/'bus/seats').glob('*.json')),[])
         self.hook('SubagentStart')
         self.assertEqual(list((self.home/'bus/seats').glob('*.json')),[])
-        self.hook('SessionStart',extra={'CODEX_INTERNAL_ORIGINATOR_OVERRIDE':'codex_cli'})
-        self.assertEqual(self.seat()['codex_queue'],'')
+
+    def test_lifecycle_auto_enables_without_desktop_environment(self):
+        for origin in ['', 'codex_cli']:
+            with self.subTest(origin=origin):
+                self.thread = str(uuid.uuid4())
+                before = self.requests()
+                self.hook('SessionStart', extra={
+                    'CODEX_INTERNAL_ORIGINATOR_OVERRIDE': origin,
+                    'CODEX_APP_RUNTIME_CLI_PATH': '',
+                })
+                self.assertEqual(self.seat()['codex_queue'], str(self.fake.resolve()))
+                self.assertGreater(self.seat()['last_hook'], 0)
+                self.assertEqual(json.loads(self.cmd('codex', 'status').stdout)['mode'], 'queue_ready')
+                self.assertEqual(self.requests(), before)
+                self.post(self.seat()['addr'])
+                self.assertEqual(self.requests()[-1], [
+                    'queue', '--thread', self.thread, '--message', adapter.NOTICE])
+
+    def test_lifecycle_without_queue_support_stays_pull_only_and_retries(self):
+        extra = {'CODEX_INTERNAL_ORIGINATOR_OVERRIDE': '',
+                 'CODEX_APP_RUNTIME_CLI_PATH': '', 'FAKE_HELP_EXIT': '2'}
+        self.hook('SessionStart', extra=extra)
+        self.assertEqual(self.seat()['codex_queue'], '')
+        self.assertEqual(json.loads(self.cmd('codex', 'status').stdout)['mode'], 'pull_only')
+        state = json.loads(self.state().read_text()) if self.state().exists() else {}
+        self.assertFalse(state.get('codex_disabled', False))
+        extra['FAKE_HELP_EXIT'] = '0'
+        self.hook('UserPromptSubmit', extra=extra)
+        self.assertEqual(self.seat()['codex_queue'], str(self.fake.resolve()))
+
+    def test_lifecycle_pause_without_desktop_markers_is_preserved(self):
+        extra = {'CODEX_INTERNAL_ORIGINATOR_OVERRIDE': '', 'CODEX_APP_RUNTIME_CLI_PATH': ''}
+        self.hook('SessionStart', extra=extra)
+        self.cmd('codex', 'disable')
+        for event in ['UserPromptSubmit', 'Stop', 'SessionStart']:
+            self.hook(event, extra=extra)
+            self.assertEqual(json.loads(self.cmd('codex', 'status').stdout)['mode'], 'disabled')
+            self.assertEqual(self.seat()['codex_queue'], '')
 
     def test_lifecycle_idle_registration_survives_ttl_and_gc_until_end(self):
         self.hook('SessionStart')

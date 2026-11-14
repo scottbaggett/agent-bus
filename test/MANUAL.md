@@ -60,7 +60,7 @@ counts.
 
 Which path delivered it:
 
-- **Claude:** `post` prints `woke 1 idle peer(s)`; that was the inbox socket.
+- **Claude:** `post` reports submission to the Claude inbox; only a read/reply proves pickup.
   If it doesn't, the target recorded no socket (`agent-bus doctor` says
   "wakeable by socket" when it has one).
 - **OpenCode:** the target's `agent-bus whoami` shows `wake 1/3`; the plugin
@@ -92,7 +92,12 @@ Each row is one action from a sender seat and what the target must show.
 
 | Check | Do | Pass |
 |---|---|---|
-| Delivery line, idle Claude | `agent-bus post --to <idle Claude.app seat> -m "nonce <n>"` | post prints `— woken`; the session wakes and answers with the nonce |
+| Delivery line, idle Claude | `agent-bus post --to <idle Claude.app seat> -m "nonce <n>"` | post reports inbox submission; separately verify the session wakes and answers with the nonce |
+| Claude to Claude | from one Claude seat, post to another with no `--allow-claude` | packet is recorded, recipient reads it, and a reply references its ID |
+| Claude socket/hook deduplication | post to a Claude seat, then run its digest and Stop hook before the 30-second notice window expires | neither hook includes that packet ID; `read --peek` still retrieves it without setting read state |
+| Claude unread notice fallback | leave a submitted packet unread for more than 30 seconds, then trigger a prompt/Stop hook | the hook delivers the packet and records read state; repeat from a sibling worktree of the same session |
+| Claude inbound hold/refuse | in a disposable Claude session, set `crossSessionInbound` to `hold`, then `refuse`, and post a fresh nonce for each | submission alone never claims acceptance/read; verify native holding/refusal separately, and packet retention on the bus |
+| Codex automatic registration without Desktop markers | start a fresh CLI on the branch with its four lifecycle hooks, unset `CODEX_INTERNAL_ORIGINATOR_OVERRIDE`, `CODEX_APP_RUNTIME_CLI_PATH` and `AGENT_BUS_CODEX_BIN`; do not run `codex enable` | status is `queue_ready`; after its initial turn finishes, a nonce packet wakes the session, is read, and gets a reply referencing the packet ID |
 | One Codex notice | post three fyi packets to an idle Codex Desktop chat seat | post prints `queued` once, then `already has an unread notice` twice; the chat gets one notice and reads all three |
 | OpenCode app idle | `agent-bus post --to <idle opencode TUI seat> --state question -m "nonce <n>"` | post prints `its plugin picks this up`; the TUI resumes and replies |
 | One inbox, two folders | in one Claude session, run `agent-bus who` from the main checkout and from a worktree; post to the main-checkout seat | `agent-bus read` from the worktree shows it |
@@ -102,7 +107,7 @@ Each row is one action from a sender seat and what the target must show.
 | Quieter digest | claim a file from one seat; prompt another seat that hasn't touched it | the digest doesn't list the claim; `agent-bus read` counts it |
 | Link two Macs | Remote Login on both; on one: `agent-bus peer add <other>.local` | one password prompt at most, then `linked: a <-> b`; `doctor` lists the peer as ok on both |
 | Peer key is sync-only | `ssh -i ~/.agents/bus/peer_key -o IdentitiesOnly=yes <other>.local whoami` | `peer serve: refused` |
-| Handoff across Macs | open an agent on the other Mac; here, `agent-bus who` and post to it | post prints `delivery (<other>): … woken` (or plugin); it answers, and the reply arrives here |
+| Handoff across Macs | open an agent on the other Mac; here, `agent-bus who` and post to it | post reports remote inbox submission (or plugin delivery); it answers, and the reply arrives here |
 | Asleep Mac catches up | sleep the other Mac, post to it, wake it, open an agent | the packet is in its digest within a minute |
 
 ## Record
@@ -198,3 +203,21 @@ The initial diagnostic status command encountered the chat's normal approval
 policy and was canceled on archive. Lifecycle proof used real host callbacks
 and bus records, not that command. Hook trust does not alter model command
 permissions. The earlier T3 bus roundtrip and 126 automated checks remain green.
+
+### Codex automatic registration — 2026-11-14
+
+On `fix/codex-auto-enable`, a fresh interactive Codex CLI 0.169.0 used the
+branch's four lifecycle hooks via invocation-only inline configuration. Hook
+trust was bypassed only for that invocation after inspecting those commands;
+user hook definitions and persisted trust were unchanged. The test bus was
+isolated with `AGENT_BUS_HOME`. No manual `codex enable` or `codex sync` was run.
+
+With Desktop markers and `AGENT_BUS_CODEX_BIN` absent, the startup hook found
+the installed ChatGPT Codex runtime and registered seat
+`codex/agent-bus-codex-auto.5696` as `queue_ready`. After the initial turn ended,
+packet `20261114T050211Z-ae1c06dc` queued the fixed notification. The idle CLI
+woke, read it and returned the exact nonce in reply
+`20261114T050219Z-97abc4cb`, closing it as `done` eight seconds after posting.
+Read state and reply body were checked against the isolated ledger. A separate
+fresh session also passed using an explicit queue-capable PATH binary.
+Both disposable CLI sessions were stopped after verification.

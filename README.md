@@ -83,8 +83,11 @@ The other agent sees it on its next prompt, or is woken if idle. `post` tells
 you which, one line per agent it reached. Address one seat, never everyone: a
 broadcast (`@here`) has no owner, so nobody acts on it, and `post` says so.
 
-Between two Claude Code sessions, use Claude's own session messaging instead;
-agent-bus is for Claude ↔ OpenCode ↔ Codex.
+Claude Code seats can use the same command to reach each other. The bus keeps
+ownership, review history and explicit closure and submits a notification through Claude's native
+inbox socket. Submission does not prove acceptance or reading; Claude's inbound
+controls may hold or refuse it. Direct `SendMessage` remains available for
+quick conversations that do not need an owner or close reason.
 
 ### Ask for a review before it's done
 
@@ -258,8 +261,8 @@ check all finished work."*
 |---|---|---|---|
 | Claude Code | yes | yes | nothing after `agent-bus hooks` |
 | OpenCode | yes, after the session's first message | yes | restart OpenCode |
-| Codex Desktop | told to run `agent-bus read` | yes, with a "check your inbox" notice | trust the hooks in `/hooks` |
-| Codex CLI, plain shells | no, runs `agent-bus read` itself | no | none |
+| Codex Desktop / CLI | told to run `agent-bus read` | automatic when a queue-capable binary is found | trust the hooks in `/hooks` |
+| Plain shells | no, runs `agent-bus read` itself | no | none |
 | Grok Bot | through its webhook | yes | `agent-bus grok register` |
 
 Details and caveats for each: [docs/hosts.md](docs/hosts.md).

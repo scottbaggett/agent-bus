@@ -21,6 +21,7 @@ type service struct {
 	Cmd  string
 	Port int
 	Cwd  string
+	Up   []int // its parent pids, nearest first
 }
 
 type servicesMsg struct {
@@ -101,26 +102,74 @@ func scanServices() ([]service, error) {
 			}
 		}
 	}
+	parent := map[int]int{}
+	if out, err := exec.Command("ps", "-axo", "pid=,ppid=").Output(); err == nil {
+		for _, l := range strings.Split(string(out), "\n") {
+			f := strings.Fields(l)
+			if len(f) == 2 {
+				p, _ := strconv.Atoi(f[0])
+				pp, _ := strconv.Atoi(f[1])
+				parent[p] = pp
+			}
+		}
+	}
 	for i := range list {
 		list[i].Cwd = cwds[list[i].PID]
+		for p, n := parent[list[i].PID], 0; p > 1 && n < 40; p, n = parent[p], n+1 {
+			list[i].Up = append(list[i].Up, p)
+		}
 	}
 	sort.Slice(list, func(i, j int) bool { return list[i].Port < list[j].Port })
 	return list, nil
 }
 
-// servicesFor is what runs from an agent's folder.
+// servicesFor is what an agent runs: servers its own process started, else
+// servers in its folder that no other agent has a closer claim to. A PM in a
+// repo's main checkout doesn't get the dev servers of the worktrees inside it.
 func (m model) servicesFor(s Seat) []service {
-	root := strings.TrimRight(s.Cwd, "/")
-	if root == "" || root == "/" || root == homeDir() {
-		return nil
-	}
 	var out []service
 	for _, svc := range m.services {
-		if svc.Cwd == root || strings.HasPrefix(svc.Cwd, root+"/") {
+		if m.ownerOf(svc) == s.Addr {
 			out = append(out, svc)
 		}
 	}
 	return out
+}
+
+func (m model) ownerOf(svc service) string {
+	if m.snap == nil {
+		return ""
+	}
+	for _, s := range m.snap.Seats {
+		for _, p := range svc.Up {
+			if s.Pid > 1 && p == s.Pid {
+				return s.Addr
+			}
+		}
+	}
+	best, bestLen := "", 0
+	for _, s := range m.snap.Seats {
+		root := strings.TrimRight(s.Cwd, "/")
+		if root == "" || root == "/" || root == homeDir() {
+			continue
+		}
+		if (svc.Cwd == root || strings.HasPrefix(svc.Cwd, root+"/")) && len(root) > bestLen {
+			best, bestLen = s.Addr, len(root)
+		}
+	}
+	if best == "" {
+		return ""
+	}
+	// A server inside a worktree of the folder belongs to that worktree.
+	for _, s := range m.snap.Seats {
+		if s.Addr == best {
+			rel := strings.TrimPrefix(svc.Cwd, strings.TrimRight(s.Cwd, "/"))
+			if strings.Contains(rel, "/.claude/worktrees/") || strings.Contains(rel, "/.worktrees/") {
+				return ""
+			}
+		}
+	}
+	return best
 }
 
 func ports(svcs []service) string {

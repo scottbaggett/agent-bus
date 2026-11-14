@@ -164,8 +164,14 @@ You see it in `agent-bus attention`, answer, and close it.
 agent-bus tui
 ```
 
-Every agent on this Mac and on linked Macs, as a grid of little robots grouped
-by lane. Each has a name you can say ("Brave Otter"), the one line it gave
+Every agent on this Mac and on linked Macs, one row each, grouped by team: a
+PM's team holds the agents on its lane and on the tickets its focus names, then
+each lane or ticket has its own group, then the rest group by repo. A row shows
+how long ago the agent was seen, its seat, its ticket, what it's doing and its
+messages over the last two hours. What waits on you is pinned on top (`n` jumps
+to the next one), and agents idle over 90 minutes fold into one line (`z`
+shows them). `g` switches to a graph of who messaged whom, or to the robots
+grouped by lane. Each agent has a name you can say ("Brave Otter"), the one line it gave
 for its focus (`agent-bus focus`, else its session title), and any ports its
 folder is serving. `o` opens its folder in Finder, Zed, Cursor or your
 terminal, or a port in your browser.

@@ -3012,14 +3012,26 @@ watch_repo() {
   # unread one is the wake ladder's (it never started), and claims alone are
   # a finished worker's leftovers that expire on their own. A gone seat's
   # claims are still moved aside.
+  # Not holding either: an item the seat has answered since (it posted to the
+  # item's sender after it arrived: the turn is the other side's), any seat
+  # holding a PM role (idle between items is its job), and the lead's seat.
+  # Only this repo's seats are judged here; each repo's pass judges its own.
+  local lastto pms
+  lastto=$(lq 'reduce ($L[] | select(.kind == "msg")) as $m ({}; .[$m.from][$m.to] = ([(.[$m.from][$m.to] // 0), ($m.epoch // 0)] | max))')
+  pms=$( { pm_seat; echo; jq -r '.[]' <<<"$lpms"; echo "$lead"; } | jq -Rsc 'split("\n") | map(select(length > 0))')
   holders=$(jq -c --argjson items "$items" --argjson claims "$claims" --arg rid "$REPO_ID" \
+    --argjson lastto "$lastto" --argjson pms "$pms" \
     --argjson ex "$(printf '%s' "$exempt" | jq -Rc 'split(" ") | map(select(length > 0))')" '
     .[] | . as $s | ((.tool // "") + "/" + (.wt // "")) as $sc
+    | select(.repo_id == $rid)
     | select([$s.addr, $sc, ($s.tool // "")] | any(. as $k | $ex | index($k)) | not)
-    | [$items[] | select(.to == $s.addr or (.to == $sc and .repo_id == $s.repo_id))] as $mine
+    | select(($pms | index($s.addr)) == null)
+    | [$items[] | select(.to == $s.addr or (.to == $sc and .repo_id == $s.repo_id))
+       | select((($lastto[$s.addr] // {})[.from] // 0) <= (.epoch // 0))] as $mine
     | select(if .live then ($mine | length) > 0 and ($mine | all(.read))
              else ($claims | index($s.addr) != null) and .repo_id == $rid end)' <<<"$seats")
   msgs=$(lq '[$L[] | select(.kind == "msg")] | group_by(.from) | map({(.[0].from): (map(.epoch // 0) | max)}) | add // {}')
+  local stale_now=''
   while IFS= read -r row; do
     [ -n "$row" ] || continue
     addr=$(jq -r .addr <<<"$row")
@@ -3042,6 +3054,7 @@ watch_repo() {
       [ "$(jq -r --arg a "$addr" '.seats[$a] // empty' <<<"$st")" ] && watch_update 'del(.seats[$a])' --arg a "$addr"
       continue
     fi
+    stale_now="$stale_now$row"$'\n'
     [ -n "$(jq -r --arg a "$addr" '.seats[$a] // empty' <<<"$st")" ] && continue   # already reported
     # Reported for this same quiet spell (a flicker of activity cleared the
     # flag, nothing new happened since), or within the last hour: flag it
@@ -3066,6 +3079,13 @@ watch_repo() {
       "$(jq -nc --arg a "$addr" --arg l "$lane" '{kind: "stale", seat: $a, lane: $l}')" || true
     alerts=$(watch_open_alerts | jq -sc '.')
   done <<<"$holders"
+  # A flag stands only while this pass still finds the seat stale: a seat
+  # that became exempt, a PM, answered its work or fell inside a longer
+  # stale_after drops out instead of being listed forever.
+  watch_update '.seats = ((.seats // {}) | with_entries(select(.key as $k
+      | ($mine | index($k)) != null or ($here | index($k)) == null)))' \
+    --argjson mine "$(printf '%s' "$stale_now" | jq -sc '[.[] | .addr]')" \
+    --argjson here "$(jq -c --arg rid "$REPO_ID" '[.[] | select(.repo_id == $rid) | .addr]' <<<"$seats")"
 
   st=$(watch_get '.')
   while IFS= read -r a; do
@@ -3121,13 +3141,26 @@ watch_lead_digest() {
   lines=$(watch_get '[(.lead_lines // {})[] | select(.at >= $now - 900) | .lines[]] | unique' --argjson now "$now" 2>/dev/null \
     || jq -nc --argjson now "$now" --slurpfile w "$(watch_file)" '[($w[0].lead_lines // {})[] | select(.at >= $now - 900) | .lines[]] | unique')
   open=$(lq 'closed($L) as $c | [$L[] | select(.kind == "msg" and .from == $me.addr and (.alert.kind // "") == "lead" and ($c[.id] | not))] | last // empty')
+  # What each line is about (the id, seat or lane), without the minutes that
+  # change every pass: the lead has seen a list once it has been sent.
+  local keys sent
+  keys=$(jq -c 'map(split("\t") as $p | $p[0] + ":" + ($p[1] | ltrimstr("- ") | split(" ")[0])) | unique' <<<"$lines")
+  sent=$(watch_get '.lead_sent // []')
   if [ "$(jq length <<<"$lines")" = 0 ]; then
+    watch_update '.lead_sent = []'
     [ -n "$open" ] || return 0
     id=$(jq -r .id <<<"$open")
     ledger_append "$(jq -nc --arg msg "$id" --arg by "$ADDR" --argjson epoch "$now" \
       '{kind:"resolve",msg:$msg,by:$by,reason:"superseded",note:"watch: nothing left for the lead",epoch:$epoch}')"
     printf '  closed the lead packet %s: nothing left for the lead\n' "$id"; return 0
   fi
+  # The lead closed the packet itself: stay quiet until something it hasn't
+  # seen turns up, instead of opening a new packet (and a new wake) at once.
+  if [ -z "$open" ] && [ "$(jq length <<<"$sent")" != 0 ] \
+     && jq -e --argjson sent "$sent" 'all(.[]; . as $k | $sent | index($k) != null)' <<<"$keys" >/dev/null; then
+    return 0
+  fi
+  watch_update '.lead_sent = ((.lead_sent // []) + $k | unique)' --argjson k "$keys"
   body=$(jq -r --arg at "$(date -u +%H:%MZ)" '
     def section($k; $title): [.[] | select(startswith($k + "\t")) | ltrimstr($k + "\t")] as $l
       | if ($l | length) > 0 then "\n" + $title + "\n" + ($l | join("\n")) else empty end;

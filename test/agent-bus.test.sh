@@ -1208,6 +1208,14 @@ t0=$(date +%s); PATH="$PA2/sshbin:$PATH" AGENT_BUS_NO_PUSH=0 p2 post --to shell/
 [ $((t1 - t0)) -lt 4 ] && ok "a post does not wait for a slow peer" || bad "a post does not wait for a slow peer" "$((t1 - t0))s"
 sleep 6; rm -rf "$PA2" "$EV"
 rm -rf "$PA" "$PB"
+# --- install: Claude hooks follow CLAUDE_CONFIG_DIR ---
+ih=$(mktemp -d)
+HOME="$ih" CLAUDE_CONFIG_DIR="$ih/ctx" AGENT_BUS_BIN="$BIN" sh -c 'mkdir -p "$CLAUDE_CONFIG_DIR" && "$0" --claude >/dev/null' "$ROOT/install-hooks.sh"
+assert_has "claude hooks are installed into CLAUDE_CONFIG_DIR's settings" "digest" "$(cat "$ih/ctx/settings.json")"
+assert_eq "the default ~/.claude is left alone when CLAUDE_CONFIG_DIR is set" "absent" "$([ -e "$ih/.claude" ] && echo present || echo absent)"
+HOME="$ih" AGENT_BUS_BIN="$BIN" sh -c 'mkdir -p "$HOME/.claude" && "$0" --claude >/dev/null' "$ROOT/install-hooks.sh"
+assert_has "without CLAUDE_CONFIG_DIR, hooks still go to ~/.claude" "digest" "$(cat "$ih/.claude/settings.json")"
+rm -rf "$ih"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 ((fail == 0))

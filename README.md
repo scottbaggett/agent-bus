@@ -147,6 +147,27 @@ agent-bus role pm --lane eng-142
 agent-bus guide supervisor     # how a PM works
 ```
 
+### Keep work from stalling
+
+Turn on the supervisor and nothing sits forgotten. Work an agent hasn't read
+after 10 minutes wakes it, through its own tool (Claude's inbox, the Codex
+queue, an OpenCode resume, or its terminal if it runs in Herdr). If it still
+isn't read, the lane's PM hears, then you. An agent holding work that goes
+quiet for 20 minutes is reported to its PM. A PM that restarts gets its lane
+back on its own.
+
+```sh
+agent-bus watch --install      # runs every 2 minutes; does nothing until switched on
+agent-bus init --set supervise=on
+agent-bus watch --status
+```
+
+An agent waiting on purpose, on CI or a long job, says so and isn't flagged:
+
+```sh
+agent-bus wait --until 30m -m "CI"
+```
+
 ### Bring a decision to you
 
 When an agent hits something your rules say is yours (scope changes,
@@ -261,6 +282,15 @@ It asks four plain questions and writes `.agent-bus.json`. Commit it so your
 team shares the same rules. Or just tell your agent: *"set up agent-bus so I
 check all finished work."*
 
+Three more switches change delivery for everyone, so they start off. Set them
+in `~/.agents/bus/config.json` or with `agent-bus init --set`:
+
+| Switch | When on |
+|---|---|
+| `supervise` | the supervisor above runs |
+| `fyi_wake=off` | FYIs stop waking agents; they see them the next time they look |
+| `thread_reports` | an agent's report attaches to the job it answers, and a quick second post doesn't wake anyone again |
+
 ## Which agents get what
 
 | Agent | Work shows up on its own | Woken when idle | Setup |
@@ -286,6 +316,8 @@ Details and caveats for each: [docs/hosts.md](docs/hosts.md).
 | `agent-bus reply <id> -m …` | answer an item and close it |
 | `agent-bus ask --to <seat> -m …` | ask and wait for the answer |
 | `agent-bus attention` | what needs you, with the fix for each |
+| `agent-bus watch --status` | whether the supervisor is on, and what it is tracking |
+| `agent-bus wait --until 30m` | tell the supervisor this agent is waiting on purpose |
 | `agent-bus guide [worker\|supervisor\|reviewer]` | the patterns, short |
 | `agent-bus init --show` | this repo's rules |
 | `agent-bus peer add <host>` | link another Mac on your network |

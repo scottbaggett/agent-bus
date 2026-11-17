@@ -485,6 +485,12 @@ assert_has "the tip says who checks the work" "comes back to you to check" "$out
 out=$(newr n1 post --to "$N2" --state handoff -m "# second job" 2>&1)
 assert_lacks "the tip comes once per repo" "tip:" "$out"
 assert_lacks "status stops calling the repo new" "new here" "$(newr n1 status)"
+# After a rotation the repo's rows may sit only in the previous archive: still not new.
+cp "$BUS_HOME/ledger.jsonl" "$BUS_HOME/ledger.keep"
+grep -F 'fresh00000000001' "$BUS_HOME/ledger.keep" >"$BUS_HOME/ledger.archive.jsonl.1"
+grep -vF 'fresh00000000001' "$BUS_HOME/ledger.keep" >"$BUS_HOME/ledger.jsonl" || true
+assert_lacks "a repo whose rows are only in the .1 archive is not new" "new here" "$(newr n1 status)"
+mv "$BUS_HOME/ledger.keep" "$BUS_HOME/ledger.jsonl"; rm -f "$BUS_HOME/ledger.archive.jsonl.1"
 # ownerless work: refused with suggestions, or given to the lead
 out=$(pol p1 post --to @here --state needs-review -m '# nobody owns me' 2>&1 || true)
 assert_has "a broadcast work item with no supervisor is refused" "has no owner" "$out"
@@ -863,6 +869,26 @@ assert_has "gc rotates old rows" "1 ledger rows rotated" "$out"
 assert_has "rotated rows land in the archive" "ancient" "$(cat "$BUS_HOME/ledger.archive.jsonl")"
 assert_eq "old bodies are removed" "no" "$([ -f "$BUS_HOME/msg/20200101T000000Z-0000abcd.md" ] && echo yes || echo no)"
 assert_has "gc keeps undatable rows" "not json" "$(cat "$BUS_HOME/ledger.jsonl")"
+printf '{"kind":"msg","id":"20200101T000000Z-0000abce","epoch":%s,"from":"x","to":"@all","state":"fyi","subject":"older"}\n' "$old" >>"$BUS_HOME/ledger.jsonl"
+AGENT_BUS_ARCHIVE_MAX_BYTES=10 "$BIN" gc >/dev/null
+assert_eq "an archive past its cap moves whole to .1" "no" "$([ -f "$BUS_HOME/ledger.archive.jsonl" ] && echo yes || echo no)"
+assert_has "the moved archive keeps every row" "older" "$(cat "$BUS_HOME/ledger.archive.jsonl.1")"
+# Under the cap nothing moves; a second rotation replaces .1 (the older archive is gone).
+printf '{"kind":"msg","id":"20200101T000000Z-0000abcf","epoch":%s,"from":"x","to":"@all","state":"fyi","subject":"newest"}\n' "$old" >>"$BUS_HOME/ledger.jsonl"
+"$BIN" gc >/dev/null
+assert_has "under the cap the archive stays in place" "newest" "$(cat "$BUS_HOME/ledger.archive.jsonl")"
+assert_lacks "and .1 is untouched" "newest" "$(cat "$BUS_HOME/ledger.archive.jsonl.1")"
+AGENT_BUS_ARCHIVE_MAX_BYTES=10 "$BIN" gc >/dev/null
+assert_has "a second rotation puts the newer archive in .1" "newest" "$(cat "$BUS_HOME/ledger.archive.jsonl.1")"
+assert_lacks "and the older archive is deleted" "older" "$(cat "$BUS_HOME/ledger.archive.jsonl.1")"
+# --restore-open also finds open items in .1.
+printf '{"kind":"msg","id":"20200103T000000Z-0000bbb2","epoch":%s,"from":"x","to":"claude/wgone","state":"question","subject":"lost in .1","repo":"r","repo_id":"r"}\n' \
+  "$old" >>"$BUS_HOME/ledger.archive.jsonl.1"
+out=$("$BIN" gc --restore-open)
+assert_has "restore reads .1 too" "restored 1 open item" "$out"
+assert_has "the open item from .1 is back in the ledger" "lost in .1" "$(cat "$BUS_HOME/ledger.jsonl")"
+assert_lacks "and gone from .1" "lost in .1" "$(cat "$BUS_HOME/ledger.archive.jsonl.1")"
+assert_has "closed rows stay in .1" "newest" "$(cat "$BUS_HOME/ledger.archive.jsonl.1")"
 touch -t 202001010000 "$BUS_HOME/seats/$(printf '%s' "$A" | tr '/:@ ' '____').json"
 jq -c '.epoch = 1' "$BUS_HOME/seats/$(printf '%s' "$A" | tr '/:@ ' '____').json" >"$BUS_HOME/t" \
   && mv "$BUS_HOME/t" "$BUS_HOME/seats/$(printf '%s' "$A" | tr '/:@ ' '____').json"
@@ -1126,6 +1152,12 @@ assert_has "and the owner there is told" "delivery (" "$out"
 assert_has "the agent there sees the handoff" "across the network" "$(PBT=opencode pb read --peek)"
 out=$(SSH_ORIGINAL_COMMAND="export 0" pa peer serve | serve_b "ingest amac.local")
 assert_has "syncing twice adds nothing" "up to date" "$out"
+# Rows that a rotation moved to B's previous archive are still known: no re-adding.
+cp "$PB/bus/ledger.jsonl" "$PB/bus/ledger.keep"
+cp "$PB/bus/ledger.keep" "$PB/bus/ledger.archive.jsonl.1"; : >"$PB/bus/ledger.jsonl"
+out=$(SSH_ORIGINAL_COMMAND="export 0" pa peer serve | serve_b "ingest amac.local")
+assert_has "rows only in the .1 archive are not taken again" "up to date" "$out"
+mv "$PB/bus/ledger.keep" "$PB/bus/ledger.jsonl"; rm -f "$PB/bus/ledger.archive.jsonl.1"
 # who lists the other Mac's agents from the last sync.
 assert_has "a peer reports its live seats" "$oc" "$(serve_b seats)"
 serve_b seats >"$PA/bus/state/peer.bmac.local.seats.json"

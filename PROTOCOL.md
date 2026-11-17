@@ -243,6 +243,37 @@ work, and `triage --by lane` groups the whole repo's.
 Lane names are `[a-z0-9-]`, up to 32 characters, and not `here`, `repo`, `all`
 or `pm`.
 
+### Nested lanes
+
+A lane may sit under another lane, to any depth: an area over its tickets, or
+an area over projects over tickets.
+
+```sh
+agent-bus lane eng-142 under checkout     # eng-142 is now part of checkout
+agent-bus lane eng-142 under --clear      # back to the top level
+```
+
+A seat may file its own lane; anyone else needs standing over the lane or over
+the new parent (the lead, the repo PM, or a PM of a lane above). A launcher
+does it without a command: a seat started with `AGENT_BUS_LANE_PARENT=checkout`
+files its lane under `checkout` the first time it is seen, unless the lane
+already has a parent. Each change is one `lane` row carrying `parent`; a loop
+is refused.
+
+Everything a lane PM does for its lane, it does for the lanes beneath it:
+
+- it gets a copy of every work item posted from them or sent to them;
+- `@pm` from a seat goes to the **nearest** PM up the tree, and the PMs above
+  that one still get their copy;
+- it may close their items and run their lifecycle (`lane <child> done`);
+- its packets are marked as the PM's for seats in those lanes;
+- `--to @checkout` reaches the seats in `checkout` and in every lane under it.
+
+`lane <name> done` and `sweep` close only that lane's own items; lanes under it
+keep theirs. `triage --lane <name>` lists the whole subtree. `snapshot` and
+`lanes --json` give each lane its `parent`, its `path` from the top and `sup`,
+the PM who answers for it; `lanes` prints the tree.
+
 ## Lane lifecycle
 
 A lane is open until someone with standing — the lead, the repo PM, or the

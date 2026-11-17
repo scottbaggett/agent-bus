@@ -76,10 +76,15 @@ install_claude() {
   if ((!uninstall)); then
     # SessionStart and UserPromptSubmit stdout is injected into the model, so
     # the digest delivers; Stop continues the seat on work it owns.
-    out=$(add_group SessionStart "$(hook "digest 2>/dev/null || true")" <<<"$out")
+    out=$(add_group SessionStart "AGENT_BUS_ACTIVITY=idle $(hook "digest 2>/dev/null || true")" <<<"$out")
     out=$(add_group UserPromptSubmit "$(hook "digest 2>/dev/null || true")" <<<"$out")
     out=$(add_group Stop "$(hook "stop-hook 2>/dev/null || echo '{}'")" <<<"$out")
     out=$(add_group SessionEnd "$(hook "offboard >/dev/null 2>&1 || true")" <<<"$out")
+    # Live activity: a permission or question prompt means the agent waits on
+    # you in its window. PostToolUse only runs the CLI while that marker exists,
+    # so ordinary tool calls cost a file test, not a bus call.
+    out=$(add_group Notification "$(hook "activity notify >/dev/null 2>&1 || true")" <<<"$out")
+    out=$(add_group PostToolUse "[ ! -e \"\${AGENT_BUS_HOME:-\$HOME/.agents/bus}/state/waiting.\$PPID\" ] || $(hook "activity working >/dev/null 2>&1 || true")" <<<"$out")
   fi
   write_json "$f" <<<"$out"
   echo "claude:   $( ((uninstall)) && echo removed || echo installed ) ($f)"

@@ -383,6 +383,30 @@ LEADA=$(cd "$R" && AGENT_BUS_SESSION=leadsess AGENT_BUS_TOOL=claude AGENT_BUS_WT
 out=$(cd "$R" && AGENT_BUS_WATCH_LEAD="$LEADA" AGENT_BUS_SESSION=leadsess AGENT_BUS_TOOL=claude AGENT_BUS_WT=website "$BIN" lane park feat --reason x 2>&1)
 assert_lacks "the lead seat's session in another worktree may park a lane" "may change its lifecycle" "$out"
 
+# --- an unread answer wakes like work; an idle poll is not activity ---
+hcs '{"address":"t9","agent":"opencode","status":"idle","state":"live","cwd":"'"$R"'"}'
+: >"$T/hc.sends"; w read >/dev/null
+qq=$(w post --to "$S" --state question -m "# which file?" | idof)
+s read >/dev/null
+ans=$(s reply "$qq" -m "a.txt" | idof)
+age_msg "$ans" 700
+out=$(watch)
+assert_has "an unread answer to an OpenCode seat enters the wake ladder" "wake $W for $ans: herdr" "$out"
+w read >/dev/null; watch >/dev/null
+ib=$(s post --to "$W" --state handoff -m "# build it" | idof)
+w read >/dev/null
+w stop-hook </dev/null >/dev/null            # the plugin's idle poll
+f=$(seatf "$W"); jq -c '.activity_at -= 1300' "$f" >"$f.t" && mv "$f.t" "$f"
+age_msg "$ib" 1300
+jq -c --arg a "$W" 'if .kind == "msg" and .from == $a then .epoch -= 1300 else . end' "$L" >"$L.t" && mv "$L.t" "$L"
+jq -c 'del(.reported)' "$WF" >"$WF.t" && mv "$WF.t" "$WF"
+w stop-hook </dev/null >/dev/null            # polling again, still idle
+assert_eq "an idle poll does not move when the seat went idle" yes \
+  "$(jq -r --argjson now "$(date +%s)" 'if $now - .activity_at >= 1200 then "yes" else "no" end' "$f")"
+out=$(watch)
+assert_has "a builder that read its work and sits idle is reported" "$W is stale" "$out"
+s resolve "$ib" --reason done >/dev/null
+
 # --- status and wait ---
 assert_has "watch --status says it is off" "supervise: off" "$(cd "$R" && "$BIN" watch --status)"
 assert_has "wait rejects nonsense" "takes 30m" "$(cd "$R" && "$BIN" wait --until soon 2>&1 || true)"

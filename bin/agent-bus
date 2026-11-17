@@ -288,7 +288,12 @@ touch_seat() {
   fi
   # Hooks say what the agent is doing right now: working, waiting (on you, in
   # its own window) or idle.
-  case "${AGENT_BUS_ACTIVITY:-}" in working|waiting|idle) activity=$AGENT_BUS_ACTIVITY; activity_at=$now ;; esac
+  # activity_at is when it changed, not when it was last said: the OpenCode
+  # plugin reports "idle" every two seconds, and an agent idle for an hour
+  # must read as idle since then.
+  case "${AGENT_BUS_ACTIVITY:-}" in working|waiting|idle)
+    [ "$activity" = "$AGENT_BUS_ACTIVITY" ] && [ "${activity_at:-0}" != 0 ] || activity_at=$now
+    activity=$AGENT_BUS_ACTIVITY ;; esac
   [ "$TOOL" = claude ] && socket="${CLAUDE_CODE_MESSAGING_SOCKET:-}"
   # The same session in a live process keeps its pid; anything else looks again.
   if [ -z "${AGENT_BUS_PID:-}" ] && [ -n "$old_pid" ] && [ "$old_session" = "$SESSION" ] \
@@ -2851,7 +2856,12 @@ watch_open_alerts() {
 # (agent-bus wait) or a Herdr turn in progress counts as now.
 seat_activity() { # seat-row last-packet-epoch terminals now
   local row="$1" best cwd t f m waiting
-  best=$(jq -r '(.epoch // 0) | tonumber? // 0' <<<"$row")
+  # A seat that reports what it is doing: working is now; idle or waiting
+  # counts from when it stopped. Its last-seen time is no use here: the
+  # OpenCode plugin polls every two seconds while the agent sits idle.
+  best=$(jq -r --argjson now "$4" 'if .activity == "working" then $now
+      elif (.activity // "") != "" then ((.activity_at // 0) | tonumber? // 0)
+      else ((.epoch // 0) | tonumber? // 0) end' <<<"$row")
   (( ${2:-0} > best )) && best="$2"
   waiting=$(jq -r '.waiting_until // 0' "$BUS/state/$(slugify "$(jq -r .addr <<<"$row")").json" 2>/dev/null || echo 0)
   [[ "$waiting" =~ ^[0-9]+$ ]] && (( waiting > $4 )) && { printf '%s' "$4"; return 0; }
@@ -2914,9 +2924,14 @@ watch_repo() {
   # the item's own repo.
   items=$(lq 'closed($L) as $c | file_map($L) as $fm
     | (reduce ($L[] | select(.kind == "msg" and (.re // null) != null)) as $r ({}; .[$r.re] += [$r.from])) as $replies
-    | [$L[] | select(.kind == "msg" and sup and same_repo($me) and ($c[.id] | not)
-                     and ((.probe // false) | not) and (.alert // null) == null
-                     and (.epoch // 0) >= $now - $maxage)
+    | [$L[] | select(.kind == "msg" and same_repo($me) and ((.probe // false) | not) and (.alert // null) == null
+                     and (.epoch // 0) >= $now - $maxage and .from != $me.addr)
+      # Work items, open; and answers sent to one seat (a reply carrying re:),
+      # which its asker is waiting on just as much. Answers need no closing:
+      # read is done.
+      | select((sup and ($c[.id] | not))
+               or ((.re // null) != null and ((.to // "") | test("^[^@][^/]*/.+[.][0-9a-f]{4}$")) and (sup | not)))
+      | . + {reply: (sup | not)}
       | . + {lane: item_lane($fm)} | . as $m
       | (if .to == "@lead" or .assign == "@lead" then "@lead"
          elif ((.to // "") | startswith("@")) then
@@ -3023,7 +3038,8 @@ watch_repo() {
     | select(.repo_id == $rid)
     | select([$s.addr, $sc, ($s.tool // "")] | any(. as $k | $ex | index($k)) | not)
     | select(($pms | index($s.addr)) == null)
-    | [$items[] | select(.to == $s.addr or (.to == $sc and .repo_id == $s.repo_id))
+    | [$items[] | select((.reply // false) | not)
+       | select(.to == $s.addr or (.to == $sc and .repo_id == $s.repo_id))
        | select((($lastto[$s.addr] // {})[.from] // 0) <= (.epoch // 0))] as $mine
     | select(if .live then ($mine | length) > 0 and ($mine | all(.read))
              else ($claims | index($s.addr) != null) and .repo_id == $rid end)' <<<"$seats")

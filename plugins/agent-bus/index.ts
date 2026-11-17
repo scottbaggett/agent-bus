@@ -218,8 +218,11 @@ function sameDir(a: string | undefined, b: string | undefined) {
 }
 
 function pollEvery(tick: () => void) {
-  const configured = Number(process.env.AGENT_BUS_OPENCODE_POLL_MS || 2000)
-  const ms = Number.isFinite(configured) && configured >= 250 ? configured : 2000
+  // 30s: each poll is one CLI run per idle session, and the bus supervisor
+  // (agent-bus watch) wakes idle seats too. 2s polled dozens of sessions into
+  // most of a laptop's CPU.
+  const configured = Number(process.env.AGENT_BUS_OPENCODE_POLL_MS || 30000)
+  const ms = Number.isFinite(configured) && configured >= 250 ? configured : 30000
   const timer = setInterval(tick, ms)
   ;(timer as { unref?: () => void }).unref?.()
   return () => clearInterval(timer)

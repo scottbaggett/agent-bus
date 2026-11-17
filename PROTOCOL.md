@@ -500,7 +500,7 @@ own channel, exactly as `post` does.
   newest of, across every worktree the same session works in: a hook or CLI
   call, a packet, a commit, a dirty file, or a Herdr turn in progress. A seat
   that reports what it is doing counts from when it went idle, not from its
-  last poll (the OpenCode plugin polls every two seconds).
+  last poll (the OpenCode plugin polls while it sits idle).
   `agent-bus wait --until 30m|HH:MM -m why` declares a wait (CI, a long job)
   that counts as activity until then. Its PM gets one alert; `who` marks it
   `STALE (watch)`. Its claims move to `archive/claims/` only when its

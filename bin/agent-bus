@@ -21,6 +21,24 @@
 #   claims/<hash>.json  advisory file claims
 set -euo pipefail
 
+# The OpenCode plugin asks `stop-hook` whether to wake each idle session, by
+# default every 30s (older plugins: every 2s, for every idle session). Dozens of
+# idle sessions made that a constant stream of full bus reads: 20 bash+jq
+# launches a second and most of a laptop's CPU. Answer one session at most once
+# per AGENT_BUS_OPENCODE_POLL_MIN seconds (default 30; 0 turns this off), before
+# anything else is parsed or run. "{}" means nothing to wake for. bash 3.2.
+if [ "${1:-}" = stop-hook ] && [ "${AGENT_BUS_TOOL:-}" = opencode ] && [ -n "${OPENCODE_SESSION_ID:-}" ] \
+   && [ "${AGENT_BUS_OPENCODE_POLL_MIN:-30}" != 0 ]; then
+  _poll_dir="${AGENT_BUS_HOME:-$HOME/.agents/bus}/tmp/opencode-poll"
+  _poll_file="$_poll_dir/${OPENCODE_SESSION_ID//[^A-Za-z0-9_-]/_}"
+  _poll_now=$(date +%s); _poll_last=0
+  [ -r "$_poll_file" ] && read -r _poll_last <"$_poll_file" 2>/dev/null || true
+  case "$_poll_last" in ''|*[!0-9]*) _poll_last=0 ;; esac
+  if [ $((_poll_now - _poll_last)) -lt "${AGENT_BUS_OPENCODE_POLL_MIN:-30}" ]; then printf '{}\n'; exit 0; fi
+  mkdir -p "$_poll_dir" 2>/dev/null || true
+  printf '%s\n' "$_poll_now" >"$_poll_file" 2>/dev/null || true
+fi
+
 VERSION="0.6.0"
 
 BUS="${AGENT_BUS_HOME:-$HOME/.agents/bus}"

@@ -56,7 +56,7 @@ every prompt, and resumes the session when it's idle and owns new work.
   says so and points at `--resume`.
 - Reinstalling the plugin while a chat sits idle makes that chat invisible
   until it takes another turn.
-- Idle polling runs every 2s (`AGENT_BUS_OPENCODE_POLL_MS`).
+- Idle polling runs every 30s (`AGENT_BUS_OPENCODE_POLL_MS`), and the CLI answers one session at most once per 30s (`AGENT_BUS_OPENCODE_POLL_MIN`, 0 to turn off) so older plugins polling every 2s stay cheap.
 
 ## Codex (Desktop and CLI)
 

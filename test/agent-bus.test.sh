@@ -247,6 +247,15 @@ assert_has "owner closes with a reason" "resolved $hid (done)" "$out"
 assert_has "log records the reason" "closed $hid (done)" "$(pm log)"
 
 # --- wake: unlimited by default, opt-in rate-limit ---
+# The OpenCode plugin's idle poll is answered at most once per 30s a session.
+oc_poll() { OPENCODE_SESSION_ID=ocpoll1 AGENT_BUS_SESSION=ocpoll1 AGENT_BUS_TOOL=opencode AGENT_BUS_WT=ocp "$BIN" stop-hook </dev/null; }
+oc_poll >/dev/null
+OCP=$(OPENCODE_SESSION_ID=ocpoll1 AGENT_BUS_SESSION=ocpoll1 AGENT_BUS_TOOL=opencode AGENT_BUS_WT=ocp "$BIN" whoami | awk '/^seat/{print $2}')
+pm post --to "$OCP" --state question -m "# polled" >/dev/null
+assert_eq "an OpenCode poll inside 30s is answered empty, without reading the bus" "{}" "$(oc_poll)"
+assert_eq "and takes no seat or state work" "" "$(find "$BUS_HOME/state" -name '*ocp*' -newer "$BUS_HOME/tmp/opencode-poll/ocpoll1" 2>/dev/null)"
+assert_eq "AGENT_BUS_OPENCODE_POLL_MIN=0 turns the limit off" "block" "$(AGENT_BUS_OPENCODE_POLL_MIN=0 oc_poll | jq -r .decision)"
+
 # Default (AGENT_BUS_WAKE_BUDGET unset or 0) is unlimited: every stop-hook delivers.
 for _i in 1 2 3 4; do
   a post --to "$C" --state question -m "# unl$_i" >/dev/null

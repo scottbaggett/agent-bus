@@ -365,9 +365,12 @@ w read >/dev/null
 i7=$(s post --to "$W" --state needs-review -m "# from launchd" | idof); age_msg "$i7" 700
 out=$(cd "$T" && "${SON[@]}" "$BIN" watch)
 assert_has "watch with no flags finds the repo from its seats" "wake $W for $i7: herdr" "$out"
-mkdir "$AGENT_BUS_HOME/state/watch.lockd"
-assert_has "two passes never overlap" "another pass is running" "$(cd "$T" && "${SON[@]}" "$BIN" watch)"
-rmdir "$AGENT_BUS_HOME/state/watch.lockd"
+mkdir "$AGENT_BUS_HOME/state/watch.lockd"; sleep 30 & live_pid=$!
+echo "$live_pid" >"$AGENT_BUS_HOME/state/watch.lockd/pid"
+assert_has "two passes never overlap" "another pass is running (pid $live_pid)" "$(cd "$T" && "${SON[@]}" "$BIN" watch)"
+kill "$live_pid" 2>/dev/null; wait "$live_pid" 2>/dev/null || true
+assert_has "a killed pass's lock is taken at once" "took over the lock from $live_pid" "$(cd "$T" && "${SON[@]}" "$BIN" watch)"
+assert_eq "and released after the pass" no "$([ -d "$AGENT_BUS_HOME/state/watch.lockd" ] && echo yes || echo no)"
 
 # --- nested lanes and the lead seat elsewhere ---
 FPM=$(head -1 "$AGENT_BUS_HOME"/state/roles/*.lane.feat.pm); seat_live_ok=$(lp2 who >/dev/null; echo ok)
@@ -441,6 +444,22 @@ age_msg "$new1" 650
 out=$(cd "$R" && AGENT_BUS_POLICY_SUPERVISE=on AGENT_BUS_NO_PUSH=0 "$BIN" watch --here)
 assert_has "work that arrives after the switch-on still wakes" "wake $W for $new1" "$out"
 w read >/dev/null; s resolve "$old1" "$new1" --reason done >/dev/null 2>&1 || true
+
+# --- the lead seat closes others' packets; a flicker doesn't make old news new ---
+xo=$(s post --to "$W" --state question -m "# between two other seats" | idof)
+LDS2() { (cd "$R" && AGENT_BUS_SESSION=leadsess2 AGENT_BUS_TOOL=claude AGENT_BUS_WT=ldwt2 "$BIN" "$@"); }
+LDS2 who >/dev/null; LD2=$(LDS2 whoami | awk '/^seat/{print $2}')
+assert_has "a plain seat may not close others' packets" "is not its sender" "$(seat zz claude zzz resolve "$xo" 2>&1 || true)"
+assert_has "the lead seat (watch.lead) may" "resolved $xo" "$(AGENT_BUS_WATCH_LEAD="$LD2" LDS2 resolve "$xo" --reason done 2>&1)"
+jq -c '.lead_sent = {"unread:20990101T000000Z-aaaaaaaa": 1}' "$WF" >"$WF.t" && mv "$WF.t" "$WF"
+jq -c --argjson now "$(date +%s)" '.lead_lines = {"x": {at: $now, lines: ["unread\t- 20990101T000000Z-bbbbbbbb [question] to someone"]}}' "$WF" >"$WF.t" && mv "$WF.t" "$WF"
+out=$(cd "$R" && "${SON[@]}" "$BIN" watch --here 2>&1 | grep 'lead packet\|alert -> @lead' || true)
+lp1=$(jq -c 'select(.kind == "msg" and (.alert.kind // "") == "lead")' "$L" | tail -1 | jq -r .id)
+jq -c --argjson now "$(date +%s)" '.lead_lines = {"x": {at: $now, lines: []}}' "$WF" >"$WF.t" && mv "$WF.t" "$WF"
+watch_digest_only() { (cd "$R" && "${SON[@]}" "$BIN" watch --here >/dev/null 2>&1); }
+jq -c '.lead_lines = {}' "$WF" >"$WF.t" && mv "$WF.t" "$WF"
+watch_digest_only
+assert_eq "an empty list keeps what the lead has seen" yes "$(jq -r '.lead_sent | if type == "object" and has("unread:20990101T000000Z-bbbbbbbb") then "yes" else "no" end' "$WF")"
 
 # --- status and wait ---
 assert_has "watch --status says it is off" "supervise: off" "$(cd "$R" && "$BIN" watch --status)"

@@ -1252,6 +1252,13 @@ assert_has "claude hooks are installed into CLAUDE_CONFIG_DIR's settings" "diges
 assert_eq "the default ~/.claude is left alone when CLAUDE_CONFIG_DIR is set" "absent" "$([ -e "$ih/.claude" ] && echo present || echo absent)"
 HOME="$ih" AGENT_BUS_BIN="$BIN" sh -c 'mkdir -p "$HOME/.claude" && "$0" --claude >/dev/null' "$ROOT/install-hooks.sh"
 assert_has "without CLAUDE_CONFIG_DIR, hooks still go to ~/.claude" "digest" "$(cat "$ih/.claude/settings.json")"
+assert_eq "the /agent-bus skill is linked into CLAUDE_CONFIG_DIR's skills" "$ROOT/skills/agent-bus" "$(readlink "$ih/ctx/skills/agent-bus")"
+assert_eq "the handoff alias is linked there by default" "$ROOT/skills/handoff" "$(readlink "$ih/ctx/skills/handoff")"
+HOME="$ih" CLAUDE_CONFIG_DIR="$ih/ctx2" AGENT_BUS_BIN="$BIN" sh -c 'mkdir -p "$CLAUDE_CONFIG_DIR" && "$0" --claude --no-handoff-alias >/dev/null' "$ROOT/install-hooks.sh"
+assert_eq "--no-handoff-alias still links the /agent-bus skill" "$ROOT/skills/agent-bus" "$(readlink "$ih/ctx2/skills/agent-bus")"
+assert_eq "--no-handoff-alias leaves /handoff free" "absent" "$([ -e "$ih/ctx2/skills/handoff" ] && echo present || echo absent)"
+assert_has "doctor checks the hooks in CLAUDE_CONFIG_DIR's settings" "claude    ok (hooks in $ih/ctx/settings.json)" \
+  "$(HOME="$ih" CLAUDE_CONFIG_DIR="$ih/ctx" AGENT_BUS_HOME="$ih/bus" "$BIN" doctor 2>&1)"
 rm -rf "$ih"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"

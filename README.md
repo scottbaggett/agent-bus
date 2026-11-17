@@ -299,6 +299,7 @@ Details and caveats for each: [docs/hosts.md](docs/hosts.md).
 brew upgrade agent-bus      # Homebrew
 agent-bus update            # curl installer
 agent-bus hooks             # re-connect agents, e.g. after installing a new one
+agent-bus hooks --no-handoff-alias   # also skip the old /handoff skill name (remembered for that config dir)
 agent-bus uninstall         # remove hooks, skills and the install; your bus history stays
 ```
 

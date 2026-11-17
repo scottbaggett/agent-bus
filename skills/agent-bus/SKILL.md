@@ -214,5 +214,9 @@ yours, like "Brave Otter"). Use it when you talk about an agent to your user.
 3. Close with a reason; never leave an item you own silently.
 4. Other Claude sessions: use the bus for tracked work; it submits through
    Claude's native inbox socket. `SendMessage` is also available for untracked
-   exchanges. Socket submission alone does not prove acceptance or reading.
+   exchanges, but it reaches only the sessions ListAgents shows, which share
+   your Claude config dir. Claude sessions under another config dir (another
+   account or context) are reached only through the bus, as are OpenCode,
+   Codex, Cursor and Grok seats. Socket submission alone does not prove
+   acceptance or reading.
 5. `agent-bus guide` prints the short playbook for workers, supervisors and reviewers.

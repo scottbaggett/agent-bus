@@ -62,6 +62,33 @@ assert_eq "re-install does not duplicate hooks" 6 "$n"
 assert_eq "agent-bus hooks keeps the stable path" "$hooks" "$(jq -r '[.hooks[][].hooks[].command] | join("\n")' "$HOME/.claude/settings.json")"
 assert_eq "agent-bus hooks keeps the skill on current" "$SHARE/current/skills/agent-bus" "$(readlink "$HOME/.claude/skills/agent-bus")"
 
+# The opt-out is remembered: the installer accepts the flag, and `agent-bus update`
+# (which passes host flags only) keeps honouring it.
+SP2="$T/cfg-optout"; mkdir -p "$SP2"
+out=$(CLAUDE_CONFIG_DIR="$SP2" inst 9.9.2 --no-handoff-alias 2>&1)
+assert_eq "install.sh --no-handoff-alias installs agent-bus" "$SHARE/current/skills/agent-bus" "$(readlink "$SP2/skills/agent-bus")"
+assert_eq "install.sh --no-handoff-alias leaves /handoff free" "absent" "$([ -e "$SP2/skills/handoff" ] && echo present || echo absent)"
+rm -f "$SP2/skills/agent-bus"
+CLAUDE_CONFIG_DIR="$SP2" AGENT_BUS_INSTALLER="$ROOT/install.sh" AGENT_BUS_DOWNLOAD_URL="file://$T/9.9.2.tar.gz" \
+  "$BINDIR/agent-bus" update --version v9.9.2 >/dev/null 2>&1
+assert_eq "update re-links agent-bus in the opted-out dir" "$SHARE/current/skills/agent-bus" "$(readlink "$SP2/skills/agent-bus")"
+assert_eq "update keeps /handoff free" "absent" "$([ -e "$SP2/skills/handoff" ] && echo present || echo absent)"
+CLAUDE_CONFIG_DIR="$SP2" "$BINDIR/agent-bus" hooks --claude >/dev/null
+assert_eq "agent-bus hooks keeps /handoff free" "absent" "$([ -e "$SP2/skills/handoff" ] && echo present || echo absent)"
+# Per config dir: another dir is not affected by SP2's opt-out.
+SP3="$T/cfg-other"; mkdir -p "$SP3"
+CLAUDE_CONFIG_DIR="$SP3" "$BINDIR/agent-bus" hooks --claude >/dev/null
+assert_eq "an opt-out for one config dir leaves another linked" "1" "$([ -L "$SP3/skills/handoff" ] && echo 1 || echo 0)"
+rm -f "$SP2/skills/.agent-bus-no-handoff"
+CLAUDE_CONFIG_DIR="$SP2" "$BINDIR/agent-bus" hooks --claude >/dev/null
+assert_eq "deleting the remembered opt-out links /handoff again" "1" "$([ -L "$SP2/skills/handoff" ] && echo 1 || echo 0)"
+# A plain uninstall ignores the opt-out and removes the link (and the marker).
+CLAUDE_CONFIG_DIR="$SP2" "$BINDIR/agent-bus" hooks --claude --no-handoff-alias >/dev/null
+assert_eq "opting out later keeps the existing link" "1" "$([ -L "$SP2/skills/handoff" ] && echo 1 || echo 0)"
+CLAUDE_CONFIG_DIR="$SP2" "$BINDIR/agent-bus" hooks --claude --uninstall >/dev/null
+assert_eq "a plain uninstall removes /handoff despite the opt-out" "absent" "$([ -e "$SP2/skills/handoff" ] || [ -L "$SP2/skills/handoff" ] && echo present || echo absent)"
+assert_eq "and removes the opt-out marker" "absent" "$([ -e "$SP2/skills/.agent-bus-no-handoff" ] && echo present || echo absent)"
+
 tarball 9.9.3; inst 9.9.3 >/dev/null 2>&1
 assert_eq "keeps only the two newest versions" "v9.9.2 v9.9.3" "$(ls "$SHARE/versions" | sort | tr '\n' ' ' | sed 's/ $//')"
 

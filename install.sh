@@ -12,6 +12,7 @@
 #   --ref <branch>    install a branch (unreleased; for testing)
 #   --from <dir>      use a local checkout in place (developing agent-bus)
 #   --no-hooks        install the CLI only
+#   --no-handoff-alias  skip the old `handoff` skill name (remembered per config dir)
 #   --uninstall       remove hooks, skills, the link and the install dir
 #                     (the bus itself, ~/.agents/bus, is never touched)
 set -euo pipefail
@@ -23,15 +24,16 @@ BINDIR="${AGENT_BUS_BIN_DIR:-$HOME/.local/bin}"
 say() { printf '%s\n' "$*"; }
 die() { printf 'agent-bus install: %s\n' "$*" >&2; exit 1; }
 
-version='' ref='' from='' hooks=1 uninstall=0
+version='' ref='' from='' hooks=1 uninstall=0 alias_flag=''
 while [ $# -gt 0 ]; do
   case "$1" in
     --version) [ $# -ge 2 ] || die "--version needs a tag"; version="$2"; shift ;;
     --ref) [ $# -ge 2 ] || die "--ref needs a branch"; ref="$2"; shift ;;
     --from) [ $# -ge 2 ] || die "--from needs a directory"; from="$2"; shift ;;
     --no-hooks) hooks=0 ;;
+    --no-handoff-alias) alias_flag=--no-handoff-alias ;;
     --uninstall) uninstall=1 ;;
-    -h|--help) sed -n '2,17p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,18p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown option: $1" ;;
   esac
   shift
@@ -123,7 +125,7 @@ if ((hooks)); then
   if [ -n "$flags" ]; then
     say ""
     # shellcheck disable=SC2086
-    "$SHARE/current/install-hooks.sh" $flags
+    "$SHARE/current/install-hooks.sh" $flags $alias_flag
   else
     say "no Claude Code, OpenCode or Codex found; install one, then run: agent-bus hooks"
   fi

@@ -63,7 +63,9 @@ s() { AGENT_BUS_LANE=feat seat s claude snd "$@"; }
 lp role pm --lane feat >/dev/null
 w who >/dev/null; s who >/dev/null
 LP=$(addr lp); W=$(addr w); S=$(addr s)
-assert_eq "seat records its Herdr terminal" t9 "$(jq -r .hc_terminal "$(seatf "$W")")"
+assert_eq "an OpenCode seat never claims a Herdr terminal (its daemon's env names another)" null "$(jq -r .hc_terminal "$(seatf "$W")")"
+HC_TERMINAL_ID=t3 seat cl claude cl who >/dev/null
+assert_eq "a Claude seat records its Herdr terminal" t3 "$(jq -r .hc_terminal "$(seatf "$(addr seat cl claude cl)")")"
 assert_eq "a PM role file keeps the address on line 1" "$LP" "$(head -1 "$AGENT_BUS_HOME"/state/roles/*.lane.feat.pm)"
 assert_eq "and what it is bound to on line 2" feat "$(sed -n 2p "$AGENT_BUS_HOME"/state/roles/*.lane.feat.pm | jq -r .lane)"
 
@@ -75,7 +77,7 @@ assert_eq "watch does nothing while supervise is off" "" "$out"
 assert_eq "and keeps no state" no "$([ -f "$WF" ] && echo yes || echo no)"
 
 # --- the wake ladder ---
-hcs '{"address":"t9","agent":"opencode","status":"idle","state":"live"}'
+hcs '{"address":"t9","agent":"opencode","status":"idle","state":"live","cwd":"'"$R"'"}'
 out=$(watch)
 assert_has "10m unread wakes the owner" "wake $W for $i1: herdr" "$out"
 assert_eq "through its own Herdr terminal, fixed text only" "t9 agent-bus: packet $i1 [needs-review] waits for you. Run: agent-bus read" "$(cat "$T/hc.sends")"
@@ -110,18 +112,18 @@ s resolve "$old" --reason canceled >/dev/null
 # Herdr safety: never type into a shell, never interrupt a turn.
 : >"$T/hc.sends"
 i3=$(s post --to "$W" --state needs-review -m "# three" | idof); age_msg "$i3" 700
-hcs '{"address":"t9","agent":"fish","status":"idle","state":"live"}'
+hcs '{"address":"t9","agent":"fish","status":"idle","state":"live","cwd":"'"$R"'"}'
 out=$(watch)
 assert_eq "a terminal whose agent exited gets no text" "" "$(cat "$T/hc.sends")"
 i4=$(s post --to "$W" --state needs-review -m "# four" | idof); age_msg "$i4" 700
-hcs '{"address":"t9","agent":"opencode","status":"working","state":"live"}'
+hcs '{"address":"t9","agent":"opencode","status":"working","state":"live","cwd":"'"$R"'"}'
 out=$(watch)
 assert_has "a terminal mid-turn is left alone" "wake $W for $i4: busy" "$out"
 w read >/dev/null; watch >/dev/null
 s resolve "$i1" "$i2" "$i3" "$i4" --reason done >/dev/null
 
 # A terminal a person types in is never typed into.
-hcs '{"address":"t9","agent":"opencode","status":"idle","state":"live"}'
+hcs '{"address":"t9","agent":"opencode","status":"idle","state":"live","cwd":"'"$R"'"}'
 : >"$T/hc.sends"
 i8=$(s post --to "$W" --state needs-review -m "# lead terminal" | idof); age_msg "$i8" 700
 out=$(cd "$R" && AGENT_BUS_WATCH_NO_TYPE=t9 "${SON[@]}" "$BIN" watch --here)
@@ -131,6 +133,20 @@ i9=$(s post --to "$W" --state needs-review -m "# lead seat" | idof); age_msg "$i
 out=$(cd "$R" && AGENT_BUS_WATCH_LEAD="$W" "${SON[@]}" "$BIN" watch --here)
 assert_eq "the lead's own seat is never typed into either" "" "$(cat "$T/hc.sends")"
 w read >/dev/null; s resolve "$i8" "$i9" --reason done >/dev/null; watch >/dev/null
+
+# Two OpenCode terminals in one worktree: neither is typed into.
+: >"$T/hc.sends"
+hcs '{"address":"t9","agent":"opencode","status":"idle","state":"live","cwd":"'"$R"'"},{"address":"t8","agent":"opencode","status":"idle","state":"live","cwd":"'"$R"'"}'
+i10=$(s post --to "$W" --state needs-review -m "# ambiguous" | idof); age_msg "$i10" 700
+out=$(watch)
+assert_eq "an OpenCode seat with two terminals in its worktree gets no typed wake" "" "$(cat "$T/hc.sends")"
+# A terminal recorded by a seat but now running another tool: not typed into.
+hcs '{"address":"t3","agent":"opencode","status":"idle","state":"live","cwd":"/elsewhere"}'
+CL=$(addr seat cl claude cl)
+i11=$(s post --to "$CL" --state needs-review -m "# wrong tool" | idof); age_msg "$i11" 700
+out=$(watch)
+assert_eq "a terminal running a different tool than the seat is not typed into" "" "$(cat "$T/hc.sends")"
+w read >/dev/null; seat cl claude cl read >/dev/null; s resolve "$i10" "$i11" --reason done >/dev/null; watch >/dev/null
 
 # Gone owner: straight to the PM.
 g() { AGENT_BUS_LANE=feat seat g claude gone "$@"; }
@@ -145,7 +161,7 @@ s resolve "$i5" --reason canceled >/dev/null; watch >/dev/null
 i6=$(s post --to "$W" --state handoff -m "# long job" | idof)
 w read >/dev/null
 w claim a.txt >/dev/null
-hcs '{"address":"t9","agent":"opencode","status":"idle","state":"live"}'
+hcs '{"address":"t9","agent":"opencode","status":"idle","state":"live","cwd":"'"$R"'"}'
 out=$(watch)
 assert_lacks "a seat active just now is not stale" "is stale" "$out"
 age_seat "$W" 1300; age_msg "$i6" 1300
@@ -226,7 +242,7 @@ R2="$T/other"; mkdir -p "$R2"
 ( cd "$R2" && git init -q && git config user.email t@t && git config user.name t && echo b >b.txt && git add b.txt \
   && GIT_AUTHOR_DATE=2020-01-01T00:00:00Z GIT_COMMITTER_DATE=2020-01-01T00:00:00Z git commit -qm init )
 ld() { (cd "$R2" && AGENT_BUS_SESSION=ld AGENT_BUS_TOOL=claude AGENT_BUS_WT=main "$BIN" "$@"); }
-hcs '{"address":"t9","agent":"opencode","status":"idle","state":"live"}'
+hcs '{"address":"t9","agent":"opencode","status":"idle","state":"live","cwd":"'"$R"'"}'
 : >"$T/hc.sends"; w read >/dev/null
 x1=$(ld post --to "$W" --state handoff -m "# from the lead's repo" | idof); age_msg "$x1" 700
 out=$(cd "$R2" && "${SON[@]}" "$BIN" watch --here)
@@ -241,7 +257,7 @@ ld resolve "$x1" "$x2" --reason done >/dev/null
 
 # --- launchd mode: from anywhere, every repo ---
 : >"$T/hc.sends"
-hcs '{"address":"t9","agent":"opencode","status":"idle","state":"live"}'
+hcs '{"address":"t9","agent":"opencode","status":"idle","state":"live","cwd":"'"$R"'"}'
 w read >/dev/null
 i7=$(s post --to "$W" --state needs-review -m "# from launchd" | idof); age_msg "$i7" 700
 out=$(cd "$T" && "${SON[@]}" "$BIN" watch)

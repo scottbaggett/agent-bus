@@ -84,7 +84,7 @@ async function runIn(directory: string, args: string[], extraEnv: Record<string,
 function runner(directory: string) {
   // Primary sessions only. Subagent/child sessions must not rebind identity:
   // digest injection and idle wake belong to the session the human is in.
-  const sessions = new Map<string, { idle: boolean; polling: boolean }>()
+  const sessions = new Map<string, { idle: boolean; polling: boolean; checkedAt?: number }>()
   // Which session's turn is currently running. v2's shell create.before event
   // carries no sessionID (v1's shell.env did), so this is how a Bash child
   // still gets stamped with the session that spawned it. Best-effort: with two
@@ -166,9 +166,21 @@ function runner(directory: string) {
      * If both attempts fail the items drop out of the digest but stay open:
      * they still show in `agent-bus triage` under their owner.
      */
-    async wake(sessionID: string, deliver: (text: string) => Promise<boolean>) {
+    async wake(sessionID: string, deliver: (text: string) => Promise<boolean>, poll = false) {
       const state = sessions.get(sessionID)
       if (!state?.idle || state.polling) return
+      // An idle session costs nothing: the poll asks the CLI only when the
+      // ledger changed since this session last asked, and at most once per
+      // POLL_MIN. A turn boundary (session.idle) always asks.
+      if (poll) {
+        const now = Date.now()
+        const last = state.checkedAt ?? 0
+        if (last && ledgerChangedAt() <= last) return
+        if (now - last < POLL_MIN_MS) return
+        state.checkedAt = now
+      } else {
+        state.checkedAt = Date.now()
+      }
       state.polling = true
       try {
         const verdict = await run(["stop-hook"], sessionID)
@@ -217,12 +229,24 @@ function sameDir(a: string | undefined, b: string | undefined) {
   return trim(a) === trim(b)
 }
 
+// The ledger's last change, read with a stat (no process). A poll that finds
+// it unchanged since a session last asked spawns nothing. Unknown means "ask".
+const LEDGER = `${process.env.AGENT_BUS_HOME || `${process.env.HOME}/.agents/bus`}/ledger.jsonl`
+const POLL_MIN_MS = Number(process.env.AGENT_BUS_OPENCODE_POLL_MIN || 30) * 1000
+function ledgerChangedAt(): number {
+  try {
+    return Bun.file(LEDGER).lastModified || Number.MAX_SAFE_INTEGER
+  } catch {
+    return Number.MAX_SAFE_INTEGER
+  }
+}
+
 function pollEvery(tick: () => void) {
-  // 30s: each poll is one CLI run per idle session, and the bus supervisor
-  // (agent-bus watch) wakes idle seats too. 2s polled dozens of sessions into
-  // most of a laptop's CPU.
-  const configured = Number(process.env.AGENT_BUS_OPENCODE_POLL_MS || 30000)
-  const ms = Number.isFinite(configured) && configured >= 250 ? configured : 30000
+  // A tick is a stat per idle session, not a CLI run: wake() spawns the CLI
+  // only when the ledger changed (see ledgerChangedAt). 2s of CLI runs per
+  // idle session once took most of a laptop's CPU.
+  const configured = Number(process.env.AGENT_BUS_OPENCODE_POLL_MS || 10000)
+  const ms = Number.isFinite(configured) && configured >= 250 ? configured : 10000
   const timer = setInterval(tick, ms)
   ;(timer as { unref?: () => void }).unref?.()
   return () => clearInterval(timer)
@@ -378,7 +402,7 @@ const v2: Plugin.Plugin = {
     const stopPolling = pollEvery(() => {
       for (const sessionID of bus.sessions.keys()) {
         void (async () => {
-          await bus.wake(sessionID, (text) => inject(sessionID, text, true))
+          await bus.wake(sessionID, (text) => inject(sessionID, text, true), true)
         })()
       }
     })

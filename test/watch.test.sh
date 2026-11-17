@@ -397,6 +397,9 @@ ans=$(s reply "$qq" -m "a.txt" | idof)
 age_msg "$qq" 800; age_msg "$ans" 10
 out=$(cd "$R" && AGENT_BUS_WATCH_WAKE_AFTER=5 "${SON[@]}" "$BIN" watch --here)
 assert_has "an unread answer to an OpenCode seat enters the wake ladder" "wake $W for $ans: herdr" "$out"
+age_stage "$ans" 700
+out=$(cd "$R" && AGENT_BUS_WATCH_WAKE_AFTER=5 "${SON[@]}" "$BIN" watch --here)
+assert_lacks "an unread answer never climbs to a PM or the lead" "alert ->" "$out"
 w read >/dev/null; watch >/dev/null
 ib=$(s post --to "$W" --state handoff -m "# build it" | idof)
 w read >/dev/null

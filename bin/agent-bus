@@ -2279,16 +2279,17 @@ cmd_peer() {
 #   ask_lead  when agents stop and ask the lead: any of scope,destructive,
 #             disagreement — or never
 #   decisions record decisions and show them at session start: on | off
-POLICY_DEFAULTS='{"owner":"refuse","review":"requester","ask_lead":"scope,destructive","decisions":"on","supervise":"off","fyi_wake":"on","thread_reports":"off","proof":"off"}'
+POLICY_DEFAULTS='{"owner":"refuse","review":"requester","ask_lead":"scope,destructive","decisions":"on","supervise":"off","fyi_wake":"on","thread_reports":"off","proof":"off","retire":"off"}'
 # supervise, fyi_wake and thread_reports change delivery for every seat; they
 # stay at today's behaviour until someone turns them on.
-POLICY_KEYS='owner review ask_lead decisions supervise fyi_wake thread_reports proof'
+POLICY_KEYS='owner review ask_lead decisions supervise fyi_wake thread_reports proof retire'
 
 policy_valid() { # key value
   case "$1" in
     owner) in_list "$2" 'refuse lead pm' ;;
     review) in_list "$2" 'requester lead none' ;;
     decisions|supervise|fyi_wake|thread_reports) in_list "$2" 'on off' ;;
+    retire) in_list "$2" 'off dry on' ;;
     proof) in_list "$2" 'off warn require' ;;
     ask_lead) [ "$2" = never ] || { local v; for v in ${2//,/ }; do in_list "$v" 'scope destructive disagreement' || return 1; done; } ;;
     *) return 1 ;;
@@ -2917,7 +2918,7 @@ worktree_clean() { [ -d "$1" ] && [ -z "$(git -C "$1" status --porcelain 2>/dev/
 watch_repo() {
   # Nothing from before the watch was switched on (for this repo) ever enters
   # the ladder: turning it on, or back on, must not wake anyone about history.
-  if [ "$(policy_get supervise)" != on ]; then
+  if [ "$(policy_get supervise)" != on ] && [ -z "${WATCH_RETIRE_ONLY:-}" ]; then
     [ -f "$(watch_file)" ] && watch_update 'del(.since[$rid])' --arg rid "$REPO_ID"
     return 0
   fi
@@ -2996,11 +2997,20 @@ watch_repo() {
   local leadlines=''
   lead_line() { leadlines="$leadlines$1"$'\n'; }
 
+  # PMs and the lead seat: never stale, never retired.
+  local pms
+  pms=$( { pm_seat; echo; jq -r '.[]' <<<"$lpms"; echo "$lead"; } | jq -Rsc 'split("\n") | map(select(length > 0))')
+  if [ -n "${WATCH_RETIRE_ONLY:-}" ]; then watch_retire "${WATCH_RETIRE_MODE:-dry}"; return 0; fi
+
   # 1. The wake ladder.
   local acts; acts=$(jq -c --argjson st "$st" --argjson now "$now" --argjson w "$W" '
     .[] | select(.owner != "@lead" and .owner != "") | . as $i
     | ($st.items[.id] // {stage: 0, at: (.epoch // 0)}) as $s
     | if .read then {id, act: "forget"}
+      # An answer (a reply that asks nothing) wakes its recipient once and goes
+      # no further: no PM, no lead.
+      elif (.reply // false) then
+        (if $s.stage == 0 and $now - (.epoch // 0) >= $w and .owner_live then {id, act: "wake"} else empty end)
       elif $s.stage == 0 and $now - (.epoch // 0) >= $w then
         (if .owner_live then {id, act: "wake"} else {id, act: "pm"} end)
       elif $s.stage == 1 and $now - $s.at >= $w then {id, act: "pm"}
@@ -3061,8 +3071,6 @@ watch_repo() {
   # item's sender after it arrived: the turn is the other side's), any seat
   # holding a PM role (idle between items is its job), and the lead's seat.
   # Only this repo's seats are judged here; each repo's pass judges its own.
-  local pms
-  pms=$( { pm_seat; echo; jq -r '.[]' <<<"$lpms"; echo "$lead"; } | jq -Rsc 'split("\n") | map(select(length > 0))')
   holders=$(jq -c --argjson items "$items" --argjson claims "$claims" --arg rid "$REPO_ID" \
     --argjson lastto "$lastto" --argjson pms "$pms" \
     --argjson ex "$(printf '%s' "$exempt" | jq -Rc 'split(" ") | map(select(length > 0))')" '
@@ -3139,6 +3147,10 @@ watch_repo() {
     | ($st.seats[$a] // null) | select(. != null and (.to_lead // false))
     | "stale\t- \($a) quiet since \(($now - .last) / 60 | floor)m ago while holding work"' <<<"$seats")
 
+  # 2b. Retire finished, idle builders (policy retire=dry lists, =on acts).
+  local rmode; rmode=${WATCH_RETIRE_MODE:-$(policy_get retire)}
+  [ "$rmode" = off ] || watch_retire "$rmode"
+
   # 3. Lanes whose PM is not live. `agent-bus lane park <lane>` silences one
   # until a PM takes the role again (the role file is newer than the park).
   local l pmaddr parks
@@ -3180,6 +3192,147 @@ watch_repo() {
 # The lead's one rolling packet: everything every repo pass found for the
 # lead, in one open packet whose body is rewritten in place as the list
 # changes. It closes itself when the list is empty.
+# ------------------------------------------------------------------ retire
+#
+# Policy retire (off | dry | on): a builder whose work is finished and who has
+# sat idle is retired: its Herdr terminal ended and its compose test stacks
+# taken down. Its session is kept (resumable), and nothing in its worktree or
+# on the bus is touched. A dirty or unpushed worktree is never retired; its PM
+# hears instead.
+#
+# Finished: its branch's MR/PR is merged or closed, or every work item sent
+# to it is closed. Idle: no activity for watch.retire_after (1800s).
+
+GLAB_BIN="${AGENT_BUS_GLAB:-glab}"
+GH_BIN="${AGENT_BUS_GH:-gh}"
+DOCKER_BIN="${AGENT_BUS_DOCKER:-docker}"
+
+# merged | closed | open | unknown for the branch's MR (GitLab) or PR (GitHub);
+# a branch already in the trunk counts as merged. Cached 10 minutes.
+branch_review_state() { # cwd branch
+  local cwd="$1" b="$2" key st url t
+  case "$b" in ''|-|develop|main|master|detached@*) printf unknown; return 0 ;; esac
+  key="$cwd|$b"
+  st=$(watch_get '.mr // {}' | jq -r --arg k "$key" --argjson now "$(now_epoch)" '.[$k] | select(. != null and .at >= $now - 600) | .state')
+  if [ -z "$st" ]; then
+    url=$(git -C "$cwd" remote get-url origin 2>/dev/null || true)
+    # Every review for the branch, any state (`mr view <branch>` finds only
+    # open ones). An open one wins: the work isn't finished.
+    case "$url" in
+      *github.com*) st=$( cd "$cwd" && timeout 15 "$GH_BIN" pr list --head "$b" --state all --json state 2>/dev/null \
+                          | jq -r 'map(.state | ascii_downcase) | if index("open") then "open" elif index("merged") then "merged"
+                                   elif index("closed") then "closed" else empty end' 2>/dev/null || true) ;;
+      *) st=$( cd "$cwd" && timeout 15 "$GLAB_BIN" mr list --source-branch "$b" --all --output json 2>/dev/null \
+                 | jq -r 'map(.state) | if index("opened") then "open" elif index("merged") then "merged"
+                          elif index("closed") then "closed" else empty end' 2>/dev/null || true) ;;
+    esac
+    case "$st" in merged|closed) ;; open|opened) st=open ;; *) st='' ;; esac
+    if [ -z "$st" ]; then
+      for t in origin/develop origin/main origin/master; do
+        git -C "$cwd" rev-parse --verify --quiet "$t" >/dev/null 2>&1 || continue
+        git -C "$cwd" merge-base --is-ancestor "refs/heads/$b" "$t" 2>/dev/null && st=merged
+        break
+      done
+    fi
+    st=${st:-unknown}
+    watch_update '.mr[$k] = {state: $s, at: $now}' --arg k "$key" --arg s "$st" --argjson now "$(now_epoch)"
+  fi
+  printf '%s' "$st"
+}
+
+# Whether every commit in the worktree is on a remote, and nothing is
+# uncommitted.
+worktree_saved() { # cwd
+  [ -d "$1" ] || return 1
+  [ -z "$(git -C "$1" status --porcelain 2>/dev/null | head -1)" ] || return 1
+  [ -z "$(git -C "$1" rev-list -1 HEAD --not --remotes 2>/dev/null)" ]
+}
+
+# Compose projects whose working_dir is inside the worktree, minus salt-local
+# and watch.keep_stacks.
+worktree_stacks() { # cwd
+  command -v "$DOCKER_BIN" >/dev/null 2>&1 || return 0
+  local keep; keep="salt-local $(watch_conf keep_stacks '' | tr ',' ' ')"
+  "$DOCKER_BIN" ps -a --format '{{.Label "com.docker.compose.project"}}	{{.Label "com.docker.compose.project.working_dir"}}' 2>/dev/null \
+    | sort -u | while IFS=$'\t' read -r p wd; do
+        [ -n "$p" ] && [ -n "$wd" ] || continue
+        case "$wd/" in "$1"/*) in_list "$p" "$keep" || printf '%s\n' "$p" ;; esac
+      done | sort -u
+}
+
+resume_hint() { # seat-row
+  local sess cwd; sess=$(jq -r '.session // ""' <<<"$1"); cwd=$(jq -r '.cwd // ""' <<<"$1")
+  case "$(jq -r '.tool // ""' <<<"$1")" in
+    opencode) printf 'cd %s && opencode -s %s' "$cwd" "$sess" ;;
+    claude) printf 'cd %s && claude --resume %s' "$cwd" "$sess" ;;
+    codex) printf 'cd %s && codex resume %s' "$cwd" "$sess" ;;
+  esac
+}
+
+# One pass of the reaper over this repo's seats. Needs watch_repo's locals:
+# seats, items-independent ledger lookups, terms, lead, exempt, pms, now.
+watch_retire() { # mode
+  local mode="$1" after row addr t st cwd branch done_why act_at lastp sib sa target stacks p hint
+  after=$(watch_conf retire_after 1800)
+  local sent; sent=$(lq '[$L[] | select(.kind == "msg" and sup) | {to, id}] | group_by(.to) | map({(.[0].to): map(.id)}) | add // {}')
+  local openids; openids=$(lq 'closed($L) as $c | [$L[] | select(.kind == "msg" and sup and ($c[.id] | not)) | .id]')
+  local rmsgs; rmsgs=$(lq '[$L[] | select(.kind == "msg")] | group_by(.from) | map({(.[0].from): (map(.epoch // 0) | max)}) | add // {}')
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    addr=$(jq -r .addr <<<"$row")
+    t=$(seat_terminal "$row" "$terms"); [ -n "$t" ] || continue
+    st=$(jq -r --arg t "$t" '.[$t].status // ""' <<<"$terms")
+    [ "$st" = working ] && continue
+    [ -n "$(jq -r --arg a "$addr" '.retired[$a] // empty' <<<"$(watch_get '.')")" ] && continue
+    cwd=$(jq -r '.cwd // ""' <<<"$row"); branch=$(jq -r '.branch // ""' <<<"$row")
+    # Finished?
+    done_why=''
+    if jq -e --arg a "$addr" --argjson open "$openids" '(.[$a] // []) as $m | ($m | length) > 0 and ($m | all(. as $i | $open | index($i) == null))' <<<"$sent" >/dev/null; then
+      done_why="every work item sent to it is closed"
+    else
+      case "$(branch_review_state "$cwd" "$branch")" in
+        merged) done_why="its branch $branch is merged" ;;
+        closed) done_why="its branch's review was closed" ;;
+      esac
+    fi
+    [ -n "$done_why" ] || continue
+    # Idle long enough, across every worktree its session works in?
+    act_at=0
+    while IFS= read -r sib; do
+      [ -n "$sib" ] || continue
+      lastp=$(jq -r --arg a "$(jq -r .addr <<<"$sib")" '.[$a] // 0' <<<"$rmsgs")
+      sa=$(seat_activity "$sib" "$lastp" "$terms" "$now"); (( sa > act_at )) && act_at=$sa
+    done < <(jq -c --argjson r "$row" '.[] | select(.addr == $r.addr or ((.session // "local") != "local"
+               and .session == $r.session and (.tool // "") == ($r.tool // "")))' <<<"$seats")
+    (( now - act_at >= after )) || continue
+    target=$(pm_for "$(jq -r '.lane // ""' <<<"$row")" "$addr")
+    if ! worktree_saved "$cwd"; then
+      [ -n "$(jq -r --arg a "$addr" '.retire_held[$a] // empty' <<<"$(watch_get '.')")" ] && continue
+      printf '  %s: finished (%s) but its worktree has uncommitted or unpushed work; not retired\n' "$addr" "$done_why"
+      [ "$mode" = on ] || continue
+      watch_update '.retire_held[$a] = $now' --arg a "$addr" --argjson now "$now"
+      cmd_post --to "$target" --state fyi --subject "watch: $addr is finished but holds unsaved work" \
+        -m "$addr looks finished ($done_why) and idle $(( (now - act_at) / 60 ))m, but its worktree $cwd has uncommitted or unpushed work, so it was not retired. Save it or decide what to do with it." >/dev/null 2>&1 || true
+      continue
+    fi
+    stacks=$(worktree_stacks "$cwd" | tr '\n' ' '); hint=$(resume_hint "$row")
+    if [ "$mode" != on ]; then
+      printf '  would retire %s (%s, terminal %s%s): %s\n' "$addr" "$done_why" "$t" "${stacks:+, stacks: ${stacks% }}" "$hint"
+      continue
+    fi
+    "$HC_BIN" kill "$t" >/dev/null 2>&1 || true
+    "$HC_BIN" rm "$t" >/dev/null 2>&1 || true
+    for p in $stacks; do "$DOCKER_BIN" compose -p "$p" down -v >/dev/null 2>&1 || true; done
+    watch_update '.retired[$a] = {at: $now, terminal: $t, stacks: $s}' --arg a "$addr" --argjson now "$now" --arg t "$t" --arg s "${stacks% }"
+    printf '  retired %s: %s; terminal %s ended%s\n' "$addr" "$done_why" "$t" "${stacks:+, stacks down: ${stacks% }}"
+    cmd_post --to "$target" --state fyi --subject "watch: retired $addr" \
+      -m "Retired $addr: $done_why, idle $(( (now - act_at) / 60 ))m, worktree clean and pushed. Ended terminal $t${stacks:+ and took down ${stacks% }}. The session is kept; resume with: $hint" >/dev/null 2>&1 || true
+  done < <(jq -c --arg rid "$REPO_ID" --argjson pms "$pms" --argjson ex "$(printf '%s' "$exempt" | jq -Rc 'split(" ") | map(select(length > 0))')" '
+    .[] | select(.repo_id == $rid and .live and ((.tool // "") | IN("claude", "opencode", "codex")))
+    | .addr as $a | select(($pms | index($a)) == null)
+    | select([.addr, ((.tool // "") + "/" + (.wt // "")), (.tool // "")] | any(. as $k | $ex | index($k)) | not)' <<<"$seats")
+}
+
 watch_lead_digest() {
   local now lead lines open id body
   now=$(now_epoch); lead=$(watch_conf lead @lead)
@@ -3237,6 +3390,7 @@ cmd_watch() {
   local here=0
   case "${1:-}" in
     --here) here=1 ;;
+    --retire-dry-run) export WATCH_RETIRE_ONLY=1 WATCH_RETIRE_MODE=dry; [ "${2:-}" = --here ] && here=1 ;;
     --install) watch_install; return ;;
     --uninstall) watch_uninstall; return ;;
     --status)
@@ -3247,7 +3401,7 @@ cmd_watch() {
       watch_get '{tracked: ((.items // {}) | length), stale: ((.seats // {}) | keys), dark_lanes: ((.dark // {}) | keys)}'
       return ;;
     '') ;;
-    *) die "watch: usage — agent-bus watch [--here | --status | --install | --uninstall]" ;;
+    *) die "watch: usage — agent-bus watch [--here | --status | --retire-dry-run [--here] | --install | --uninstall]" ;;
   esac
   # Its own lock directory: a pass may take a while, and bus_lock is for
   # short sections. It holds the pass's pid: a killed pass's lock is taken at
@@ -3262,17 +3416,22 @@ cmd_watch() {
     else printf 'watch: another pass is running%s\n' "${holder:+ (pid $holder)}"; return 0; fi
   fi
   printf '%s\n' "$$" >"$lockd/pid"
-  if ((here)); then watch_as_self; watch_repo; [ "$(policy_get supervise)" = on ] && watch_lead_digest
+  if ((here)); then watch_as_self; watch_repo; [ -z "${WATCH_RETIRE_ONLY:-}" ] && [ "$(policy_get supervise)" = on ] && watch_lead_digest
   else
-    local cwds c last=''
+    local cwds c last='' rid seen=' '
     while IFS= read -r cwds; do
       for c in $(jq -r '.[]' <<<"$cwds"); do
         [ -d "$c" ] || continue
+        # Older rows can carry another id for the same repo: one pass per
+        # repo, by the id its folder resolves to now.
+        rid=$(cd "$c" && cd "$(git rev-parse --git-common-dir 2>/dev/null || echo .)" && pwd | shasum -a 256 | cut -c1-16)
+        case "$seen" in *" $rid "*) break ;; esac
+        seen="$seen$rid "
         ( cd "$c" && unset AGENT_BUS_REPO_ID && watch_as_self && watch_repo ) || true
         last="$c"; break
       done
     done < <(watch_repos)
-    [ -n "$last" ] && ( cd "$last" && unset AGENT_BUS_REPO_ID && watch_as_self \
+    [ -n "$last" ] && [ -z "${WATCH_RETIRE_ONLY:-}" ] && ( cd "$last" && unset AGENT_BUS_REPO_ID && watch_as_self \
       && [ "$(policy_get supervise)" = on ] && watch_lead_digest ) || true
   fi
   rm -f "$lockd/pid"; rmdir "$lockd" 2>/dev/null || true

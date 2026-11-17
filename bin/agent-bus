@@ -2028,7 +2028,8 @@ peer_ingest() { # from-host
     done
   fi
   bus_lock "$LEDGER" 10
-  local have=("$LEDGER"); [ -f "$BUS/ledger.archive.jsonl" ] && have+=("$BUS/ledger.archive.jsonl")
+  local have=("$LEDGER") af
+  for af in "$BUS/ledger.archive.jsonl" "$BUS/ledger.archive.jsonl.1"; do [ -f "$af" ] && have+=("$af"); done
   touch "$LEDGER"
   new=$(awk 'FILENAME != ARGV[ARGC-1] { seen[$0]; next } !($0 in seen) { seen[$0]; print }' "${have[@]}" "$d/rows.ok")
   [ -n "$new" ] && printf '%s\n' "$new" >>"$LEDGER"
@@ -2305,7 +2306,7 @@ policy_summary() {
 # Whether any agent has posted in this repo yet. A new repo gets a short intro
 # from /agent-bus and one tip at its first work item, instead of questions.
 repo_is_new() {
-  ! grep -qsF "\"repo_id\":\"$REPO_ID\"" "$LEDGER" "$BUS/ledger.archive.jsonl"
+  ! grep -qsF "\"repo_id\":\"$REPO_ID\"" "$LEDGER" "$BUS/ledger.archive.jsonl" "$BUS/ledger.archive.jsonl.1"
 }
 
 orient() {
@@ -4025,20 +4026,25 @@ JQ_OPEN_IDS="$JQ_LANE$JQ_CLOSE"'[inputs | fromjson? // empty] as $L
 # Bring open items that an older gc archived back into the ledger. Their bodies
 # were already deleted by that gc and cannot be recovered.
 gc_restore_open() {
-  local arch="$BUS/ledger.archive.jsonl" open n
-  [ -f "$arch" ] || { printf 'gc: no archive, nothing to restore\n'; return 0; }
+  local arch="$BUS/ledger.archive.jsonl" files=() f open n total=0
+  # The previous archive (.1, see cmd_gc) holds history too, so it is searched as well.
+  for f in "$arch" "$arch.1"; do [ -f "$f" ] && files+=("$f"); done
+  ((${#files[@]})) || { printf 'gc: no archive, nothing to restore\n'; return 0; }
   bus_lock "$LEDGER" 30
-  open=$(cat "$arch" "$LEDGER" | jq -nRc "$JQ_OPEN_IDS")
-  jq -cR --argjson open "$open" 'fromjson? // empty | select(.kind == "msg" and $open[.id])' "$arch" >"$arch.restore"
-  n=$(grep -c . "$arch.restore" 2>/dev/null || true)
-  if ((n > 0)); then
-    # Archive keeps every other line byte-for-byte; unparseable lines stay too.
-    jq -rR --argjson open "$open" '. as $raw | (fromjson? // {}) | select(.kind != "msg" or ($open[.id // ""] | not)) | $raw' \
-      "$arch" >"$arch.keep" && cat "$arch.restore" >>"$LEDGER" && mv "$arch.keep" "$arch"
-  fi
-  rm -f "$arch.restore" "$arch.keep"
+  open=$(cat "${files[@]}" "$LEDGER" | jq -nRc "$JQ_OPEN_IDS")
+  for f in "${files[@]}"; do
+    jq -cR --argjson open "$open" 'fromjson? // empty | select(.kind == "msg" and $open[.id])' "$f" >"$f.restore"
+    n=$(grep -c . "$f.restore" 2>/dev/null || true)
+    if ((${n:-0} > 0)); then
+      # Archive keeps every other line byte-for-byte; unparseable lines stay too.
+      jq -rR --argjson open "$open" '. as $raw | (fromjson? // {}) | select(.kind != "msg" or ($open[.id // ""] | not)) | $raw' \
+        "$f" >"$f.keep" && cat "$f.restore" >>"$LEDGER" && mv "$f.keep" "$f"
+      total=$((total + n))
+    fi
+    rm -f "$f.restore" "$f.keep"
+  done
   bus_unlock "$LEDGER"
-  printf 'gc: restored %s open item(s) from the archive (bodies were already pruned)\n' "${n:-0}"
+  printf 'gc: restored %s open item(s) from the archive (bodies were already pruned)\n' "$total"
 }
 
 cmd_gc() {
@@ -4110,6 +4116,12 @@ cmd_gc() {
       "$LEDGER" >"$LEDGER.keep" && cat "$LEDGER.drop" >>"$BUS/ledger.archive.jsonl" && mv "$LEDGER.keep" "$LEDGER"
   fi
   rm -f "$LEDGER.drop" "$LEDGER.keep"
+  # The archive is bounded too: past its cap it moves whole to .1, and a second rotation
+  # replaces .1, so the older archive is deleted (retention: the last two archives).
+  local archive="$BUS/ledger.archive.jsonl" cap="${AGENT_BUS_ARCHIVE_MAX_BYTES:-10485760}"
+  if [ -f "$archive" ] && [ "$(wc -c <"$archive" | tr -d ' ')" -gt "$cap" ]; then
+    mv -f "$archive" "$archive.1"
+  fi
   bus_unlock "$LEDGER"
   printf 'gc: %s claims, %s seats, %s bodies, %s roles removed; %s ledger rows rotated (>%sd)\n' \
     "$n_claim" "$n_seat" "$n_msg" "$n_role" "$n_rot" "$GC_DAYS"
@@ -4493,6 +4505,7 @@ agent-bus — handoff bus for coding agents sharing repos and worktrees.
   gc [--restore-open]         prune expired state (also runs daily from hooks); open
                               work is never archived. --restore-open brings back
                               open items an older gc archived
+                              (from the archive and its .1)
 
 Work items: needs-review, blocked, handoff and question packets stay open,
   owned by their addressee, until closed with a reason. The PM owns any of them

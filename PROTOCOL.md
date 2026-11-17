@@ -658,6 +658,8 @@ timeout.  The Python Codex adapter (`lib/codex_queue.py`) uses the same
 ~/.agents/bus/
   ledger.jsonl          append-only: msg | resolve | claim | claim-break | delivery
   ledger.archive.jsonl  rows older than AGENT_BUS_GC_DAYS (14), rotated by gc
+  ledger.archive.jsonl.1  the previous archive: past AGENT_BUS_ARCHIVE_MAX_BYTES (10 MB) gc moves the archive here,
+                        replacing (deleting) the older .1; retention is the last two archives, about 10-20 MB
   msg/<id>.md           packet bodies
   seats/<seat>.json     seat registry (grok seats include grok_webhook, grok_secret_env)
   secrets/grok_<n>.secret  0600 webhook bearer token (written at grok register)
@@ -679,7 +681,8 @@ from hooks at most once a day (`AGENT_BUS_NO_AUTO_GC=1` to opt out). It never
 closes a work item, and never archives an open one: open items and their bodies
 stay in `ledger.jsonl` however old they are, so `triage` always sees them.
 Before this rule, gc archived open items with everything else after 14 days;
-`agent-bus gc --restore-open` moves those back (their bodies are already gone).
+`agent-bus gc --restore-open` moves those back, from the archive and `.1` (their bodies are already gone).
+Peer ingest and the first-run check also read `.1`, so a rotation hides no history from them.
 
 ## Codex hook installation
 

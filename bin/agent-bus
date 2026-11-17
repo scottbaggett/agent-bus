@@ -739,9 +739,9 @@ render_body() {
 # Render packet rows (one JSON per line on stdin); ids land in RENDERED_IDS.
 RENDERED_IDS='[]'
 render_packets() {
-  local n=0 id from state epoch branch subj touched own from_pm re close
+  local n=0 id from state epoch branch subj touched own from_pm re close pline psha tip
   RENDERED_IDS='[]'
-  while IFS=$'\037' read -r id from state epoch branch subj touched own from_pm re close user; do
+  while IFS=$'\037' read -r id from state epoch branch subj touched own from_pm re close user pline psha; do
     [ -n "$id" ] || continue
     n=$((n + 1))
     [[ "$epoch" =~ ^[0-9]+$ ]] || epoch=$(now_epoch)
@@ -756,16 +756,23 @@ render_packets() {
     [ -n "$subj" ] && printf '    %s\n' "$subj"
     [ -n "$re" ] && printf '    re: %s%s\n' "$re" "${close:+ (closed it: $close)}"
     [ -n "$touched" ] && printf '    touched: %s\n' "$touched"
+    [ -n "$pline" ] && printf '    %s\n' "$pline"
+    # A branch that moved on since the request: the reviewer is not looking
+    # at what was asked about.
+    if [ -n "$psha" ] && [ -n "$branch" ] && [ "$branch" != - ] && [ -n "$TOP" ]; then
+      tip=$(git -C "$TOP" rev-parse --verify -q "refs/heads/$branch" 2>/dev/null || true)
+      [ -n "$tip" ] && [ "$tip" != "$psha" ] && printf '    branch %s has moved to %s since this request (asked about %s)\n' "$branch" "${tip:0:7}" "${psha:0:7}"
+    fi
     printf '    id: %s\n' "$id"
     if ! valid_id "$id"; then printf '    (malformed id — body skipped)\n'
     elif [ ! -f "$BUS/msg/$id.md" ]; then :
     elif ((n <= 3)); then printf -- '    ---\n'; render_body "$BUS/msg/$id.md" "$id"
     else printf '    (body suppressed — agent-bus show %s)\n' "$id"; fi
     RENDERED_IDS=$(jq -c --arg id "$id" '. + [$id]' <<<"$RENDERED_IDS")
-  done < <(jq -r 'def clean: tostring | gsub("[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]"; "");
+  done < <(jq -r "$JQ_PROOF"'def clean: tostring | gsub("[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]"; "");
     [.id, .from, .state, (.epoch // 0), (.branch // "-"), (.subject // ""),
      ((.touched // []) | join(", ")), (.own // false), (.from_pm // false),
-     (.re // ""), (.close // ""), (.user // false)] | map(clean) | join("\u001f")')
+     (.re // ""), (.close // ""), (.user // false), ([proof_line] | first // ""), (.sha // "")] | map(clean) | join("\u001f")')
 }
 
 HINTS='reply and close: agent-bus reply <id> -m "what you did"   (--reason denied|canceled|duplicate|superseded; --keep-open)
@@ -1597,7 +1604,7 @@ unowned_hint() { # state to
 cmd_post() {
   local to='' state='fyi' subject='' body='' bodyfile='' touched='[]' re='' close=''
   local resume="${AGENT_BUS_RESUME:-0}"
-  local review_arg='' review_of='' review='' new_thread=0 fold=''
+  local review_arg='' review_of='' review='' new_thread=0 fold='' proof_arg=''
 
   while [ $# -gt 0 ]; do
     # Compatibility with existing callers; Claude-to-Claude posts are allowed.
@@ -1615,6 +1622,7 @@ cmd_post() {
       --close) close="$2" ;;
       --review) review_arg="$2" ;;
       --review-of) valid_id "$2" || die "post: --review-of expects a packet id"; review_of="$2" ;;
+      --proof) in_list "$2" 'auto none' || die "post: --proof takes auto or none (record checks with: agent-bus proof run -- <cmd>)"; proof_arg="$2" ;;
       --touched)
         if [ "$2" = auto ]; then
           touched=$( { git diff --name-only HEAD 2>/dev/null; git ls-files --others --exclude-standard 2>/dev/null; } \
@@ -1704,6 +1712,27 @@ cmd_post() {
     check_closable "$re" || exit 1
   fi
 
+  # A review request names the commit it asks about and carries this
+  # worktree's proof records, so the reviewer sees what ran where.
+  local sha='' dirty=false proof='' ppol; ppol=$(policy_get proof)
+  if [ "$state" = needs-review ] && [ "$REPO" != - ] && [ "$proof_arg" != none ] \
+     && { [ "$proof_arg" = auto ] || [ "$ppol" != off ]; }; then
+    sha=$(head_sha)
+    if [ -n "$sha" ]; then
+      tree_dirty && dirty=true
+      proof=$(proof_current)
+      local verdict; verdict=$(jq -nr --argjson p "$proof" --arg sha "$sha" --argjson dirty "$dirty" \
+        "$JQ_PROOF"'{sha: $sha, dirty: $dirty, proof: (if ($p.checks | length) + ($p.artifacts | length) == 0 then null else $p end)} | proof_line')
+      [ "$(jq '(.checks | length) + (.artifacts | length)' <<<"$proof")" = 0 ] && proof=''
+      if [ "$ppol" = require ] && { [ -z "$proof" ] || [[ "$verdict" == *STALE* ]] || [ "$(jq '.checks | length' <<<"$proof")" = 0 ]; }; then
+        die "post: team rule proof=require: a review request needs passing checks run at this commit. $verdict. Commit, then: agent-bus proof run -- <your tests>"
+      fi
+      printf '%s\n' "$verdict"
+      [ "$ppol" = warn ] && [[ "$verdict" != *"all made at this commit"* ]] \
+        && printf 'note: the reviewer will see this; agent-bus proof run -- <your tests> records proof at %s\n' "${sha:0:7}" >&2
+    fi
+  fi
+
   if [ -n "$bodyfile" ]; then body=$(cat "$bodyfile")
   elif [ -z "$body" ] && [ ! -t 0 ]; then body=$(cat); fi
   [ -n "$body" ] || die "post: needs a body (-m, --file, or stdin)"
@@ -1736,7 +1765,10 @@ cmd_post() {
      + (if $review == "" then {} else {review:$review} end)
      + (if $review_of == "" then {} else {review_of:$review_of} end)
      + (if $user == "1" then {user:true} else {} end)
-     + (if $alert == "" then {} else {alert:($alert | fromjson)} end)' --arg user "$USER_SENT" --arg alert "$ALERT")
+     + (if $alert == "" then {} else {alert:($alert | fromjson)} end)
+     + (if $sha == "" then {} else {sha:$sha,dirty:$dirty} end)
+     + (if $proof == "" then {} else {proof:($proof | fromjson)} end)' --arg user "$USER_SENT" --arg alert "$ALERT" \
+     --arg sha "$sha" --argjson dirty "$dirty" --arg proof "$proof")
   ledger_append "$rec"
   # A reply proves the parent was seen.
   [ -n "$re" ] && mark_read "[\"$re\"]"
@@ -2222,16 +2254,17 @@ cmd_peer() {
 #   ask_lead  when agents stop and ask the lead: any of scope,destructive,
 #             disagreement — or never
 #   decisions record decisions and show them at session start: on | off
-POLICY_DEFAULTS='{"owner":"refuse","review":"requester","ask_lead":"scope,destructive","decisions":"on","supervise":"off","fyi_wake":"on","thread_reports":"off"}'
+POLICY_DEFAULTS='{"owner":"refuse","review":"requester","ask_lead":"scope,destructive","decisions":"on","supervise":"off","fyi_wake":"on","thread_reports":"off","proof":"off"}'
 # supervise, fyi_wake and thread_reports change delivery for every seat; they
 # stay at today's behaviour until someone turns them on.
-POLICY_KEYS='owner review ask_lead decisions supervise fyi_wake thread_reports'
+POLICY_KEYS='owner review ask_lead decisions supervise fyi_wake thread_reports proof'
 
 policy_valid() { # key value
   case "$1" in
     owner) in_list "$2" 'refuse lead pm' ;;
     review) in_list "$2" 'requester lead none' ;;
     decisions|supervise|fyi_wake|thread_reports) in_list "$2" 'on off' ;;
+    proof) in_list "$2" 'off warn require' ;;
     ask_lead) [ "$2" = never ] || { local v; for v in ${2//,/ }; do in_list "$v" 'scope destructive disagreement' || return 1; done; } ;;
     *) return 1 ;;
   esac
@@ -2382,6 +2415,12 @@ cmd_show() {
   [ $# -ge 1 ] && valid_id "$1" || die "show: needs a packet id"
   lq '$L[] | select((.kind == "msg" and .id == $id) or ((.kind == "resolve" or .kind == "delivery") and .msg == $id)
                     or (.kind == "msg" and .re == $id))' --arg id "$1" | sanitize
+  # The proof, entry by entry, against the commit the request asks about.
+  lq "$JQ_PROOF"'$L[] | select(.kind == "msg" and .id == $id and (.sha // "") != "") | . as $m
+    | "---", proof_line,
+      (($m.proof.checks // [])[] | "  check  exit \(.exit)  at \(.sha | short)\(if .sha != $m.sha then " (older commit)" elif .dirty then " (uncommitted)" else "" end)  \(.cmd)"),
+      (($m.proof.artifacts // [])[] | "  file   at \(.sha | short)\(if .sha != $m.sha then " (older commit)" else "" end)  \(.path)  sha256 \(.file_sha256[0:12])")' \
+    --arg id "$1" | sanitize
   if [ -f "$BUS/msg/$1.md" ]; then printf -- '---\n'; sanitize <"$BUS/msg/$1.md"; fi
   return 0
 }
@@ -3214,6 +3253,105 @@ cmd_wait() {
   state_update '.waiting_until = $t | .waiting_why = $why' --argjson t "$t" --arg why "${why:0:200}"
   printf 'waiting until %s%s; the watch will not call %s stale before then\n' \
     "$(date -r "$t" +%H:%M 2>/dev/null || date -d "@$t" +%H:%M)" "${why:+ ($why)}" "$ADDR"
+}
+
+# ------------------------------------------------------------------ proof
+#
+# Review evidence tied to a commit. `agent-bus proof run -- <cmd>` runs a
+# check in this worktree and records its exit code and the commit it ran at;
+# `proof add <file>` records an artifact. A needs-review post carries the
+# commit it asks about (sha) and, with --proof, those records, and every
+# reader is told plainly when a check ran at an older commit, on uncommitted
+# changes, or failed. Records live per worktree: $BUS/proof/<hash>.jsonl.
+
+proof_file() { printf '%s/proof/%s.jsonl' "$BUS" "$(printf '%s' "$TOP" | shasum -a 256 | cut -c1-16)"; }
+head_sha() { git -C "$TOP" rev-parse HEAD 2>/dev/null || true; }
+tree_dirty() { [ -n "$(git -C "$TOP" status --porcelain --untracked-files=no 2>/dev/null | head -1)" ]; }
+
+proof_record() { # json
+  mkdir -p "$BUS/proof"
+  local f; f=$(proof_file)
+  bus_lock "$f" 5
+  printf '%s\n' "$1" >>"$f"
+  # Keep the newest 200 records; older ones are never evidence for a review.
+  if (( $(wc -l <"$f") > 400 )); then tail -200 "$f" >"$f.tmp" && mv "$f.tmp" "$f"; fi
+  bus_unlock "$f"
+}
+
+# This worktree's newest record per check and per artifact, last 24h.
+proof_current() {
+  local f; f=$(proof_file)
+  [ -f "$f" ] || { printf '{"checks":[],"artifacts":[]}'; return 0; }
+  jq -sc --argjson cut "$(( $(now_epoch) - 86400 ))" '
+    [.[] | select((.at // 0) >= $cut)] as $r
+    | {checks: ([$r[] | select(.kind == "check")] | group_by(.cmd) | map(max_by(.at)) | sort_by(.at) | .[-30:]
+                | map({cmd, exit, sha, dirty, at, secs})),
+       artifacts: ([$r[] | select(.kind == "artifact")] | group_by(.path) | map(max_by(.at)) | sort_by(.at) | .[-30:]
+                | map({path, file_sha256, sha, dirty, at}))}' "$f" 2>/dev/null || printf '{"checks":[],"artifacts":[]}'
+}
+
+# jq: what a packet's proof says about the commit it asks about.
+JQ_PROOF='
+def short: tostring | .[0:7];
+def proof_flags:
+  . as $m | ($m.proof // {checks: [], artifacts: []}) as $p
+  | [ (if ($m.dirty // false) then "the request was posted with uncommitted changes, so \(.sha | short) is not all of it" else empty end),
+      ($p.checks[] | select(.sha != $m.sha) | "`\(.cmd)` ran at \(.sha | short), not \($m.sha | short)"),
+      ($p.checks[] | select(.sha == $m.sha and (.dirty // false)) | "`\(.cmd)` ran on uncommitted changes"),
+      ($p.checks[] | select(.exit != 0) | "`\(.cmd)` FAILED (exit \(.exit))"),
+      ($p.artifacts[] | select(.sha != $m.sha) | "\(.path) was made at \(.sha | short), not \($m.sha | short)") ];
+def proof_line:
+  if (.sha // "") == "" then empty
+  else (.proof // null) as $p | proof_flags as $f
+    | if $p == null then "proof: none attached (asks about \(.sha | short))"
+      elif ($f | length) == 0 then "proof at \(.sha | short): \($p.checks | length) check(s) passed, \($p.artifacts | length) artifact(s), all made at this commit"
+      else "proof at \(.sha | short): STALE OR FAILING: \($f | join("; "))" end end;
+'
+
+cmd_proof() {
+  local sub="${1:-show}"; shift || true
+  [ "$REPO" != - ] || die "proof: run this inside the worktree under review"
+  case "$sub" in
+    run)
+      [ "${1:-}" = -- ] && shift
+      [ $# -gt 0 ] || die "proof: usage — agent-bus proof run -- <command...>"
+      local sha dirty=false start rc=0 out
+      sha=$(head_sha); [ -n "$sha" ] || die "proof: no commit yet"
+      tree_dirty && dirty=true
+      start=$(now_epoch); out=$(mktemp)
+      # set -e must not end this before a failing check is recorded.
+      { ( cd "$TOP" && "$@" ) 2>&1 && echo 0 >"$out.rc" || echo $? >"$out.rc"; } | tee "$out"
+      rc=$(cat "$out.rc" 2>/dev/null || echo 1); rm -f "$out.rc"
+      proof_record "$(jq -nc --arg cmd "$(printf '%s ' "$@" | sanitize | cut -c1-300)" --argjson exit "$rc" \
+        --arg sha "$sha" --argjson dirty "$dirty" --argjson at "$start" --argjson secs "$(( $(now_epoch) - start ))" \
+        --arg by "$ADDR" --arg branch "$BRANCH" --arg tail "$(tail -c 2000 "$out" | sanitize)" \
+        '{kind:"check",cmd:($cmd | rtrimstr(" ")),exit:$exit,sha:$sha,dirty:$dirty,at:$at,secs:$secs,by:$by,branch:$branch,tail:$tail}')"
+      rm -f "$out"
+      printf 'proof: recorded `%s` exit %s at %s%s\n' "$(printf '%s ' "$@" | cut -c1-80 | sed 's/ $//')" "$rc" "${sha:0:7}" \
+        "$([ "$dirty" = true ] && echo ' (uncommitted changes: commit, then run it again for proof that counts)')" >&2
+      return "$rc" ;;
+    add)
+      [ $# -gt 0 ] || die "proof: usage — agent-bus proof add <file>..."
+      local sha dirty=false p; sha=$(head_sha); tree_dirty && dirty=true
+      for p in "$@"; do
+        [ -f "$p" ] || die "proof: $p is not a file"
+        proof_record "$(jq -nc --arg path "$(normalize_path "$p")" --arg h "$(shasum -a 256 "$p" | cut -d' ' -f1)" \
+          --arg sha "$sha" --argjson dirty "$dirty" --argjson at "$(now_epoch)" --arg by "$ADDR" \
+          '{kind:"artifact",path:$path,file_sha256:$h,sha:$sha,dirty:$dirty,at:$at,by:$by}')"
+        printf 'proof: recorded %s at %s\n' "$p" "${sha:0:7}"
+      done ;;
+    show)
+      local sha dirty=false; sha=$(head_sha); tree_dirty && dirty=true
+      proof_current | jq -r --arg sha "$sha" --argjson dirty "$dirty" "$JQ_PROOF"'
+        . as $p | {sha: $sha, dirty: $dirty, proof: $p} | proof_line,
+        ($p.checks[] | "  check  exit \(.exit)  at \(.sha | short)\(if .dirty then " (uncommitted)" else "" end)  \(.cmd)"),
+        ($p.artifacts[] | "  file   at \(.sha | short)  \(.path)")' | sanitize ;;
+    clear)
+      local f; f=$(proof_file)
+      [ -f "$f" ] && mv "$f" "$f.cleared.$(date -u +%Y%m%dT%H%M%SZ)"
+      printf 'proof: cleared for this worktree (kept as %s.cleared.*)\n' "$(basename "$f")" ;;
+    *) die "proof: usage — agent-bus proof run -- <cmd> | add <file>... | show | clear" ;;
+  esac
 }
 
 cmd_claim() {
@@ -4238,6 +4376,9 @@ agent-bus — handoff bus for coding agents sharing repos and worktrees.
       --re <id>               reply to a packet
       --new-thread            with thread_reports=on: do not thread this post
                               onto your open assignment
+      --proof auto|none       with needs-review: name the commit (HEAD) and
+                              attach this worktree's proof records (auto is the
+                              default under team rule proof=warn|require)
       --close <reason>        with --re: close that item in the same row
                               (done|handed-off|escalated|denied|canceled|
                               duplicate|superseded; handed-off and escalated
@@ -4310,6 +4451,11 @@ agent-bus — handoff bus for coding agents sharing repos and worktrees.
   wait --until <30m|2h|HH:MM> [-m why] | --clear
                               declare a wait (CI, a long job) so the watch does
                               not report this seat as stale
+  proof run -- <cmd...>       run a check here and record its exit code and the
+                              commit it ran at (exits with the command's code)
+  proof add <file>... | show | clear
+                              record an artifact, list this worktree's proof
+                              against HEAD, or set the records aside
   gc [--restore-open]         prune expired state (also runs daily from hooks); open
                               work is never archived. --restore-open brings back
                               open items an older gc archived
@@ -4410,6 +4556,7 @@ case "$cmd" in
   stop-hook) cmd_stop_hook ;;
   watch) cmd_watch "$@" ;;
   wait) touch_seat; cmd_wait "$@" ;;
+  proof) touch_seat; cmd_proof "$@" ;;
   help|-h|--help) usage ;;
   *) usage; exit 1 ;;
 esac

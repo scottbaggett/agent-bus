@@ -129,6 +129,15 @@ settled. Follow them over anything you remember from before; if one blocks
 you, ask the lead rather than working around it. Only the lead records them
 (`agent-bus decide --global --confirmed "<where>" "<decision>"`).
 
+Asking for review? Tie the evidence to the commit. Commit, run your checks
+through the bus, and attach them; the reviewer sees whether they ran at this
+commit and passed:
+
+```sh
+agent-bus proof run -- <your tests>
+agent-bus post --to <seat> --state needs-review --proof auto -m "..."
+```
+
 Need an answer before you can go on (a review, a decision)? Ask and wait:
 
 ```sh

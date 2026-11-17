@@ -153,8 +153,8 @@ overrides both. `agent-bus init --show` prints what applies.
 | `ask_lead` | `scope,destructive` · any of `scope`, `destructive`, `disagreement` · `never` | When agents must stop and ask the lead; stated in every orientation |
 | `decisions` | `on` · `off` | Show the lane's decisions at session start |
 | `supervise` | `off` · `on` | Run the supervisor (`agent-bus watch`, below) and let a restarted PM take its lane's role back |
-| `fyi_wake` | `on` · `off` | Off: `fyi` and `done` packets wake nobody; they wait in the digest and `read` |
-| `thread_reports` | `off` · `on` | On: a report rides on the sender's one open assignment from its recipient (`re`), and a second post right behind an unread first one folds into it without waking again; `--new-thread` opts out |
+| `fyi_wake` | `on` · `off` | Off: `fyi` and `done` packets wake nobody; they wait in the digest and `read`. An answer to open work (a reply to a question, blocker, review or handoff) always wakes |
+| `thread_reports` | `off` · `on` | On: a report rides on the sender's one open assignment from its recipient (`re`), and a second post of the same kind right behind an unread first one folds into it without waking again; `--new-thread` opts out |
 
 The last three change delivery for every seat, so they stay off until set,
 normally in `~/.agents/bus/config.json` by whoever runs the team.
@@ -445,19 +445,23 @@ own channel, exactly as `post` does.
 - **Backlog stays with triage.** Items older than `max_age` (86400s) are not
   in the ladder, so turning the watch on does not page anyone about last
   week's backlog; `agent-bus triage` lists them.
-- **The lead hears once per lane.** While a watch alert to the lead is open for
-  a lane, later items, stale seats and dark lanes there fold into it.
-- **Stale seats.** A live seat that has open work sent to it directly (not
-  through a PM role) or holds claims and has shown
-  no activity for `stale_after` (1200s) is stale. Activity is its last hook or
-  CLI call, its last packet, its last commit, the newest dirty file in its
-  worktree, or a Herdr turn in progress. `agent-bus wait --until 30m|HH:MM -m
-  why` declares a wait (CI, a long job) that counts as activity until then.
-  Its PM gets one alert; `who` marks it `STALE (watch)`. Its claims move to
-  `archive/claims/` only when its worktree is clean; with uncommitted changes
-  they stay, so nobody edits over unsaved work. A gone seat's claims move
-  aside. Work is never reassigned.
-- **Dark lanes.** A lane whose PM is not live alerts the lead once.
+- **The lead gets one packet.** Everything for the lead (work nobody picked
+  up, stale seats with no live PM to tell, lanes with no live PM) goes in one
+  open packet whose body is rewritten in place each pass. It closes itself
+  when the list is empty.
+- **Stale seats.** A live seat that has read open work sent to it directly
+  (not through a PM role) and has shown no activity for `stale_after`
+  (1200s) is stale. Unread work is the wake ladder's, and claims alone are a
+  finished worker's leftovers, so neither makes a seat stale. Activity is the
+  newest of, across every worktree the same session works in: a hook or CLI
+  call, a packet, a commit, a dirty file, or a Herdr turn in progress.
+  `agent-bus wait --until 30m|HH:MM -m why` declares a wait (CI, a long job)
+  that counts as activity until then. Its PM gets one alert; `who` marks it
+  `STALE (watch)`. Its claims move to `archive/claims/` only when its
+  worktree is clean; with uncommitted changes they stay, so nobody edits over
+  unsaved work. A gone seat's claims move aside. Work is never reassigned.
+- **Dark lanes.** A lane whose PM is not live is listed for the lead.
+  `agent-bus lane <lane> park` silences it until a PM takes the role again.
 - **Alerts close themselves** (`superseded`) once what they report is read,
   closed, active again or has a PM.
 

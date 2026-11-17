@@ -240,6 +240,46 @@ out=$(cd "$R" && AGENT_BUS_WATCH_EXEMPT="$W" "${SON[@]}" "$BIN" watch --here)
 assert_lacks "a seat in watch.exempt is never stale" "$W is stale" "$out"
 s resolve "$ie" --reason done >/dev/null
 
+# Overnight bugs: flags that outlive the reason, answered work, PMs, and a
+# resolved lead packet re-opening.
+iq=$(s post --to "$W" --state handoff -m "# quiet work" | idof)
+w read >/dev/null; age_seat "$W" 1300; age_msg "$iq" 1300
+jq -c 'del(.reported)' "$WF" >"$WF.t" && mv "$WF.t" "$WF"
+out=$(watch)
+assert_has "set up: the seat is flagged" "$W is stale" "$out"
+out=$(cd "$R" && AGENT_BUS_WATCH_EXEMPT="$W" "${SON[@]}" "$BIN" watch --here)
+assert_eq "exempting a flagged seat clears its flag" null "$(jq -c --arg a "$W" '.seats[$a]' "$WF")"
+age_seat "$W" 1300
+out=$(cd "$R" && AGENT_BUS_WATCH_STALE_AFTER=43200 "${SON[@]}" "$BIN" watch --here)
+assert_eq "so does a longer stale_after" null "$(jq -c --arg a "$W" '.seats[$a]' "$WF")"
+w post --to "$S" -m "# done, over to you" >/dev/null
+age_seat "$W" 1300
+jq -c --arg a "$W" '(.seats // {}) |= del(.[$a]) | del(.reported)' "$WF" >"$WF.t" && mv "$WF.t" "$WF"
+jq -c --arg a "$W" 'if .kind == "msg" and .from == $a then .epoch -= 1300 else . end' "$L" >"$L.t" && mv "$L.t" "$L"
+out=$(watch)
+assert_lacks "a seat that answered its item since is not holding it" "$W is stale" "$out"
+s resolve "$iq" --reason done >/dev/null
+ip=$(s post --to "$LP" --state needs-review -m "# for the PM" | idof)
+lp read >/dev/null; age_seat "$LP" 1300; age_msg "$ip" 1300
+out=$(watch)
+assert_lacks "a PM holding items sent to it is not stale" "$LP is stale" "$out"
+s resolve "$ip" --reason done >/dev/null
+# The lead closes its packet; the same list does not reopen it.
+hcs '{"address":"t9","agent":"opencode","status":"idle","state":"live","cwd":"'"$R"'"}'
+il=$(s post --to "$W" --state needs-review -m "# lead will see this" | idof); age_msg "$il" 700
+watch >/dev/null; age_stage "$il" 700; age_seat "$LP" 99999; watch >/dev/null
+out=$(watch)
+lid=$(jq -c 'select(.kind == "msg" and (.alert.kind // "") == "lead")' "$L" | tail -1 | jq -r .id)
+seat ld lead ldw resolve "$lid" --reason done >/dev/null 2>&1 || (cd "$R" && AGENT_BUS_SESSION=ld AGENT_BUS_TOOL=lead AGENT_BUS_WT=ldw "$BIN" resolve "$lid" --reason done >/dev/null)
+out=$(watch)
+assert_lacks "a lead packet the lead closed is not reopened for the same list" "alert -> @lead" "$out"
+i2l=$(s post --to "$W" --state question -m "# something new" | idof); age_msg "$i2l" 700
+watch >/dev/null; age_stage "$i2l" 700
+out=$(watch)
+assert_has "something new reopens it" "alert -> @lead" "$out"
+w read >/dev/null; s resolve "$il" "$i2l" --reason done >/dev/null; watch >/dev/null
+lp who >/dev/null
+
 # --- PM roles stick to the lane ---
 age_seat "$LP" 99999
 lp2() { AGENT_BUS_LANE=feat seat lp2 claude main "$@"; }

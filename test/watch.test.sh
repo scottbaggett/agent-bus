@@ -46,7 +46,9 @@ seat() { local s="$1" t="$2" w="$3"; shift 3; (cd "$R" && AGENT_BUS_SESSION="$s"
 addr() { "$@" whoami | awk '/^seat/{print $2}'; }
 idof() { sed -n 's/.*id=//p' | tail -1; }
 L="$AGENT_BUS_HOME/ledger.jsonl"
-SON=(env AGENT_BUS_POLICY_SUPERVISE=on AGENT_BUS_NO_PUSH=0)
+# The fixtures backdate items, so they pin the switch-on time far back; the
+# switch-on test below runs without it.
+SON=(env AGENT_BUS_POLICY_SUPERVISE=on AGENT_BUS_NO_PUSH=0 AGENT_BUS_WATCH_SINCE=1)
 watch() { (cd "$R" && "${SON[@]}" "$BIN" watch --here); }
 # Age a packet, a seat or a ladder stage by N seconds.
 age_msg() { jq -c --arg id "$1" --argjson d "$2" 'if .id == $id then .epoch -= $d else . end' "$L" >"$L.t" && mv "$L.t" "$L"; }
@@ -389,8 +391,8 @@ hcs '{"address":"t9","agent":"opencode","status":"idle","state":"live","cwd":"'"
 qq=$(w post --to "$S" --state question -m "# which file?" | idof)
 s read >/dev/null
 ans=$(s reply "$qq" -m "a.txt" | idof)
-age_msg "$ans" 700
-out=$(watch)
+age_msg "$qq" 800; age_msg "$ans" 10
+out=$(cd "$R" && AGENT_BUS_WATCH_WAKE_AFTER=5 "${SON[@]}" "$BIN" watch --here)
 assert_has "an unread answer to an OpenCode seat enters the wake ladder" "wake $W for $ans: herdr" "$out"
 w read >/dev/null; watch >/dev/null
 ib=$(s post --to "$W" --state handoff -m "# build it" | idof)
@@ -406,6 +408,39 @@ assert_eq "an idle poll does not move when the seat went idle" yes \
 out=$(watch)
 assert_has "a builder that read its work and sits idle is reported" "$W is stale" "$out"
 s resolve "$ib" --reason done >/dev/null
+
+# --- regression (#82): history never wakes anyone ---
+hcs '{"address":"t9","agent":"opencode","status":"idle","state":"live","cwd":"'"$R"'"}'
+: >"$T/hc.sends"; w read >/dev/null
+q3=$(w post --to "$S" --state question -m "# q3" | idof); s read >/dev/null
+a3=$(s reply "$q3" -m "closed answer" | idof)
+s resolve "$a3" --reason done >/dev/null 2>&1 || w resolve "$a3" --reason done >/dev/null 2>&1 || true
+age_msg "$a3" 700
+out=$(watch)
+assert_lacks "a closed answer never wakes anyone" "$a3" "$out"
+q4=$(w post --to "$S" --state question -m "# q4" | idof); s read >/dev/null
+a4=$(s reply "$q4" -m "answered back" | idof)
+w post --to "$S" -m "# thanks, done" >/dev/null
+age_msg "$a4" 700; jq -c --arg a "$W" --arg id "$a4" '.read -= [$id]' "$AGENT_BUS_HOME/state/$(printf '%s' "$W" | tr '/' '_').json" >"$T/st" && mv "$T/st" "$AGENT_BUS_HOME/state/$(printf '%s' "$W" | tr '/' '_').json"
+jq -c --arg a "$W" 'if .kind == "msg" and .from == $a and (.subject // "") == "thanks, done" then .epoch -= 100 else . end' "$L" >"$L.t" && mv "$L.t" "$L"
+out=$(watch)
+assert_lacks "an answer its recipient wrote back after is read" "$a4" "$out"
+# Switching the watch on (or back on) never wakes anyone about what came before.
+(cd "$R" && AGENT_BUS_NO_PUSH=0 "$BIN" watch --here >/dev/null)           # supervise off: forgets switch-on
+old1=$(s post --to "$W" --state needs-review -m "# from before" | idof); age_msg "$old1" 700
+q5=$(w post --to "$S" --state question -m "# q5" | idof); s read >/dev/null
+old2=$(s reply "$q5" -m "old answer" | idof); age_msg "$old2" 700
+out=$(cd "$R" && AGENT_BUS_POLICY_SUPERVISE=on AGENT_BUS_NO_PUSH=0 "$BIN" watch --here)
+assert_lacks "an open item older than the switch-on never wakes anyone" "$old1" "$out"
+assert_lacks "nor an answer older than the switch-on" "$old2" "$out"
+assert_eq "and nothing was typed" "" "$(cat "$T/hc.sends")"
+new1=$(s post --to "$W" --state needs-review -m "# after" | idof)
+jq -c --arg id "$new1" 'if .id == $id then .epoch += 0 else . end' "$L" >/dev/null
+f="$WF"; jq -c --arg id "$new1" '.since |= with_entries(.value -= 700)' "$f" >"$f.t" && mv "$f.t" "$f"
+age_msg "$new1" 650
+out=$(cd "$R" && AGENT_BUS_POLICY_SUPERVISE=on AGENT_BUS_NO_PUSH=0 "$BIN" watch --here)
+assert_has "work that arrives after the switch-on still wakes" "wake $W for $new1" "$out"
+w read >/dev/null; s resolve "$old1" "$new1" --reason done >/dev/null 2>&1 || true
 
 # --- status and wait ---
 assert_has "watch --status says it is off" "supervise: off" "$(cd "$R" && "$BIN" watch --status)"

@@ -2895,10 +2895,17 @@ worktree_clean() { [ -d "$1" ] && [ -z "$(git -C "$1" status --porcelain 2>/dev/
 
 # One pass over this repo.
 watch_repo() {
-  [ "$(policy_get supervise)" = on ] || return 0
+  # Nothing from before the watch was switched on (for this repo) ever enters
+  # the ladder: turning it on, or back on, must not wake anyone about history.
+  if [ "$(policy_get supervise)" != on ]; then
+    [ -f "$(watch_file)" ] && watch_update 'del(.since[$rid])' --arg rid "$REPO_ID"
+    return 0
+  fi
   local now W S lead terms seats items alerts
-  local maxage
+  local maxage since
   now=$(now_epoch); W=$(watch_conf wake_after 600); S=$(watch_conf stale_after 1200); lead=$(watch_conf lead @lead)
+  since=$(watch_conf since "$(watch_get '.since // {}' | jq -r --arg rid "$REPO_ID" '.[$rid] // empty')")
+  if [ -z "$since" ]; then since=$now; watch_update '.since[$rid] = $now' --arg rid "$REPO_ID" --argjson now "$now"; fi
   # Older backlog is triage's job, not the wake ladder's: turning the watch
   # on must not page the lead about every item from last week.
   maxage=$(watch_conf max_age 86400)
@@ -2922,14 +2929,17 @@ watch_repo() {
   # Read means the owner read it, or answered it (a reply carrying re:).
   # A seat address is unique; a bare tool/worktree scope only means a seat in
   # the item's own repo.
+  local lastto
+  lastto=$(lq 'reduce ($L[] | select(.kind == "msg")) as $m ({}; .[$m.from][$m.to] = ([(.[$m.from][$m.to] // 0), ($m.epoch // 0)] | max))')
   items=$(lq 'closed($L) as $c | file_map($L) as $fm
     | (reduce ($L[] | select(.kind == "msg" and (.re // null) != null)) as $r ({}; .[$r.re] += [$r.from])) as $replies
     | [$L[] | select(.kind == "msg" and same_repo($me) and ((.probe // false) | not) and (.alert // null) == null
-                     and (.epoch // 0) >= $now - $maxage and .from != $me.addr)
+                     and (.epoch // 0) >= $now - $maxage and (.epoch // 0) >= $since and .from != $me.addr
+                     and ($c[.id] | not))
       # Work items, open; and answers sent to one seat (a reply carrying re:),
       # which its asker is waiting on just as much. Answers need no closing:
       # read is done.
-      | select((sup and ($c[.id] | not))
+      | select(sup
                or ((.re // null) != null and ((.to // "") | test("^[^@][^/]*/.+[.][0-9a-f]{4}$")) and (sup | not)))
       | . + {reply: (sup | not)}
       | . + {lane: item_lane($fm)} | . as $m
@@ -2942,8 +2952,11 @@ watch_repo() {
       | [$os[].addr, ($seats[] | select($sess != "" and $sess != "local" and .session == $sess) | .addr)] as $mine
       | . + {owner: $o, owner_live: ($os | any(.live)),
              read: (([$mine[] | ($reads[.] // []) | index($m.id) != null] | any)
-                    or (($replies[$m.id] // []) | any(. as $f | $mine | index($f) != null)))}]' \
-    --argjson seats "$seats" --argjson reads "$reads" --argjson now "$now" --argjson maxage "$maxage")
+                    or (($replies[$m.id] // []) | any(. as $f | $mine | index($f) != null))
+                    # An answer its recipient has written back after is read.
+                    or ($m.reply and ([$mine[] | ($lastto[.] // {})[$m.from] // 0] | max // 0) > ($m.epoch // 0)))}]' \
+    --argjson seats "$seats" --argjson reads "$reads" --argjson now "$now" --argjson maxage "$maxage" \
+    --argjson since "$since" --argjson lastto "$lastto")
   alerts=$(watch_open_alerts | jq -sc '.')
   local st; st=$(watch_get '.')
 
@@ -3028,8 +3041,7 @@ watch_repo() {
   # item's sender after it arrived: the turn is the other side's), any seat
   # holding a PM role (idle between items is its job), and the lead's seat.
   # Only this repo's seats are judged here; each repo's pass judges its own.
-  local lastto pms
-  lastto=$(lq 'reduce ($L[] | select(.kind == "msg")) as $m ({}; .[$m.from][$m.to] = ([(.[$m.from][$m.to] // 0), ($m.epoch // 0)] | max))')
+  local pms
   pms=$( { pm_seat; echo; jq -r '.[]' <<<"$lpms"; echo "$lead"; } | jq -Rsc 'split("\n") | map(select(length > 0))')
   holders=$(jq -c --argjson items "$items" --argjson claims "$claims" --arg rid "$REPO_ID" \
     --argjson lastto "$lastto" --argjson pms "$pms" \

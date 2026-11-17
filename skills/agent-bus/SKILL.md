@@ -124,6 +124,11 @@ CI or a long job is fine; say so first: `agent-bus wait --until 30m -m "CI"`.
 With `thread_reports=on`, your report to whoever assigned your one open item
 threads onto it automatically; `--new-thread` starts a fresh one.
 
+A digest line `standing decisions from your user` lists calls your user has
+settled. Follow them over anything you remember from before; if one blocks
+you, ask the lead rather than working around it. Only the lead records them
+(`agent-bus decide --global --confirmed "<where>" "<decision>"`).
+
 Need an answer before you can go on (a review, a decision)? Ask and wait:
 
 ```sh

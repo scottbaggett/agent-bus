@@ -2793,16 +2793,22 @@ watch_repo() {
   maxage=$(watch_conf max_age 86400)
   terms=$(hc_terminals)
   WATCH_NO_TYPE="$lead $(watch_conf no_type '' | tr ',' ' ')"
-  seats=$(seat_rows | jq -sc --arg rid "$REPO_ID" --argjson cut "$((now - SEAT_TTL))" \
+  # Every seat, whatever repo it sits in: a packet posted from one repo is
+  # often owned by a seat in another (the lead posts from its own checkout).
+  seats=$(seat_rows | jq -sc --argjson cut "$((now - SEAT_TTL))" \
     --argjson codex_cut "$(codex_idle_cut)" "$JQ_SEAT_LIVE"'
-    [.[] | select(.repo_id == $rid and ((.tool // "") | IN("lead", "watch") | not))
+    [.[] | select((.tool // "") | IN("lead", "watch") | not)
      | . + {live: buslive($cut; $codex_cut)}]')
   local reads; reads=$(for a in $(jq -r '.[].addr' <<<"$seats"); do
       f="$BUS/state/$(slugify "$a").json"; [ ! -f "$f" ] || jq -c --arg a "$a" '{($a): (.read // [])}' "$f" 2>/dev/null || true
     done | jq -sc 'add // {}')
   # Open work items with their owner, the owner's seats, and whether any of
   # them has read it.
+  # Read means the owner read it, or answered it (a reply carrying re:).
+  # A seat address is unique; a bare tool/worktree scope only means a seat in
+  # the item's own repo.
   items=$(lq 'closed($L) as $c | file_map($L) as $fm
+    | (reduce ($L[] | select(.kind == "msg" and (.re // null) != null)) as $r ({}; .[$r.re] += [$r.from])) as $replies
     | [$L[] | select(.kind == "msg" and sup and same_repo($me) and ($c[.id] | not)
                      and ((.probe // false) | not) and (.alert // null) == null
                      and (.epoch // 0) >= $now - $maxage)
@@ -2811,12 +2817,12 @@ watch_repo() {
          elif ((.to // "") | startswith("@")) then
            ([role_holder, ($lanepms[.to[1:]] // ""), lane_pm_of, $pm] | map(select(. != "")) | first) // ""
          else .to end) as $o
-      | [$seats[] | select(.addr == $o or (((.tool // "") + "/" + (.wt // "")) == $o))] as $os
+      | [$seats[] | select(.addr == $o or ((((.tool // "") + "/" + (.wt // "")) == $o) and .repo_id == $m.repo_id))] as $os
       | ([$seats[] | select(.addr == $o) | .session] | first // "") as $sess
+      | [$os[].addr, ($seats[] | select($sess != "" and $sess != "local" and .session == $sess) | .addr)] as $mine
       | . + {owner: $o, owner_live: ($os | any(.live)),
-             read: ([$seats[] | select(.addr == $o or (((.tool // "") + "/" + (.wt // "")) == $o)
-                      or ($sess != "" and $sess != "local" and .session == $sess))
-                     | ($reads[.addr] // []) | index($m.id) != null] | any)}]' \
+             read: (([$mine[] | ($reads[.] // []) | index($m.id) != null] | any)
+                    or (($replies[$m.id] // []) | any(. as $f | $mine | index($f) != null)))}]' \
     --argjson seats "$seats" --argjson reads "$reads" --argjson now "$now" --argjson maxage "$maxage")
   alerts=$(watch_open_alerts | jq -sc '.')
   local st; st=$(watch_get '.')
@@ -2902,9 +2908,10 @@ watch_repo() {
   # and sitting idle between them is its job.
   local holders claims row addr act_at lastp msgs
   claims=$(repo_claims | jq -sc '[.[].addr] | unique')
-  holders=$(jq -c --argjson items "$items" --argjson claims "$claims" '
-    .[] | select(.addr as $a | ((.tool // "") + "/" + (.wt // "")) as $sc
-      | ($items | any(.to == $a or .to == $sc)) or ($claims | index($a) != null))' <<<"$seats")
+  holders=$(jq -c --argjson items "$items" --argjson claims "$claims" --arg rid "$REPO_ID" '
+    .[] | select(.addr as $a | ((.tool // "") + "/" + (.wt // "")) as $sc | .repo_id as $srid
+      | ($items | any(.to == $a or (.to == $sc and .repo_id == $srid))) or ($claims | index($a) != null))
+    | select(.repo_id == $rid or .live)' <<<"$seats")
   msgs=$(lq '[$L[] | select(.kind == "msg")] | group_by(.from) | map({(.[0].from): (map(.epoch // 0) | max)}) | add // {}')
   while IFS= read -r row; do
     [ -n "$row" ] || continue

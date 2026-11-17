@@ -367,6 +367,22 @@ mkdir "$AGENT_BUS_HOME/state/watch.lockd"
 assert_has "two passes never overlap" "another pass is running" "$(cd "$T" && "${SON[@]}" "$BIN" watch)"
 rmdir "$AGENT_BUS_HOME/state/watch.lockd"
 
+# --- nested lanes and the lead seat elsewhere ---
+FPM=$(head -1 "$AGENT_BUS_HOME"/state/roles/*.lane.feat.pm); seat_live_ok=$(lp2 who >/dev/null; echo ok)
+(cd "$R" && AGENT_BUS_SESSION=ld AGENT_BUS_TOOL=lead AGENT_BUS_WT=ldw "$BIN" lane sub under feat >/dev/null)
+sb() { AGENT_BUS_LANE=sub seat sb opencode subwt "$@"; }
+sb who >/dev/null; SB=$(addr sb)
+isb=$(s post --to "$SB" --state handoff -m "# sub-lane work" | idof)
+sb read >/dev/null; age_seat "$SB" 1300; age_msg "$isb" 1300
+out=$(watch)
+assert_has "a seat in a sub-lane is reported to the parent lane's PM" "alert -> $FPM: watch: $SB is stale" "$out"
+s resolve "$isb" --reason done >/dev/null
+# The lead's own session working in another worktree is still the lead seat.
+(cd "$R" && AGENT_BUS_SESSION=leadsess AGENT_BUS_TOOL=claude AGENT_BUS_WT=main "$BIN" who >/dev/null)
+LEADA=$(cd "$R" && AGENT_BUS_SESSION=leadsess AGENT_BUS_TOOL=claude AGENT_BUS_WT=main "$BIN" whoami | awk '/^seat/{print $2}')
+out=$(cd "$R" && AGENT_BUS_WATCH_LEAD="$LEADA" AGENT_BUS_SESSION=leadsess AGENT_BUS_TOOL=claude AGENT_BUS_WT=website "$BIN" lane park feat --reason x 2>&1)
+assert_lacks "the lead seat's session in another worktree may park a lane" "may change its lifecycle" "$out"
+
 # --- status and wait ---
 assert_has "watch --status says it is off" "supervise: off" "$(cd "$R" && "$BIN" watch --status)"
 assert_has "wait rejects nonsense" "takes 30m" "$(cd "$R" && "$BIN" wait --until soon 2>&1 || true)"

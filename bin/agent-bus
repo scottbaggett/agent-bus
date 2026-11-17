@@ -2526,11 +2526,7 @@ cmd_decide() {
 # Current decisions in this repo: newest first, superseded ones left out.
 # Who may record or retract a standing decision: the lead, or the seat named
 # as watch.lead (the agent the lead works through).
-decide_authority() {
-  [ "$TOOL" = lead ] && return 0
-  local l; l=$(watch_conf lead @lead)
-  case "$l" in */*) [ "$ADDR" = "$l" ] ;; *) return 1 ;; esac
-}
+decide_authority() { [ "$TOOL" = lead ] || is_lead_seat; }
 
 decisions_rows() { # lane ('' = this lane and repo-wide, '*' = all, 'global' = standing only)
   lq '([$L[] | select(.kind == "decision" and (.supersedes // "") != "") | .supersedes] | map({(.): true}) | add // {}) as $gone
@@ -2939,9 +2935,10 @@ watch_repo() {
   # Who hears about an item its owner has not picked up: a live lane PM,
   # then a live repo PM, never the owner itself; else the lead.
   local lpms; lpms=$(lane_pms)
-  pm_for() { # lane owner
-    local c
-    for c in "$(jq -r --arg l "$1" '.[$l] // ""' <<<"$lpms")" "$(pm_seat)"; do
+  pm_for() { # lane owner — the nearest live PM up the lane's parents, then the repo PM
+    local c l cands=''
+    if [ -n "$1" ]; then for l in $(lane_chain "$1"); do cands="$cands $(jq -r --arg l "$l" '.[$l] // ""' <<<"$lpms")"; done; fi
+    for c in $cands "$(pm_seat)"; do
       [ -n "$c" ] && [ "$c" != "$2" ] && seat_live "$c" && { printf '%s' "$c"; return 0; }
     done
     printf '%s' "$lead"
@@ -3536,7 +3533,11 @@ lane_standing() {
 # @lead): it may do what the lead may.
 is_lead_seat() {
   local l; l=$(watch_conf lead @lead)
-  case "$l" in */*) [ "$ADDR" = "$l" ] ;; *) return 1 ;; esac
+  case "$l" in */*) ;; *) return 1 ;; esac
+  [ "$ADDR" = "$l" ] && return 0
+  # The same agent session in another repo or worktree has another address
+  # (claude/salt.cf02 vs claude/main.cf02): it is still the lead's seat.
+  [ "$SESSION" != local ] && [ "$(jq -r '(.tool // "") + " " + (.session // "")' "$BUS/seats/$(slugify "$l").json" 2>/dev/null)" = "$TOOL $SESSION" ]
 }
 
 # `lane <name> under <parent>` nests a lane; `under --clear` lifts it back to

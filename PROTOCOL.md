@@ -521,10 +521,13 @@ own channel, exactly as `post` does.
   branch's MR or PR is merged or closed, asked of `glab`/`gh`, or every work
   item sent to it is closed), it has been idle `watch.retire_after` (1800s)
   and its worktree is clean with every commit on a remote. Its Herdr terminal
-  is ended (`hc kill`, `hc rm`) and its compose test stacks taken down
-  (`docker compose -p <project> down -v` for projects whose working_dir is in
-  that worktree; never `salt-local` or anything in `watch.keep_stacks`). Its
-  PM gets one line with how to resume it (`opencode -s <session>`). The session,
+  is ended (`hc kill`, `hc rm`). Of the compose projects whose working_dir is
+  in that worktree, only throwaway ones are taken down (`docker compose -p
+  <project> down -v`, which deletes volumes): names matching
+  `watch.retire_stacks`, default `salt-backend-tests-*`. Any other project is
+  left running and named in the PM's line; `salt-local` and
+  `watch.keep_stacks` are never touched. Its PM gets one line with how to
+  resume it (`opencode -s <session>`). The session,
   the seat and the worktree are kept. A finished builder with uncommitted or
   unpushed work is never retired; its PM hears once instead.
 - **Alerts close themselves** (`superseded`) once what they report is read,

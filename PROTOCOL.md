@@ -476,7 +476,8 @@ and `hc` is installed), the watch can also type a wake line into it and read
 whether a turn is in progress. Without Herdr every wake below uses the host's
 own channel, exactly as `post` does.
 
-- **Unread work.** A work item its owner has not read after `wake_after`
+- **Unread work.** A work item, or an answer sent to one seat (a reply
+  carrying `re:`, which its asker waits on just as much), its owner has not read after `wake_after`
   (600s) wakes the owner through its own tool: its Herdr terminal if it has one (`hc send`,
   only into a live agent that is idle or done; never a shell, never mid-turn,
   never the lead's terminal or one listed in `watch.no_type`),
@@ -497,7 +498,9 @@ own channel, exactly as `post` does.
   (1200s) is stale. Unread work is the wake ladder's, and claims alone are a
   finished worker's leftovers, so neither makes a seat stale. Activity is the
   newest of, across every worktree the same session works in: a hook or CLI
-  call, a packet, a commit, a dirty file, or a Herdr turn in progress.
+  call, a packet, a commit, a dirty file, or a Herdr turn in progress. A seat
+  that reports what it is doing counts from when it went idle, not from its
+  last poll (the OpenCode plugin polls every two seconds).
   `agent-bus wait --until 30m|HH:MM -m why` declares a wait (CI, a long job)
   that counts as activity until then. Its PM gets one alert; `who` marks it
   `STALE (watch)`. Its claims move to `archive/claims/` only when its

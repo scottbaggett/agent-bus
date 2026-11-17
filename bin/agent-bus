@@ -1879,6 +1879,8 @@ check_closable() {
     | if $m == null then "missing" elif $c[$id] then "closed"
       elif is_lead($me) or ($m | authored($me) or gets($me) or (same_repo($me) and pm_for($me))) then "ok"
       else "no" end' --arg id "$1")
+  # The seat the lead works through (watch.lead) may close what the lead may.
+  [ "$v" = no ] && is_lead_seat && v=ok
   case "$v" in
     ok) return 0 ;;
     missing) printf 'agent-bus: %s — no such packet\n' "$1" >&2 ;;
@@ -3170,9 +3172,10 @@ watch_lead_digest() {
   # change every pass: the lead has seen a list once it has been sent.
   local keys sent
   keys=$(jq -c 'map(split("\t") as $p | $p[0] + ":" + ($p[1] | ltrimstr("- ") | split(" ")[0])) | unique' <<<"$lines")
-  sent=$(watch_get '.lead_sent // []')
+  # Seen: {key: when it was last sent}. It survives the list going empty (a
+  # flicker must not make old news new) and forgets a key after 12 hours.
+  sent=$(watch_get '.lead_sent // {}' | jq -c --argjson now "$now" 'if type == "object" then with_entries(select(.value >= $now - 43200)) else {} end')
   if [ "$(jq length <<<"$lines")" = 0 ]; then
-    watch_update '.lead_sent = []'
     [ -n "$open" ] || return 0
     id=$(jq -r .id <<<"$open")
     ledger_append "$(jq -nc --arg msg "$id" --arg by "$ADDR" --argjson epoch "$now" \
@@ -3181,11 +3184,11 @@ watch_lead_digest() {
   fi
   # The lead closed the packet itself: stay quiet until something it hasn't
   # seen turns up, instead of opening a new packet (and a new wake) at once.
-  if [ -z "$open" ] && [ "$(jq length <<<"$sent")" != 0 ] \
-     && jq -e --argjson sent "$sent" 'all(.[]; . as $k | $sent | index($k) != null)' <<<"$keys" >/dev/null; then
+  if [ -z "$open" ] && jq -e --argjson sent "$sent" 'all(.[]; . as $k | $sent | has($k))' <<<"$keys" >/dev/null; then
     return 0
   fi
-  watch_update '.lead_sent = ((.lead_sent // []) + $k | unique)' --argjson k "$keys"
+  watch_update '.lead_sent = ($sent + ($k | map({(.): $now}) | add // {}))' \
+    --argjson sent "$sent" --argjson k "$keys" --argjson now "$now"
   body=$(jq -r --arg at "$(date -u +%H:%MZ)" '
     def section($k; $title): [.[] | select(startswith($k + "\t")) | ltrimstr($k + "\t")] as $l
       | if ($l | length) > 0 then "\n" + $title + "\n" + ($l | join("\n")) else empty end;
@@ -3229,13 +3232,18 @@ cmd_watch() {
     *) die "watch: usage — agent-bus watch [--here | --status | --install | --uninstall]" ;;
   esac
   # Its own lock directory: a pass may take a while, and bus_lock is for
-  # short sections. A lock older than 10 minutes is a crashed pass.
-  local lockd="$BUS/state/watch.lockd"
+  # short sections. It holds the pass's pid: a killed pass's lock is taken at
+  # once. One without a pid (an older version) counts as crashed after 10m.
+  local lockd="$BUS/state/watch.lockd" holder
   mkdir -p "$BUS/state"
   if ! mkdir "$lockd" 2>/dev/null; then
-    if [ -n "$(find "$lockd" -maxdepth 0 -mmin +10 2>/dev/null)" ]; then rmdir "$lockd" 2>/dev/null; mkdir "$lockd" 2>/dev/null || return 0
-    else printf 'watch: another pass is running\n'; return 0; fi
+    holder=$(cat "$lockd/pid" 2>/dev/null || true)
+    if { [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; } \
+       || { [ -z "$holder" ] && [ -n "$(find "$lockd" -maxdepth 0 -mmin +10 2>/dev/null)" ]; }; then
+      printf 'watch: took over the lock from %s, which is gone\n' "${holder:-a crashed pass}"
+    else printf 'watch: another pass is running%s\n' "${holder:+ (pid $holder)}"; return 0; fi
   fi
+  printf '%s\n' "$$" >"$lockd/pid"
   if ((here)); then watch_as_self; watch_repo; [ "$(policy_get supervise)" = on ] && watch_lead_digest
   else
     local cwds c last=''
@@ -3249,7 +3257,7 @@ cmd_watch() {
     [ -n "$last" ] && ( cd "$last" && unset AGENT_BUS_REPO_ID && watch_as_self \
       && [ "$(policy_get supervise)" = on ] && watch_lead_digest ) || true
   fi
-  rmdir "$lockd" 2>/dev/null || true
+  rm -f "$lockd/pid"; rmdir "$lockd" 2>/dev/null || true
 }
 # The watch posts as watch/supervisor, outside any lane.
 watch_as_self() {

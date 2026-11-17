@@ -461,7 +461,12 @@ own channel, exactly as `post` does.
   worktree is clean; with uncommitted changes they stay, so nobody edits over
   unsaved work. A gone seat's claims move aside. Work is never reassigned.
 - **Dark lanes.** A lane whose PM is not live is listed for the lead.
-  `agent-bus lane <lane> park` silences it until a PM takes the role again.
+  `agent-bus lane <lane> park` (or `lane park <lane>`) silences it until a PM
+  takes the role again. The seat named in `watch.lead` may change any lane's
+  lifecycle, like the lead.
+- **Never stale:** Grok bots, the lead and the watch, and anything in
+  `watch.exempt` (seat addresses, tool/worktree scopes or tool names). A seat
+  is reported once per quiet spell and at most once an hour.
 - **Alerts close themselves** (`superseded`) once what they report is read,
   closed, active again or has a PM.
 

@@ -152,6 +152,7 @@ overrides both. `agent-bus init --show` prints what applies.
 | `review` | `requester` · `lead` · `none` | Who accepts handed-off work: whoever handed it over, the lead, or nobody |
 | `ask_lead` | `scope,destructive` · any of `scope`, `destructive`, `disagreement` · `never` | When agents must stop and ask the lead; stated in every orientation |
 | `decisions` | `on` · `off` | Show the lane's decisions at session start |
+| `retire` | `off` · `dry` · `on` | The supervisor retires finished, idle builders (below); `dry` only lists them |
 | `proof` | `off` · `warn` · `require` | Review requests name their commit and carry proof without `--proof auto`; `warn` says what the reviewer will see, `require` refuses one without passing checks run at that commit |
 | `supervise` | `off` · `on` | Run the supervisor (`agent-bus watch`, below) and let a restarted PM take its lane's role back |
 | `fyi_wake` | `on` · `off` | Off: `fyi` and `done` packets wake nobody; they wait in the digest and `read`. An answer to open work (a reply to a question, blocker, review or handoff) always wakes |
@@ -477,7 +478,8 @@ whether a turn is in progress. Without Herdr every wake below uses the host's
 own channel, exactly as `post` does.
 
 - **Unread work.** A work item, or an answer sent to one seat (a reply
-  carrying `re:`, which its asker waits on just as much), its owner has not read after `wake_after`
+  carrying `re:`, which its asker waits on just as much; an answer only wakes
+  its recipient and never climbs to a PM or the lead), its owner has not read after `wake_after`
   (600s) wakes the owner through its own tool: its Herdr terminal if it has one (`hc send`,
   only into a live agent that is idle or done; never a shell, never mid-turn,
   never the lead's terminal or one listed in `watch.no_type`),
@@ -513,6 +515,18 @@ own channel, exactly as `post` does.
 - **Never stale:** Grok bots, the lead and the watch, and anything in
   `watch.exempt` (seat addresses, tool/worktree scopes or tool names). A seat
   is reported once per quiet spell and at most once an hour.
+- **Retiring finished builders** (`retire=on`; `retire=dry` or `agent-bus
+  watch --retire-dry-run` only lists). A builder seat (not a PM, not the
+  lead, not `watch.exempt`) is retired when its work is finished (its
+  branch's MR or PR is merged or closed, asked of `glab`/`gh`, or every work
+  item sent to it is closed), it has been idle `watch.retire_after` (1800s)
+  and its worktree is clean with every commit on a remote. Its Herdr terminal
+  is ended (`hc kill`, `hc rm`) and its compose test stacks taken down
+  (`docker compose -p <project> down -v` for projects whose working_dir is in
+  that worktree; never `salt-local` or anything in `watch.keep_stacks`). Its
+  PM gets one line with how to resume it (`opencode -s <session>`). The session,
+  the seat and the worktree are kept. A finished builder with uncommitted or
+  unpushed work is never retired; its PM hears once instead.
 - **Alerts close themselves** (`superseded`) once what they report is read,
   closed, active again or has a PM.
 

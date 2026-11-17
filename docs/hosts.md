@@ -56,7 +56,12 @@ every prompt, and resumes the session when it's idle and owns new work.
   says so and points at `--resume`.
 - Reinstalling the plugin while a chat sits idle makes that chat invisible
   until it takes another turn.
-- Idle polling runs every 30s (`AGENT_BUS_OPENCODE_POLL_MS`), and the CLI answers one session at most once per 30s (`AGENT_BUS_OPENCODE_POLL_MIN`, 0 to turn off) so older plugins polling every 2s stay cheap.
+- An idle session costs a stat: the plugin checks the ledger's modification
+  time every 10s and asks the CLI only when it changed since that session
+  last asked, at most every 30s. A turn boundary always asks.
+  `AGENT_BUS_OPENCODE_POLL_MS` sets the tick, `AGENT_BUS_OPENCODE_POLL_MIN` the
+  per-session minimum (also enforced by the CLI, so older plugins polling
+  every 2s stay cheap; 0 turns the CLI limit off).
 
 ## Codex (Desktop and CLI)
 

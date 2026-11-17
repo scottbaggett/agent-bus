@@ -1134,6 +1134,11 @@ assert_has "who shows the other Mac's agents" "on bmac (as of" "$out"
 assert_has "by name" "$oc" "$out"
 assert_eq "snapshot lists the linked Mac and its agents, for the TUI" "bmac $oc" \
   "$(pa snapshot | jq -r '.peers[] | "\(.name) \(.seats[0].addr)"')"
+# The synced time is an epoch from stat (GNU first: BSD `stat -f` on Linux prints a filesystem report).
+# peer_snapshot_json reads it the same way; the assert below checks the value, and the who assert after it checks the age is not empty.
+assert_eq "snapshot synced is a recent epoch" "true" \
+  "$(pa snapshot | jq -r --argjson now "$(date +%s)" '.peers[0].synced | type == "number" and . > 1e9 and ($now - .) < 300')"
+assert_lacks "who's as-of age is not empty" "as of ):" "$out"
 mkdir -p "$PA/nossh"; printf '#!/bin/sh\nexit 255\n' >"$PA/nossh/ssh"; chmod +x "$PA/nossh/ssh"
 out=$(AGENT_BUS_NO_PUSH=0 PATH="$PA/nossh:$PATH" pa post --to "$oc" -m "# hi" 2>&1 || true)
 assert_has "a post names the Mac its recipient is on" "is on bmac; sending it there" "$out"

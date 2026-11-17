@@ -1878,7 +1878,7 @@ peer_who() { # the other Macs' agents, from the last sync
   local h f
   for h in $(peer_list); do
     f=$(peer_seats_file "$h"); [ -f "$f" ] || continue
-    printf '\non %s (as of %s):\n' "${h%.local}" "$(ago "$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f")")"
+    printf '\non %s (as of %s):\n' "${h%.local}" "$(ago "$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f")")"
     jq -r '.[] | [.addr, (.repo // "-"), (.branch // "-"), (.epoch // 0 | tostring)] | join("\u001f")' "$f" \
       | while IFS=$'\037' read -r a r b e; do
           printf '  %-40s %-14s %-40s %s ago\n' "$a" "$r" "$b" "$(age "$e")"
@@ -2877,7 +2877,7 @@ peer_snapshot_json() {
   for h in $(peer_list); do
     f=$(peer_seats_file "$h")
     out=$(jq -c --arg h "$h" --argjson seats "$( [ -f "$f" ] && cat "$f" || printf '[]')" \
-      --argjson synced "$( [ -f "$f" ] && { stat -f %m "$f" 2>/dev/null || stat -c %Y "$f"; } || printf 0)" \
+      --argjson synced "$( [ -f "$f" ] && { stat -c %Y "$f" 2>/dev/null || stat -f %m "$f"; } || printf 0)" \
       '. + [{host: $h, name: ($h | sub("\\.local$"; "")), synced: $synced, seats: $seats}]' <<<"$out")
   done
   printf '%s' "$out"

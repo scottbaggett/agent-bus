@@ -221,6 +221,24 @@ assert_lacks "without the switch posts stay as they were" "threaded on" "$out"
 out=$(AGENT_BUS_POLICY_THREAD_REPORTS=on w post --to "$S" --new-thread -m "# fresh")
 assert_lacks "--new-thread opts out" "threaded on" "$out"
 
+# --- a packet from another repo: its owner is found where it sits ---
+R2="$T/other"; mkdir -p "$R2"
+( cd "$R2" && git init -q && git config user.email t@t && git config user.name t && echo b >b.txt && git add b.txt \
+  && GIT_AUTHOR_DATE=2020-01-01T00:00:00Z GIT_COMMITTER_DATE=2020-01-01T00:00:00Z git commit -qm init )
+ld() { (cd "$R2" && AGENT_BUS_SESSION=ld AGENT_BUS_TOOL=claude AGENT_BUS_WT=main "$BIN" "$@"); }
+hcs '{"address":"t9","agent":"opencode","status":"idle","state":"live"}'
+: >"$T/hc.sends"; w read >/dev/null
+x1=$(ld post --to "$W" --state handoff -m "# from the lead's repo" | idof); age_msg "$x1" 700
+out=$(cd "$R2" && "${SON[@]}" "$BIN" watch --here)
+assert_has "an owner in another repo is woken, not reported missing" "wake $W for $x1: herdr" "$out"
+x2=$(ld post --to "$W" --state question -m "# answered, not read" | idof); age_msg "$x2" 700
+w post --to "$(cd "$R2" && AGENT_BUS_SESSION=ld AGENT_BUS_TOOL=claude AGENT_BUS_WT=main "$BIN" whoami | awk '/^seat/{print $2}')" --re "$x2" -m "# my answer" >/dev/null
+jq -c --arg a "$W" --arg id "$x2" 'if .read then .read -= [$id] else . end' "$AGENT_BUS_HOME/state/$(printf '%s' "$W" | tr '/' '_').json" >"$T/st" \
+  && mv "$T/st" "$AGENT_BUS_HOME/state/$(printf '%s' "$W" | tr '/' '_').json"
+out=$(cd "$R2" && "${SON[@]}" "$BIN" watch --here)
+assert_lacks "an owner that replied to an item has read it" "$x2" "$out"
+ld resolve "$x1" "$x2" --reason done >/dev/null
+
 # --- launchd mode: from anywhere, every repo ---
 : >"$T/hc.sends"
 hcs '{"address":"t9","agent":"opencode","status":"idle","state":"live"}'

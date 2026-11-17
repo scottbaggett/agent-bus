@@ -24,7 +24,7 @@ Reading a work item does not close it; only `resolve` or `post --close` does.
   (`feat:`, `fix:`, `docs:`, `test:`, `chore:`, …). See `.cursor/rules/conventional-commits.mdc`.
 - Runtime state stays in `~/.agents/bus/` — never commit `ledger.jsonl`, `msg/`,
   `seats/`, `claims/`, or `state/`.
-- Tests: `./test/agent-bus.test.sh`, `./test/install.test.sh`, `python3 test/codex-queue.test.py` and `(cd tui && go test ./...)`
+- Tests: `./test/agent-bus.test.sh`, `./test/watch.test.sh`, `./test/install.test.sh`, `python3 test/codex-queue.test.py` and `(cd tui && go test ./...)`
 - Per-host delivery checks the suite cannot make: [test/MANUAL.md](test/MANUAL.md)
 - Run your checkout as the live CLI: `./install.sh --from .`. Re-wire hooks: `agent-bus hooks`
 
@@ -82,4 +82,5 @@ Rules:
 | `skills/agent-bus/SKILL.md` | The `/agent-bus` skill, linked into each host by the installer |
 | `skills/handoff/SKILL.md` | Old skill name; points at `/agent-bus` |
 | `test/agent-bus.test.sh` | Tests |
+| `test/watch.test.sh` | Supervisor tests (`agent-bus watch`, stale seats, PM takeback, fyi_wake, thread_reports) |
 | `test/MANUAL.md` | Manual per-host delivery plan (hooks fire, digest reaches the model, wake) |

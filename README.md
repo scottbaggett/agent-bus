@@ -119,6 +119,20 @@ When an agent can't go on without the answer, it asks and waits:
 agent-bus ask --to codex/main.5f21 -m "# Does this migration look safe?"
 ```
 
+### Make "tests pass" mean this commit
+
+Have agents run their checks through the bus and attach them. The reviewer
+sees whether they ran at the exact commit under review and passed, or what is
+stale or failing, instead of taking "all suites pass" on trust:
+
+```sh
+agent-bus proof run -- npm test
+agent-bus post --to <seat> --state needs-review --proof auto -m "Ready for review"
+```
+
+`agent-bus init --set proof=warn` attaches proof to every review request;
+`proof=require` refuses one without passing checks at that commit.
+
 ### Split a feature across worktrees
 
 Start each agent in its own worktree on a branch with the ticket key. They land

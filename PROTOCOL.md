@@ -152,6 +152,7 @@ overrides both. `agent-bus init --show` prints what applies.
 | `review` | `requester` · `lead` · `none` | Who accepts handed-off work: whoever handed it over, the lead, or nobody |
 | `ask_lead` | `scope,destructive` · any of `scope`, `destructive`, `disagreement` · `never` | When agents must stop and ask the lead; stated in every orientation |
 | `decisions` | `on` · `off` | Show the lane's decisions at session start |
+| `proof` | `off` · `warn` · `require` | Review requests name their commit and carry proof without `--proof auto`; `warn` says what the reviewer will see, `require` refuses one without passing checks run at that commit |
 | `supervise` | `off` · `on` | Run the supervisor (`agent-bus watch`, below) and let a restarted PM take its lane's role back |
 | `fyi_wake` | `on` · `off` | Off: `fyi` and `done` packets wake nobody; they wait in the digest and `read`. An answer to open work (a reply to a question, blocker, review or handoff) always wakes |
 | `thread_reports` | `off` · `on` | On: a report rides on the sender's one open assignment from its recipient (`re`), and a second post of the same kind right behind an unread first one folds into it without waking again; `--new-thread` opts out |
@@ -180,6 +181,30 @@ overrides; handing it on keeps the same reviewer.
   to the doer as a new `handoff` with the same reviewer.
 - Nobody approves their own work. A reviewer whose session has ended is
   replaced by `@lead`, so nothing waits on nobody.
+
+## Review proof
+
+Evidence that isn't tied to a commit gets reused after the code moves on. A
+review request can name the commit it asks about and carry the checks and
+artifacts behind it:
+
+```sh
+agent-bus proof run -- npm test          # runs it here; records exit code and HEAD
+agent-bus proof add out/screens.png      # records a file, its sha256 and HEAD
+agent-bus post --to <seat> --state needs-review --proof auto -m "..."
+```
+
+`--proof auto` (the default under `proof=warn|require`) records `sha` (HEAD)
+and `dirty` on the packet, and attaches this worktree's newest record per
+command and per file from the last 24h as `proof`. Every reader gets one line:
+`proof at abc1234: 3 check(s) passed, 1 artifact(s), all made at this commit`,
+or `STALE OR FAILING:` with each problem named: a check or file made at an older
+commit, a check run on uncommitted changes, a request posted with uncommitted
+changes, a failing exit code. A reviewer whose checkout of the branch has moved
+past the commit is told so. `agent-bus show <id>` lists every entry.
+
+Records live per worktree in `proof/<hash>.jsonl`; `proof show` lists them
+against HEAD, `proof clear` sets them aside (renamed, not deleted).
 
 ## Decisions
 
@@ -637,6 +662,7 @@ timeout.  The Python Codex adapter (`lib/codex_queue.py`) uses the same
   seats/<seat>.json     seat registry (grok seats include grok_webhook, grok_secret_env)
   secrets/grok_<n>.secret  0600 webhook bearer token (written at grok register)
   state/<seat>.json     read cursor, wake count, grok_attempts list
+  proof/<hash>.jsonl    per-worktree proof records (checks, artifacts)
   state/roles/<r>.pm    repo PM (line 2: what the role is bound to)
   state/roles/<r>.lane.<l>.pm  lane PM
   state/watch.json      supervisor ladder, stale seats, dark lanes

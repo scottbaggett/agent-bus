@@ -43,7 +43,7 @@ SH
 cat >"$T/bin/docker" <<SH
 #!/bin/sh
 case "\$1" in
-  ps) printf 'proj1\t$T/w1\nsalt-local\t$T/w1\nkeep1\t$T/w1/sub\nother\t/elsewhere\nproj2\t$T/w2\n' ;;
+  ps) printf 'salt-backend-tests-w1\t$T/w1\npreview-db\t$T/w1\nsalt-local\t$T/w1\nkeep1\t$T/w1/sub\nother\t/elsewhere\nsalt-backend-tests-w2\t$T/w2\n' ;;
   compose) echo "\$*" >>"$T/docker.log" ;;
 esac
 SH
@@ -84,7 +84,8 @@ assert_lacks "retire is off by default" "retire" "$out"
 out=$(R "$BIN" watch --retire-dry-run --here)
 assert_has "dry run lists a builder whose branch is merged" "would retire $(addr b1 w1) (its branch feat-merged is merged" "$out"
 assert_has "and one whose every work item is closed" "would retire $(addr b2 w2) (every work item sent to it is closed" "$out"
-assert_has "with the stacks it would take down" "stacks: proj1" "$out"
+assert_has "with the throwaway test stacks it would take down" "stacks down: salt-backend-tests-w1" "$out"
+assert_has "and any other stack named, left running" "left running: preview-db" "$out"
 assert_has "and how to resume it" "opencode -s b1" "$out"
 assert_lacks "never salt-local" "salt-local" "$out"
 assert_lacks "never a kept stack" "keep1" "$out"
@@ -96,13 +97,18 @@ assert_lacks "never a seat active inside the window" "$(addr b7 w7)" "$out"
 assert_lacks "never one with open work and an open branch" "$(addr b8 w8)" "$out"
 assert_eq "a dry run touches nothing" "no no" "$([ -f "$T/hc.log" ] && echo yes || echo no) $([ -f "$T/docker.log" ] && echo yes || echo no)"
 
+# watch.retire_stacks opts other names in.
+out=$(R env AGENT_BUS_WATCH_RETIRE_STACKS='salt-backend-tests-*,preview-*' "$BIN" watch --retire-dry-run --here)
+assert_has "watch.retire_stacks opts more names in" "stacks down: preview-db salt-backend-tests-w1" "$out"
+
 # --- on ---
 out=$(R env AGENT_BUS_POLICY_SUPERVISE=on AGENT_BUS_WATCH_SINCE=1 AGENT_BUS_POLICY_RETIRE=on "$BIN" watch --here)
 assert_has "retire=on ends the finished builder's terminal" "retired $(addr b1 w1)" "$out"
 assert_eq "kill, then rm, for exactly the two finished builders" "kill t1 rm t1 kill t2 rm t2" "$(tr '\n' ' ' <"$T/hc.log" | sed 's/ $//')"
-assert_eq "and takes down only their own stacks" "compose -p proj1 down -v compose -p proj2 down -v" "$(tr '\n' ' ' <"$T/docker.log" | sed 's/ $//')"
+assert_eq "and takes down only their own throwaway test stacks" "compose -p salt-backend-tests-w1 down -v compose -p salt-backend-tests-w2 down -v" "$(tr '\n' ' ' <"$T/docker.log" | sed 's/ $//')"
 pmmsg=$(jq -r --arg pm "$PM" 'select(.kind == "msg" and .to == $pm and ((.subject // "") | startswith("watch: retired"))) | .id' "$L" | head -1)
 assert_has "its PM is told how to resume it" "resume with: cd $T/w1 && opencode -s b1" "$(cat "$AGENT_BUS_HOME/msg/$pmmsg.md")"
+assert_has "and which stacks were left running" "Left running (not in watch.retire_stacks; take them down yourself if they are done): preview-db" "$(cat "$AGENT_BUS_HOME/msg/$pmmsg.md")"
 assert_has "the PM hears about the unsaved worktree instead" "holds unsaved work" "$(jq -r --arg pm "$PM" 'select(.kind == "msg" and .to == $pm) | .subject' "$L")"
 assert_eq "the seat, its worktree and its session are kept" "yes yes" \
   "$([ -f "$AGENT_BUS_HOME/seats/$(addr b1 w1 | tr '/' '_').json" ] && echo yes) $([ -d "$T/w1/.git" ] || [ -f "$T/w1/.git" ] && echo yes)"

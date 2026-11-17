@@ -3249,7 +3249,8 @@ worktree_saved() { # cwd
 }
 
 # Compose projects whose working_dir is inside the worktree, minus salt-local
-# and watch.keep_stacks.
+# and watch.keep_stacks. Which of them may be taken down is stacks_to_retire's
+# call; `down -v` deletes volumes, so the rest are only named.
 worktree_stacks() { # cwd
   command -v "$DOCKER_BIN" >/dev/null 2>&1 || return 0
   local keep; keep="salt-local $(watch_conf keep_stacks '' | tr ',' ' ')"
@@ -3258,6 +3259,24 @@ worktree_stacks() { # cwd
         [ -n "$p" ] && [ -n "$wd" ] || continue
         case "$wd/" in "$1"/*) in_list "$p" "$keep" || printf '%s\n' "$p" ;; esac
       done | sort -u
+}
+
+# Of the stacks on stdin, those a retire may take down: names matching a
+# pattern in watch.retire_stacks (default salt-backend-tests-*, throwaway test
+# stacks). With "keep", the others instead.
+stacks_to_retire() { # take|keep
+  local pats p pat hit
+  pats=$(watch_conf retire_stacks 'salt-backend-tests-*' | tr ',' ' ')
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    hit=0
+    for pat in $pats; do
+      # shellcheck disable=SC2254
+      case "$p" in $pat) hit=1; break ;; esac
+    done
+    if [ "$1" = take ]; then ((hit)) && printf '%s\n' "$p"; else ((hit)) || printf '%s\n' "$p"; fi
+  done
+  return 0
 }
 
 resume_hint() { # seat-row
@@ -3315,18 +3334,22 @@ watch_retire() { # mode
         -m "$addr looks finished ($done_why) and idle $(( (now - act_at) / 60 ))m, but its worktree $cwd has uncommitted or unpushed work, so it was not retired. Save it or decide what to do with it." >/dev/null 2>&1 || true
       continue
     fi
-    stacks=$(worktree_stacks "$cwd" | tr '\n' ' '); hint=$(resume_hint "$row")
+    local found left
+    found=$(worktree_stacks "$cwd")
+    stacks=$(stacks_to_retire take <<<"$found" | tr '\n' ' '); left=$(stacks_to_retire keep <<<"$found" | tr '\n' ' ')
+    hint=$(resume_hint "$row")
     if [ "$mode" != on ]; then
-      printf '  would retire %s (%s, terminal %s%s): %s\n' "$addr" "$done_why" "$t" "${stacks:+, stacks: ${stacks% }}" "$hint"
+      printf '  would retire %s (%s, terminal %s%s%s): %s\n' "$addr" "$done_why" "$t" \
+        "${stacks:+, stacks down: ${stacks% }}" "${left:+, left running: ${left% }}" "$hint"
       continue
     fi
     "$HC_BIN" kill "$t" >/dev/null 2>&1 || true
     "$HC_BIN" rm "$t" >/dev/null 2>&1 || true
     for p in $stacks; do "$DOCKER_BIN" compose -p "$p" down -v >/dev/null 2>&1 || true; done
     watch_update '.retired[$a] = {at: $now, terminal: $t, stacks: $s}' --arg a "$addr" --argjson now "$now" --arg t "$t" --arg s "${stacks% }"
-    printf '  retired %s: %s; terminal %s ended%s\n' "$addr" "$done_why" "$t" "${stacks:+, stacks down: ${stacks% }}"
+    printf '  retired %s: %s; terminal %s ended%s%s\n' "$addr" "$done_why" "$t" "${stacks:+, stacks down: ${stacks% }}" "${left:+, left running: ${left% }}"
     cmd_post --to "$target" --state fyi --subject "watch: retired $addr" \
-      -m "Retired $addr: $done_why, idle $(( (now - act_at) / 60 ))m, worktree clean and pushed. Ended terminal $t${stacks:+ and took down ${stacks% }}. The session is kept; resume with: $hint" >/dev/null 2>&1 || true
+      -m "Retired $addr: $done_why, idle $(( (now - act_at) / 60 ))m, worktree clean and pushed. Ended terminal $t${stacks:+ and took down ${stacks% }}.${left:+ Left running (not in watch.retire_stacks; take them down yourself if they are done): ${left% }.} The session is kept; resume with: $hint" >/dev/null 2>&1 || true
   done < <(jq -c --arg rid "$REPO_ID" --argjson pms "$pms" --argjson ex "$(printf '%s' "$exempt" | jq -Rc 'split(" ") | map(select(length > 0))')" '
     .[] | select(.repo_id == $rid and .live and ((.tool // "") | IN("claude", "opencode", "codex")))
     | .addr as $a | select(($pms | index($a)) == null)

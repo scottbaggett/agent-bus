@@ -120,6 +120,18 @@ assert_has "a terminal mid-turn is left alone" "wake $W for $i4: busy" "$out"
 w read >/dev/null; watch >/dev/null
 s resolve "$i1" "$i2" "$i3" "$i4" --reason done >/dev/null
 
+# A terminal a person types in is never typed into.
+hcs '{"address":"t9","agent":"opencode","status":"idle","state":"live"}'
+: >"$T/hc.sends"
+i8=$(s post --to "$W" --state needs-review -m "# lead terminal" | idof); age_msg "$i8" 700
+out=$(cd "$R" && AGENT_BUS_WATCH_NO_TYPE=t9 "${SON[@]}" "$BIN" watch --here)
+assert_eq "watch.no_type: no text typed into that terminal" "" "$(cat "$T/hc.sends")"
+assert_lacks "and it is not reported as a Herdr wake" "for $i8: herdr" "$out"
+i9=$(s post --to "$W" --state needs-review -m "# lead seat" | idof); age_msg "$i9" 700
+out=$(cd "$R" && AGENT_BUS_WATCH_LEAD="$W" "${SON[@]}" "$BIN" watch --here)
+assert_eq "the lead's own seat is never typed into either" "" "$(cat "$T/hc.sends")"
+w read >/dev/null; s resolve "$i8" "$i9" --reason done >/dev/null; watch >/dev/null
+
 # Gone owner: straight to the PM.
 g() { AGENT_BUS_LANE=feat seat g claude gone "$@"; }
 g who >/dev/null; G=$(addr g); age_seat "$G" 99999

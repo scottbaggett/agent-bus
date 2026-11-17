@@ -313,7 +313,7 @@ touch_seat() {
     --argjson last_hook "${last_hook:-0}" --arg lane "$LANE" --arg lane_src "${LANE_SRC:-unfiled}" \
     --arg grok_webhook "$grok_webhook" --arg grok_secret_env "$grok_secret_env" --arg pid "$pid" --arg spid "${spid:-}" \
     --arg focus "$focus" --arg focus_at "${focus_at:-0}" --arg offboarded "${offboarded:-0}" \
-    --arg activity "$activity" --arg activity_at "${activity_at:-0}" --arg stage "$stage" --arg hct "${HC_TERMINAL_ID:-}" \
+    --arg activity "$activity" --arg activity_at "${activity_at:-0}" --arg stage "$stage" --arg hct "$(herdr_id)" \
     '{addr:$addr,tool:$tool,repo:$repo,repo_id:$repo_id,wt:$wt,branch:$branch,cwd:$cwd,
       session:$session,socket:$socket,codex_queue:$codex_queue,epoch:$epoch,last_hook:$last_hook,lane:$lane,
       lane_src:$lane_src,pid:($pid | tonumber? // null)}
@@ -431,11 +431,16 @@ lane_pms() {
     jq -nc --arg l "$l" --arg a "$(head -1 "$f" | tr -d '\n')" '{($l): $a}'
   done | jq -sc 'add // {}'
 }
+# The Herdr terminal this seat's agent runs in. OpenCode sessions run inside
+# a shared `opencode serve` daemon, whose environment names whichever
+# terminal started the daemon, so an OpenCode seat never claims one; the watch
+# finds its terminal by worktree instead (seat_terminal).
+herdr_id() { [ "$TOOL" = opencode ] || printf '%s' "${HC_TERMINAL_ID:-}"; }
 # A PM role belongs to the lane, not the session. Line 1 of a PM file is the
 # holder's address (all older readers use only that); line 2 says what the
 # role is bound to, so a restarted PM can take it back.
 role_meta() { # lane
-  jq -nc --arg lane "$1" --arg scope "$SCOPE" --arg hct "${HC_TERMINAL_ID:-}" --arg rid "$REPO_ID" \
+  jq -nc --arg lane "$1" --arg scope "$SCOPE" --arg hct "$(herdr_id)" --arg rid "$REPO_ID" \
     '{lane:$lane,scope:$scope,repo_id:$rid} + (if $hct != "" then {hc_terminal:$hct} else {} end)'
 }
 # Take back a PM role whose holder is gone when this seat is plainly its
@@ -450,7 +455,7 @@ reclaim_pm_roles() {
     meta=$(sed -n 2p "$f" | jq -c 'objects' 2>/dev/null || true); [ -n "$meta" ] || meta='{}'
     case "$f" in *.lane.*) lane=${f##*.lane.}; lane=${lane%.pm} ;; *) lane=$(jq -r '.lane // ""' <<<"$meta") ;; esac
     scope=$(jq -r --arg d "${holder%.*}" '.scope // $d' <<<"$meta"); hct=$(jq -r '.hc_terminal // ""' <<<"$meta")
-    if [ -n "$hct" ] && [ "$hct" = "${HC_TERMINAL_ID:-}" ]; then :
+    if [ -n "$hct" ] && [ "$hct" = "$(herdr_id)" ]; then :
     elif [ "$scope" = "$SCOPE" ] && [ -n "$lane" ] && [ "$lane" = "$LANE" ] \
       && [ -z "$(seat_rows | jq -r --arg sc "$SCOPE" --arg l "$lane" --arg me "$ADDR" --arg rid "$REPO_ID" \
            --argjson cut "$(( $(now_epoch) - SEAT_TTL ))" --argjson codex_cut "$(codex_idle_cut)" "$JQ_SEAT_LIVE"'
@@ -2689,8 +2694,23 @@ HC_BIN="${AGENT_BUS_HC:-hc}"
 # Herdr terminals as {address: {agent, status, state}}, or {} without Herdr.
 hc_terminals() {
   command -v "$HC_BIN" >/dev/null 2>&1 || { printf '{}'; return 0; }
-  "$HC_BIN" ls --json 2>/dev/null | jq -c '[.terminals[]? | {(.address): {agent, status, state}}] | add // {}' 2>/dev/null \
+  "$HC_BIN" ls --json 2>/dev/null | jq -c '[.terminals[]? | {(.address): {agent, status, state, cwd}}] | add // {}' 2>/dev/null \
     || printf '{}'
+}
+
+# The live Herdr terminal running this seat's agent, or nothing. It must run
+# the seat's own tool; an OpenCode seat's is the one live opencode terminal in
+# its worktree (none when two share it).
+seat_terminal() { # seat-row terminals
+  jq -r --argjson terms "$2" '. as $row
+    | ({claude: "claude-code", opencode: "opencode", codex: "codex"}[$row.tool // ""] // "") as $agent
+    | if $agent == "" then empty
+      elif $row.tool == "opencode" then
+        [$terms | to_entries[] | select(.value.agent == "opencode" and .value.state == "live"
+                                        and (.value.cwd // "") == ($row.cwd // "-"))]
+        | if length == 1 then .[0].key else empty end
+      else ($row.hc_terminal // "") as $t
+        | if $t != "" and ($terms[$t].agent // "") == $agent then $t else empty end end' <<<"$1"
 }
 
 # Wake one seat about item $2 through its own tool. Prints what happened:
@@ -2700,7 +2720,7 @@ watch_wake() { # seat-row id state item-row terminals
   local row="$1" id="$2" st="$3" rec="$4" terms="$5" text t tool
   text="agent-bus: packet $id [$st] waits for you. Run: agent-bus read"
   [ "${AGENT_BUS_NO_PUSH:-0}" = 1 ] && { printf skipped; return 0; }
-  t=$(jq -r '.hc_terminal // ""' <<<"$row"); tool=$(jq -r '.tool // ""' <<<"$row")
+  t=$(seat_terminal "$row" "$terms"); tool=$(jq -r '.tool // ""' <<<"$row")
   # Never type into a terminal a person may be typing in: the lead's, and any
   # listed in watch.no_type (terminal ids or seat addresses). Those seats get
   # their host's own wake (the Claude socket) instead.
@@ -2754,7 +2774,7 @@ seat_activity() { # seat-row last-packet-epoch terminals now
   (( ${2:-0} > best )) && best="$2"
   waiting=$(jq -r '.waiting_until // 0' "$BUS/state/$(slugify "$(jq -r .addr <<<"$row")").json" 2>/dev/null || echo 0)
   [[ "$waiting" =~ ^[0-9]+$ ]] && (( waiting > $4 )) && { printf '%s' "$4"; return 0; }
-  t=$(jq -r '.hc_terminal // ""' <<<"$row")
+  t=$(seat_terminal "$row" "$3")
   if [ -n "$t" ] && [ "$(jq -r --arg t "$t" '.[$t].status // ""' <<<"$3")" = working ]; then printf '%s' "$4"; return 0; fi
   cwd=$(jq -r '.cwd // ""' <<<"$row")
   if [ -d "$cwd" ] && git -C "$cwd" rev-parse --git-dir >/dev/null 2>&1; then

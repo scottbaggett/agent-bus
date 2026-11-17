@@ -184,6 +184,13 @@ assert_has "with uncommitted changes the claim stays" "a.txt" "$(cd "$R" && AGEN
 assert_has "who marks it" "STALE (watch)" "$(lp who)"
 out=$(watch)
 assert_lacks "a stale seat is reported once" "is stale" "$out"
+# A flicker (the flag cleared, nothing new happened) does not re-report.
+jq -c --arg a "$W" 'del(.seats[$a])' "$WF" >"$WF.t" && mv "$WF.t" "$WF"
+out=$(watch)
+assert_lacks "the same quiet spell is never reported twice" "is stale" "$out"
+jq -c --arg a "$W" 'del(.seats[$a]) | .reported[$a].last = 1' "$WF" >"$WF.t" && mv "$WF.t" "$WF"
+out=$(watch)
+assert_lacks "nor again within the hour after a report" "is stale" "$out"
 w heartbeat >/dev/null 2>&1 || w who >/dev/null
 out=$(watch)
 assert_has "activity clears it and closes the alert" "closed alert" "$out"
@@ -196,6 +203,7 @@ assert_lacks "activity in the same session's other worktree counts" "$W is stale
 rm -f "$(seatf "$(addr w2)")"
 # Clean worktree: claims move aside, never deleted.
 (cd "$R" && git checkout -q a.txt)
+jq -c 'del(.reported)' "$WF" >"$WF.t" && mv "$WF.t" "$WF"   # an hour later
 age_seat "$W" 1300
 out=$(watch)
 assert_has "with a clean worktree the claims are moved aside" "claim(s) were moved aside" "$(alerts_to "$LP" | tail -1 | jq -r .subject; cat "$AGENT_BUS_HOME/msg/$(alerts_to "$LP" | tail -1 | jq -r .id).md")"
@@ -216,6 +224,21 @@ s resolve "$iu" --reason canceled >/dev/null
 age_seat "$U" 1300
 out=$(watch)
 assert_lacks "claims alone do not make a seat stale" "$U is stale" "$out"
+
+# Grok bots and watch.exempt seats are never stale.
+gk() { AGENT_BUS_LANE=feat seat gk grok gbot "$@"; }
+gk who >/dev/null; GK=$(addr gk)
+ig=$(s post --to "$GK" --state handoff -m "# phone bot" | idof)
+gk read >/dev/null; age_seat "$GK" 1300; age_msg "$ig" 1300
+out=$(watch)
+assert_lacks "a Grok bot is never stale" "$GK is stale" "$out"
+s resolve "$ig" --reason done >/dev/null
+ie=$(s post --to "$W" --state handoff -m "# exempt me" | idof)
+w read >/dev/null; age_seat "$W" 1300; age_msg "$ie" 1300
+jq -c 'del(.reported)' "$WF" >"$WF.t" && mv "$WF.t" "$WF"
+out=$(cd "$R" && AGENT_BUS_WATCH_EXEMPT="$W" "${SON[@]}" "$BIN" watch --here)
+assert_lacks "a seat in watch.exempt is never stale" "$W is stale" "$out"
+s resolve "$ie" --reason done >/dev/null
 
 # --- PM roles stick to the lane ---
 age_seat "$LP" 99999
@@ -241,7 +264,12 @@ assert_lacks "two possible successors: nobody takes it" "taken back" "$out"
 out=$(watch)
 lid=$(alerts_to @lead | jq -r 'select(.alert.kind == "lead") | .id' | tail -1)
 assert_has "a lane with no live PM is listed in the lead's packet" "@feat has no live PM" "$(cat "$AGENT_BUS_HOME/msg/$lid.md")"
-(cd "$R" && AGENT_BUS_SESSION=lead AGENT_BUS_TOOL=lead AGENT_BUS_WT=lead "$BIN" lane feat park --reason "stopped on purpose" >/dev/null)
+LDS() { (cd "$R" && AGENT_BUS_SESSION=ldseat AGENT_BUS_TOOL=claude AGENT_BUS_WT=ldwt "$BIN" "$@"); }
+LDA=$(LDS whoami | awk '/^seat/{print $2}')
+assert_has "a plain seat may not park a lane" "may change its lifecycle" "$(LDS lane park feat 2>&1 || true)"
+out=$(AGENT_BUS_WATCH_LEAD="$LDA" LDS lane park feat --reason "stopped on purpose" 2>&1)
+assert_lacks "the lead seat (watch.lead) may, verb first" "may change its lifecycle" "$out"
+assert_lacks "and the verb is not read as a lane" "@park" "$out"
 out=$(watch)
 assert_has "lane park silences it (the packet closes: nothing left)" "closed the lead packet $lid" "$out"
 

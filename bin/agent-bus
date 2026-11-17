@@ -2822,6 +2822,10 @@ watch_repo() {
     --argjson codex_cut "$(codex_idle_cut)" "$JQ_SEAT_LIVE"'
     [.[] | select((.tool // "") | IN("lead", "watch") | not)
      | . + {live: buslive($cut; $codex_cut)}]')
+  # Never stale: Grok bots (no worktree; a phone), the lead and the watch,
+  # plus anything in watch.exempt (seat addresses, tool/worktree scopes or
+  # tool names).
+  local exempt; exempt="grok $(watch_conf exempt '' | tr ',' ' ')"
   local reads; reads=$(for a in $(jq -r '.[].addr' <<<"$seats"); do
       f="$BUS/state/$(slugify "$a").json"; [ ! -f "$f" ] || jq -c --arg a "$a" '{($a): (.read // [])}' "$f" 2>/dev/null || true
     done | jq -sc 'add // {}')
@@ -2926,8 +2930,10 @@ watch_repo() {
   # unread one is the wake ladder's (it never started), and claims alone are
   # a finished worker's leftovers that expire on their own. A gone seat's
   # claims are still moved aside.
-  holders=$(jq -c --argjson items "$items" --argjson claims "$claims" --arg rid "$REPO_ID" '
+  holders=$(jq -c --argjson items "$items" --argjson claims "$claims" --arg rid "$REPO_ID" \
+    --argjson ex "$(printf '%s' "$exempt" | jq -Rc 'split(" ") | map(select(length > 0))')" '
     .[] | . as $s | ((.tool // "") + "/" + (.wt // "")) as $sc
+    | select([$s.addr, $sc, ($s.tool // "")] | any(. as $k | $ex | index($k)) | not)
     | [$items[] | select(.to == $s.addr or (.to == $sc and .repo_id == $s.repo_id))] as $mine
     | select(if .live then ($mine | length) > 0 and ($mine | all(.read))
              else ($claims | index($s.addr) != null) and .repo_id == $rid end)' <<<"$seats")
@@ -2955,11 +2961,20 @@ watch_repo() {
       continue
     fi
     [ -n "$(jq -r --arg a "$addr" '.seats[$a] // empty' <<<"$st")" ] && continue   # already reported
+    # Reported for this same quiet spell (a flicker of activity cleared the
+    # flag, nothing new happened since), or within the last hour: flag it
+    # again, say nothing.
+    if jq -e --arg a "$addr" --argjson last "$act_at" --argjson now "$now" \
+         '(.reported[$a] // null) as $r | $r != null and (($r | type) == "object")
+          and ($r.last == $last or $now - $r.at < 3600)' <<<"$st" >/dev/null; then
+      watch_update '.seats[$a] = {stale_at: $now, last: $last}' --arg a "$addr" --argjson now "$now" --argjson last "$act_at"
+      continue
+    fi
     lane=$(jq -r '.lane // ""' <<<"$row")
     local cwd note; cwd=$(jq -r '.cwd // ""' <<<"$row")
     if worktree_clean "$cwd"; then n=$(archive_claims "$addr"); note="its worktree is clean, so its $n claim(s) were moved aside"
     else note="its worktree has uncommitted changes, so its claims stay"; fi
-    watch_update '.seats[$a] = {stale_at: $now, last: $last}' --arg a "$addr" --argjson now "$now" --argjson last "$act_at"
+    watch_update '.seats[$a] = {stale_at: $now, last: $last} | .reported[$a] = {last: $last, at: $now}' --arg a "$addr" --argjson now "$now" --argjson last "$act_at"
     target=$(pm_for "$lane" "$addr")
     if [ "$target" = "$lead" ]; then
       watch_update '.seats[$a].to_lead = true' --arg a "$addr"; continue
@@ -3292,7 +3307,13 @@ cmd_role() {
 # Who may change a lane's lifecycle: the lead, the repo PM, or a PM of that
 # lane or of a lane above it.
 lane_standing() {
-  [ "$TOOL" = lead ] || [ "$ADDR" = "$(pm_seat)" ] || pm_over "$1"
+  [ "$TOOL" = lead ] || [ "$ADDR" = "$(pm_seat)" ] || pm_over "$1" || is_lead_seat
+}
+# The seat the lead works through, named as watch.lead (a seat address, not
+# @lead): it may do what the lead may.
+is_lead_seat() {
+  local l; l=$(watch_conf lead @lead)
+  case "$l" in */*) [ "$ADDR" = "$l" ] ;; *) return 1 ;; esac
 }
 
 # `lane <name> under <parent>` nests a lane; `under --clear` lifts it back to
@@ -3393,6 +3414,12 @@ cmd_file() {
 }
 
 cmd_lane() {
+  # `lane park <lane>` reads as naturally as `lane <lane> park`: take either.
+  case "${1:-}" in done|park|reopen|sweep|title)
+    if [ $# -ge 2 ] && [ "${2#-}" = "$2" ] && ! in_list "$2" 'done park reopen sweep title under'; then
+      local verb="$1" name="$2"; shift 2; set -- "$name" "$verb" "$@"
+    fi ;;
+  esac
   if [ "${2:-}" = under ]; then lane_under "$1" "${3:-}"; return; fi
   if [ $# -ge 2 ] && [ "${2#-}" = "$2" ]; then lane_lifecycle "$@"; return; fi
   case "${1:-}" in

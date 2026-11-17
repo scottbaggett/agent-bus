@@ -398,7 +398,8 @@ nothing unless `supervise=on`. It posts as `watch/supervisor`.
 
 - **Unread work.** A work item its owner has not read after `wake_after`
   (600s) wakes the owner through its own tool: its Herdr terminal (`hc send`,
-  only into a live agent that is idle or done; never a shell, never mid-turn),
+  only into a live agent that is idle or done; never a shell, never mid-turn,
+  never the lead's terminal or one listed in `watch.no_type`),
   else the Claude socket, an OpenCode resume or the Codex queue. The text names
   only the packet id and state. Still unread `wake_after` later, or the owner
   is gone, a `blocked` alert goes to the lane PM, else the repo PM (never the
@@ -424,9 +425,11 @@ nothing unless `supervise=on`. It posts as `watch/supervisor`.
   closed, active again or has a PM.
 
 Settings: `~/.agents/bus/config.json` `{"watch": {"wake_after": 600,
-"stale_after": 1200, "max_age": 86400, "lead": "@lead"}}`, or
+"stale_after": 1200, "max_age": 86400, "lead": "@lead", "no_type": ["t1c"]}}`, or
 `AGENT_BUS_WATCH_WAKE_AFTER`, `AGENT_BUS_WATCH_STALE_AFTER`,
-`AGENT_BUS_WATCH_MAX_AGE`, `AGENT_BUS_WATCH_LEAD`. `lead` may be a seat
+`AGENT_BUS_WATCH_MAX_AGE`, `AGENT_BUS_WATCH_LEAD`, `AGENT_BUS_WATCH_NO_TYPE`
+(comma-separated). `no_type` lists Herdr terminals or seats a person types in;
+they are woken by their host's own channel (the Claude socket), never typed into. `lead` may be a seat
 address when the lead works through an agent seat. `watch --status` prints what
 applies. State lives in `state/watch.json`; alerts are ordinary `msg` rows with
 an `alert` field (`kind` unread|stale|no-pm, `items`, `seat`, `lane`).

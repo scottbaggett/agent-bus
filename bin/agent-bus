@@ -2531,10 +2531,11 @@ cmd_triage() {
 # close themselves once what they reported is read, closed or active again.
 # State: state/watch.json. Alerts are ordinary msg rows with an `alert` field.
 
+WATCH_NO_TYPE=''
 watch_conf() { # key default — env AGENT_BUS_WATCH_<KEY>, then config.json .watch.<key>
   local v
   v=$(printenv "AGENT_BUS_WATCH_$(printf '%s' "$1" | tr a-z A-Z)" || true)
-  [ -n "$v" ] || v=$(jq -r --arg k "$1" '.watch[$k] // empty | tostring' "$BUS/config.json" 2>/dev/null || true)
+  [ -n "$v" ] || v=$(jq -r --arg k "$1" '.watch[$k] // empty | if type == "array" then join(",") else tostring end' "$BUS/config.json" 2>/dev/null || true)
   printf '%s' "${v:-$2}"
 }
 watch_file() { printf '%s/state/watch.json' "$BUS"; }
@@ -2567,6 +2568,11 @@ watch_wake() { # seat-row id state item-row terminals
   text="agent-bus: packet $id [$st] waits for you. Run: agent-bus read"
   [ "${AGENT_BUS_NO_PUSH:-0}" = 1 ] && { printf skipped; return 0; }
   t=$(jq -r '.hc_terminal // ""' <<<"$row"); tool=$(jq -r '.tool // ""' <<<"$row")
+  # Never type into a terminal a person may be typing in: the lead's, and any
+  # listed in watch.no_type (terminal ids or seat addresses). Those seats get
+  # their host's own wake (the Claude socket) instead.
+  if [ -n "$t" ] && in_list "$t" "$WATCH_NO_TYPE"; then t=''; fi
+  in_list "$(jq -r .addr <<<"$row")" "$WATCH_NO_TYPE" && t=''
   if [ -n "$t" ]; then
     local info; info=$(jq -c --arg t "$t" '.[$t] // {}' <<<"$terms")
     # Only type into a live agent. A terminal whose agent exited is a shell,
@@ -2653,6 +2659,7 @@ watch_repo() {
   # on must not page the lead about every item from last week.
   maxage=$(watch_conf max_age 86400)
   terms=$(hc_terminals)
+  WATCH_NO_TYPE="$lead $(watch_conf no_type '' | tr ',' ' ')"
   seats=$(seat_rows | jq -sc --arg rid "$REPO_ID" --argjson cut "$((now - SEAT_TTL))" \
     --argjson codex_cut "$(codex_idle_cut)" "$JQ_SEAT_LIVE"'
     [.[] | select(.repo_id == $rid and ((.tool // "") | IN("lead", "watch") | not))

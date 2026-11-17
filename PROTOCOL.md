@@ -427,8 +427,14 @@ One host session that runs bus commands from two folders holds two seats.
 `agent-bus watch --install` runs it from launchd every 2 minutes, and it does
 nothing unless `supervise=on`. It posts as `watch/supervisor`.
 
+Herdr is optional. agent-bus needs no terminal manager; when a seat happens
+to run in a Herdr terminal (`HC_TERMINAL_ID` is set
+and `hc` is installed), the watch can also type a wake line into it and read
+whether a turn is in progress. Without Herdr every wake below uses the host's
+own channel, exactly as `post` does.
+
 - **Unread work.** A work item its owner has not read after `wake_after`
-  (600s) wakes the owner through its own tool: its Herdr terminal (`hc send`,
+  (600s) wakes the owner through its own tool: its Herdr terminal if it has one (`hc send`,
   only into a live agent that is idle or done; never a shell, never mid-turn,
   never the lead's terminal or one listed in `watch.no_type`),
   else the Claude socket, an OpenCode resume or the Codex queue. The text names

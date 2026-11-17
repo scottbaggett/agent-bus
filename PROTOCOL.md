@@ -152,6 +152,12 @@ overrides both. `agent-bus init --show` prints what applies.
 | `review` | `requester` · `lead` · `none` | Who accepts handed-off work: whoever handed it over, the lead, or nobody |
 | `ask_lead` | `scope,destructive` · any of `scope`, `destructive`, `disagreement` · `never` | When agents must stop and ask the lead; stated in every orientation |
 | `decisions` | `on` · `off` | Show the lane's decisions at session start |
+| `supervise` | `off` · `on` | Run the supervisor (`agent-bus watch`, below) and let a restarted PM take its lane's role back |
+| `fyi_wake` | `on` · `off` | Off: `fyi` and `done` packets wake nobody; they wait in the digest and `read` |
+| `thread_reports` | `off` · `on` | On: a report rides on the sender's one open assignment from its recipient (`re`), and a second post right behind an unread first one folds into it without waking again; `--new-thread` opts out |
+
+The last three change delivery for every seat, so they stay off until set,
+normally in `~/.agents/bus/config.json` by whoever runs the team.
 
 A repo with no rules runs on the defaults, and nobody is asked about them up
 front: the orientation line states them and tells the agent not to raise them.
@@ -189,6 +195,14 @@ feature rather than the repo, take a lane's PM role instead (see Lanes). It owns
 to `@pm` or a broadcast scope, receives a copy of every work item in the repo,
 and may close any of them. Taking the role from a live holder needs `--force`;
 a holder gone past `AGENT_BUS_ROLE_TTL` (48h) loses it at gc.
+
+A PM role belongs to its lane, not the session. Line 1 of the role file is the
+holder's address; line 2 records the lane, the tool and worktree, and the
+Herdr terminal. With `supervise=on`, when the holder is gone, the seat that
+plainly succeeded it takes the role back at its next prompt (`PM role for lane
+@x taken back by …`): the seat in the same Herdr terminal, or else the only
+live seat with the holder's tool, worktree and lane. Two possible successors
+means neither takes it.
 
 ## Lanes
 
@@ -407,6 +421,47 @@ seat whose process has stopped is reported as not running, and `post --resume`
 One host session that runs bus commands from two folders holds two seats.
 `read`, the digest and wakes count packets sent to either.
 
+## The supervisor
+
+`agent-bus watch` makes one pass over every repo with seats or open work;
+`agent-bus watch --install` runs it from launchd every 2 minutes, and it does
+nothing unless `supervise=on`. It posts as `watch/supervisor`.
+
+- **Unread work.** A work item its owner has not read after `wake_after`
+  (600s) wakes the owner through its own tool: its Herdr terminal (`hc send`,
+  only into a live agent that is idle or done; never a shell, never mid-turn),
+  else the Claude socket, an OpenCode resume or the Codex queue. The text names
+  only the packet id and state. Still unread `wake_after` later, or the owner
+  is gone, a `blocked` alert goes to the lane PM, else the repo PM (never the
+  owner itself), else the lead. Still unread after another `wake_after`, the
+  lead hears.
+- **Backlog stays with triage.** Items older than `max_age` (86400s) are not
+  in the ladder, so turning the watch on does not page anyone about last
+  week's backlog; `agent-bus triage` lists them.
+- **The lead hears once per lane.** While a watch alert to the lead is open for
+  a lane, later items, stale seats and dark lanes there fold into it.
+- **Stale seats.** A live seat that has open work sent to it directly (not
+  through a PM role) or holds claims and has shown
+  no activity for `stale_after` (1200s) is stale. Activity is its last hook or
+  CLI call, its last packet, its last commit, the newest dirty file in its
+  worktree, or a Herdr turn in progress. `agent-bus wait --until 30m|HH:MM -m
+  why` declares a wait (CI, a long job) that counts as activity until then.
+  Its PM gets one alert; `who` marks it `STALE (watch)`. Its claims move to
+  `archive/claims/` only when its worktree is clean; with uncommitted changes
+  they stay, so nobody edits over unsaved work. A gone seat's claims move
+  aside. Work is never reassigned.
+- **Dark lanes.** A lane whose PM is not live alerts the lead once.
+- **Alerts close themselves** (`superseded`) once what they report is read,
+  closed, active again or has a PM.
+
+Settings: `~/.agents/bus/config.json` `{"watch": {"wake_after": 600,
+"stale_after": 1200, "max_age": 86400, "lead": "@lead"}}`, or
+`AGENT_BUS_WATCH_WAKE_AFTER`, `AGENT_BUS_WATCH_STALE_AFTER`,
+`AGENT_BUS_WATCH_MAX_AGE`, `AGENT_BUS_WATCH_LEAD`. `lead` may be a seat
+address when the lead works through an agent seat. `watch --status` prints what
+applies. State lives in `state/watch.json`; alerts are ordinary `msg` rows with
+an `alert` field (`kind` unread|stale|no-pm, `items`, `seat`, `lane`).
+
 ## Replying, asking and sending
 
 - `reply <id> -m …` answers the sender and closes the item in one row (reason
@@ -546,8 +601,10 @@ timeout.  The Python Codex adapter (`lib/codex_queue.py`) uses the same
   seats/<seat>.json     seat registry (grok seats include grok_webhook, grok_secret_env)
   secrets/grok_<n>.secret  0600 webhook bearer token (written at grok register)
   state/<seat>.json     read cursor, wake count, grok_attempts list
-  state/roles/<r>.pm    repo PM
+  state/roles/<r>.pm    repo PM (line 2: what the role is bound to)
   state/roles/<r>.lane.<l>.pm  lane PM
+  state/watch.json      supervisor ladder, stale seats, dark lanes
+  archive/claims/<ts>/  claims the supervisor moved aside
   claims/<hash>.json    claims
 ```
 

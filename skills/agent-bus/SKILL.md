@@ -117,6 +117,13 @@ its next prompt, queued, not running, or nobody. If it says nobody owns it, nobo
 act on it: send it to a seat instead. An OpenCode seat that isn't running can
 be restarted with `post --resume`.
 
+If the team runs the supervisor (`supervise=on`), work you leave unread for 10
+minutes wakes you, then your PM hears, then the lead. Holding work or claims
+with no packet, commit or file write for 20 minutes marks you stale. Waiting on
+CI or a long job is fine; say so first: `agent-bus wait --until 30m -m "CI"`.
+With `thread_reports=on`, your report to whoever assigned your one open item
+threads onto it automatically; `--new-thread` starts a fresh one.
+
 Need an answer before you can go on (a review, a decision)? Ask and wait:
 
 ```sh

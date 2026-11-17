@@ -95,12 +95,16 @@ assert_has "still unread after that: the lead hears" "alert -> @lead" "$out"
 i2=$(s post --to "$W" --state question -m "# second" | idof)
 age_msg "$i2" 700; watch >/dev/null; age_stage "$i2" 700; watch >/dev/null; age_stage "$i2" 700
 out=$(watch)
-assert_has "a second item in the lane folds into the open lead alert" "folded 1 item(s) into the open lead alert for feat" "$out"
-assert_eq "so the lead has one alert for the lane" 1 "$(alerts_to @lead | grep -c .)"
+assert_has "a second item updates the lead's one packet in place" "updated the lead packet" "$out"
+assert_eq "so the lead has one packet" 1 "$(alerts_to @lead | grep -c .)"
+lid=$(alerts_to @lead | jq -r .id)
+assert_has "listing both items" "$i2" "$(cat "$AGENT_BUS_HOME/msg/$lid.md")"
+assert_has "and the first" "$i1" "$(cat "$AGENT_BUS_HOME/msg/$lid.md")"
 w read >/dev/null
 out=$(watch)
 assert_has "once the owner reads, alerts close themselves" "closed alert $a1" "$out"
-assert_eq "every PM and lead alert for them (two PM, one lead)" 3 "$(jq -c 'select(.kind == "resolve" and .reason == "superseded")' "$L" | grep -c .)"
+assert_has "the lead packet closes when nothing is left for the lead" "closed the lead packet $lid" "$out"
+assert_eq "every PM alert and the lead packet (two PM, one lead)" 3 "$(jq -c 'select(.kind == "resolve" and .reason == "superseded")' "$L" | grep -c .)"
 assert_eq "and the items stop being tracked" 0 "$(jq '.items | length' "$WF")"
 
 # Backlog older than max_age is triage's, not the ladder's.
@@ -183,6 +187,13 @@ assert_lacks "a stale seat is reported once" "is stale" "$out"
 w heartbeat >/dev/null 2>&1 || w who >/dev/null
 out=$(watch)
 assert_has "activity clears it and closes the alert" "closed alert" "$out"
+# Its other worktree counts: one session working in two places is one agent.
+w2() { AGENT_BUS_LANE=feat seat w opencode wkr2 "$@"; }
+age_seat "$W" 1300
+w2 who >/dev/null
+out=$(watch)
+assert_lacks "activity in the same session's other worktree counts" "$W is stale" "$out"
+rm -f "$(seatf "$(addr w2)")"
 # Clean worktree: claims move aside, never deleted.
 (cd "$R" && git checkout -q a.txt)
 age_seat "$W" 1300
@@ -190,6 +201,21 @@ out=$(watch)
 assert_has "with a clean worktree the claims are moved aside" "claim(s) were moved aside" "$(alerts_to "$LP" | tail -1 | jq -r .subject; cat "$AGENT_BUS_HOME/msg/$(alerts_to "$LP" | tail -1 | jq -r .id).md")"
 assert_eq "into archive/claims" 1 "$(find "$AGENT_BUS_HOME/archive/claims" -name '*.json' | grep -c .)"
 s resolve "$i6" --reason done >/dev/null
+
+# Never started (assignment unread) is the wake ladder's, not stale; claims
+# alone (a finished worker's leftovers) are not holding work.
+u() { AGENT_BUS_LANE=feat seat u opencode unst "$@"; }
+u who >/dev/null; U=$(addr u)
+u claim a.txt >/dev/null 2>&1 || true
+iu=$(s post --to "$U" --state handoff -m "# never started" | idof)
+age_seat "$U" 1300; age_msg "$iu" 300
+out=$(watch)
+assert_lacks "a seat that has not read its assignment is not stale" "$U is stale" "$out"
+assert_eq "and its claims are not moved" 1 "$(find "$AGENT_BUS_HOME/archive/claims" -name '*.json' | grep -c .)"
+s resolve "$iu" --reason canceled >/dev/null
+age_seat "$U" 1300
+out=$(watch)
+assert_lacks "claims alone do not make a seat stale" "$U is stale" "$out"
 
 # --- PM roles stick to the lane ---
 age_seat "$LP" 99999
@@ -211,17 +237,22 @@ AGENT_BUS_LANE=feat seat c1 codex amb who >/dev/null; AGENT_BUS_LANE=feat seat c
 printf 'codex/amb.dead\n' >"$(ls "$AGENT_BUS_HOME"/state/roles/*.lane.feat.pm)"
 out=$(AGENT_BUS_POLICY_SUPERVISE=on AGENT_BUS_LANE=feat seat c1 codex amb who 2>&1)
 assert_lacks "two possible successors: nobody takes it" "taken back" "$out"
-# A lane whose PM is gone: the lead hears once.
+# A lane whose PM is gone: listed in the lead's packet until parked.
 out=$(watch)
-assert_has "a lane with no live PM alerts the lead" "has no live PM" "$out"
+lid=$(alerts_to @lead | jq -r 'select(.alert.kind == "lead") | .id' | tail -1)
+assert_has "a lane with no live PM is listed in the lead's packet" "@feat has no live PM" "$(cat "$AGENT_BUS_HOME/msg/$lid.md")"
+(cd "$R" && AGENT_BUS_SESSION=lead AGENT_BUS_TOOL=lead AGENT_BUS_WT=lead "$BIN" lane feat park --reason "stopped on purpose" >/dev/null)
 out=$(watch)
-assert_lacks "once" "has no live PM" "$out"
+assert_has "lane park silences it (the packet closes: nothing left)" "closed the lead packet $lid" "$out"
 
 # --- fyi_wake and thread_reports ---
 lp2 role pm --lane feat --force >/dev/null
 out=$(AGENT_BUS_POLICY_FYI_WAKE=off AGENT_BUS_NO_PUSH=0 s post --to "$W" -m "# just so you know")
 assert_has "fyi_wake=off: an fyi wakes nobody" "wakes nobody (team rule fyi_wake=off)" "$out"
 assert_has "but it is still in the digest" "just so you know" "$(w read --peek)"
+q=$(s post --to "$W" --state question -m "# which one?" | idof)
+out=$(AGENT_BUS_POLICY_FYI_WAKE=off AGENT_BUS_NO_PUSH=0 w reply "$q" -m "this one")
+assert_lacks "an answer to a question always wakes the asker" "wakes nobody" "$out"
 out=$(AGENT_BUS_NO_PUSH=0 s post --to "$W" -m "# default")
 assert_lacks "with the default an fyi still delivers" "wakes nobody" "$out"
 w read >/dev/null
@@ -232,6 +263,8 @@ r1=$(idof <<<"$out")
 assert_eq "as re" "$asg" "$(jq -r --arg id "$r1" 'select(.id == $id) | .re' "$L")"
 out=$(AGENT_BUS_POLICY_THREAD_REPORTS=on AGENT_BUS_NO_PUSH=0 w post --to "$S" --state needs-review -m "# done the thing (again)")
 assert_has "a second report right behind an unread first folds into it" "folded into $r1" "$out"
+out=$(AGENT_BUS_POLICY_THREAD_REPORTS=on w post --to "$S" -m "# fyi right after")
+assert_lacks "a post of another kind is not folded into it" "folded into" "$out"
 out=$(w post --to "$S" --state needs-review -m "# no rule")
 assert_lacks "without the switch posts stay as they were" "threaded on" "$out"
 out=$(AGENT_BUS_POLICY_THREAD_REPORTS=on w post --to "$S" --new-thread -m "# fresh")

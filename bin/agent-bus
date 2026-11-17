@@ -1654,9 +1654,9 @@ cmd_post() {
      && [ "$(policy_get thread_reports)" = on ]; then
     local recent assigned
     case "$to" in */*.*)
-      recent=$(lq 'closed($L) as $c | [$L[] | select(.kind == "msg" and .from == $me.addr and .to == $to
+      recent=$(lq 'closed($L) as $c | [$L[] | select(.kind == "msg" and .from == $me.addr and .to == $to and .state == $state
                     and (.epoch // 0) >= $now - 120 and ($c[.id] | not) and (.id as $i | $read | index($i) | not))] | last | .id // empty' \
-        --arg to "$to" --argjson now "$(now_epoch)" \
+        --arg to "$to" --arg state "$state" --argjson now "$(now_epoch)" \
         --argjson read "$(jq -c '.read // []' "$BUS/state/$(slugify "$to").json" 2>/dev/null || echo '[]')")
       [ -n "$recent" ] && { re="$recent"; fold="$recent"; } ;;
     esac
@@ -1752,7 +1752,10 @@ cmd_post() {
   if [ -n "$fold" ]; then
     printf 'delivery: folded into %s, which %s has not read yet; not woken again\n' "$fold" "$to"; return 0
   fi
-  if [ "$(policy_get fyi_wake)" = off ] && ! in_list "$state" 'needs-review blocked handoff question'; then
+  # An answer to open work (a reply carrying re: to a question, blocker,
+  # review or handoff) always wakes: it is what the asker is waiting for.
+  if [ "$(policy_get fyi_wake)" = off ] && ! in_list "$state" 'needs-review blocked handoff question' \
+     && ! { [ -n "$re" ] && in_list "$(item_field "$re" state)" 'needs-review blocked handoff question'; }; then
     printf 'delivery: a %s wakes nobody (team rule fyi_wake=off); it is in the recipient'"'"'s next digest and agent-bus read\n' "$state"
     return 0
   fi
@@ -2857,9 +2860,10 @@ watch_repo() {
     done
     printf '%s' "$lead"
   }
-  lead_open() { # lane — an open alert to the lead for this lane already
-    jq -e --arg l "$1" --arg lead "$lead" 'any(.[]; .to == $lead and (.alert.lane // "") == $l)' <<<"$alerts" >/dev/null
-  }
+  # What the lead should hear about from this repo, gathered this pass and
+  # sent as one rolling packet across every repo (watch_lead_digest).
+  local leadlines=''
+  lead_line() { leadlines="$leadlines$1"$'\n'; }
 
   # 1. The wake ladder.
   local acts; acts=$(jq -c --argjson st "$st" --argjson now "$now" --argjson w "$W" '
@@ -2871,7 +2875,7 @@ watch_repo() {
       elif $s.stage == 1 and $now - $s.at >= $w then {id, act: "pm"}
       elif $s.stage == 2 and $now - $s.at >= $w then {id, act: "lead"}
       else empty end | . + {item: $i}' <<<"$items")
-  local a id act item owner lane how target n pmrows='' leadrows=''
+  local a id act item owner lane how target n pmrows=''
   while IFS= read -r a; do
     [ -n "$a" ] || continue
     id=$(jq -r .id <<<"$a"); act=$(jq -r .act <<<"$a"); item=$(jq -c .item <<<"$a")
@@ -2885,11 +2889,10 @@ watch_repo() {
         watch_update '.items[$id] = {stage: 1, at: $now}' --arg id "$id" --argjson now "$now" ;;
       pm)
         target=$(pm_for "$lane" "$owner")
-        if [ "$target" = "$lead" ]; then n=3; leadrows="$leadrows$item"$'\n'
+        if [ "$target" = "$lead" ]; then n=3
         else n=2; pmrows="$pmrows$(jq -c --arg t "$target" '. + {target: $t}' <<<"$item")"$'\n'; fi
         watch_update '.items[$id] = {stage: $n, at: $now}' --arg id "$id" --argjson n "$n" --argjson now "$now" ;;
       lead)
-        leadrows="$leadrows$item"$'\n'
         watch_update '.items[$id] = {stage: 3, at: $now}' --arg id "$id" --argjson now "$now" ;;
     esac
   done <<<"$acts"
@@ -2906,32 +2909,28 @@ watch_repo() {
       "$(jq -r '.[0].id' <<<"$g")" || true
   done < <(printf '%s' "$pmrows" | jq -sc 'group_by(.target)[]' 2>/dev/null)
 
-  # The lead hears once per lane: while one alert is open, later ones fold
-  # into its count instead of posting again.
-  while IFS= read -r g; do
-    [ -n "$g" ] || continue
-    lane=$(jq -r '.[0].lane // ""' <<<"$g")
-    if lead_open "$lane"; then
-      printf '  folded %s item(s) into the open lead alert for %s\n' "$(jq length <<<"$g")" "${lane:-unfiled}"
-      continue
-    fi
-    watch_alert "$lead" "watch: ${lane:+@$lane: }$(jq length <<<"$g") work item(s) nobody has picked up" \
-      "$(jq -r --argjson now "$now" '"Neither the owner nor a PM read these after the wake ladder. Later items in this lane fold into this alert until it closes.\n",
-        (.[] | "- \(.id) [\(.state)] to \(.owner), \(($now - .epoch) / 60 | floor)m unread: \(.subject // "" | .[0:100])")' <<<"$g")" \
-      "$(jq -c '{kind: "unread", items: map(.id), lane: (.[0].lane // "")}' <<<"$g")" \
-      "$(jq -r '.[0].id' <<<"$g")" || true
-    alerts=$(watch_open_alerts | jq -sc '.')
-  done < <(printf '%s' "$leadrows" | jq -sc 'group_by(.lane // "")[]' 2>/dev/null)
+  # Items at the lead's stage that are still unread: one line each, every
+  # pass, so the rolling packet always shows what still stands.
+  st=$(watch_get '.')
+  while IFS= read -r a; do
+    [ -n "$a" ] && lead_line "$a"
+  done < <(jq -r --argjson st "$st" --argjson now "$now" '.[] | select((.read | not) and (($st.items[.id].stage // 0) == 3))
+    | "unread\t- \(.id) [\(.state)] to \(.owner)\(if .lane != "" and .lane != "unfiled" then " (@" + .lane + ")" else "" end), \(($now - .epoch) / 60 | floor)m unread: \(.subject // "" | .[0:90])"' <<<"$items")
 
   # 2. Stale seats: live, holding work or claims, quiet past S. Holding work
   # means items sent to the seat itself: a PM owns its lane's items by role,
   # and sitting idle between them is its job.
   local holders claims row addr act_at lastp msgs
   claims=$(repo_claims | jq -sc '[.[].addr] | unique')
+  # Holding work means an open item sent to the seat that it has read. An
+  # unread one is the wake ladder's (it never started), and claims alone are
+  # a finished worker's leftovers that expire on their own. A gone seat's
+  # claims are still moved aside.
   holders=$(jq -c --argjson items "$items" --argjson claims "$claims" --arg rid "$REPO_ID" '
-    .[] | select(.addr as $a | ((.tool // "") + "/" + (.wt // "")) as $sc | .repo_id as $srid
-      | ($items | any(.to == $a or (.to == $sc and .repo_id == $srid))) or ($claims | index($a) != null))
-    | select(.repo_id == $rid or .live)' <<<"$seats")
+    .[] | . as $s | ((.tool // "") + "/" + (.wt // "")) as $sc
+    | [$items[] | select(.to == $s.addr or (.to == $sc and .repo_id == $s.repo_id))] as $mine
+    | select(if .live then ($mine | length) > 0 and ($mine | all(.read))
+             else ($claims | index($s.addr) != null) and .repo_id == $rid end)' <<<"$seats")
   msgs=$(lq '[$L[] | select(.kind == "msg")] | group_by(.from) | map({(.[0].from): (map(.epoch // 0) | max)}) | add // {}')
   while IFS= read -r row; do
     [ -n "$row" ] || continue
@@ -2941,8 +2940,16 @@ watch_repo() {
       n=$(archive_claims "$addr"); ((n > 0)) && printf '  %s is gone: moved %s claim(s) aside\n' "$addr" "$n"
       continue
     fi
-    lastp=$(jq -r --arg a "$addr" '.[$a] // 0' <<<"$msgs")
-    act_at=$(seat_activity "$row" "$lastp" "$terms" "$now")
+    # One session working from several worktrees is one agent: its newest
+    # activity in any of them counts (a PM committing in an integration
+    # worktree while its seat sits in main).
+    local sib sa; act_at=0
+    while IFS= read -r sib; do
+      [ -n "$sib" ] || continue
+      lastp=$(jq -r --arg a "$(jq -r .addr <<<"$sib")" '.[$a] // 0' <<<"$msgs")
+      sa=$(seat_activity "$sib" "$lastp" "$terms" "$now"); (( sa > act_at )) && act_at=$sa
+    done < <(jq -c --argjson r "$row" '.[] | select(.addr == $r.addr or ((.session // "local") != "local"
+               and .session == $r.session and (.tool // "") == ($r.tool // "")))' <<<"$seats")
     if (( now - act_at < S )); then
       [ "$(jq -r --arg a "$addr" '.seats[$a] // empty' <<<"$st")" ] && watch_update 'del(.seats[$a])' --arg a "$addr"
       continue
@@ -2954,8 +2961,8 @@ watch_repo() {
     else note="its worktree has uncommitted changes, so its claims stay"; fi
     watch_update '.seats[$a] = {stale_at: $now, last: $last}' --arg a "$addr" --argjson now "$now" --argjson last "$act_at"
     target=$(pm_for "$lane" "$addr")
-    if [ "$target" = "$lead" ] && lead_open "$lane"; then
-      printf '  %s is stale; folded into the open lead alert for %s\n' "$addr" "${lane:-unfiled}"; continue
+    if [ "$target" = "$lead" ]; then
+      watch_update '.seats[$a].to_lead = true' --arg a "$addr"; continue
     fi
     watch_alert "$target" "watch: $addr is stale (quiet $(( (now - act_at) / 60 ))m)" \
       "$addr holds open work or claims and has shown no activity (packet, commit, file write, turn) for $(( (now - act_at) / 60 )) minutes; $note. Check on it, or hand its work on. A seat that is legitimately waiting can say so: agent-bus wait --until <time>." \
@@ -2963,21 +2970,32 @@ watch_repo() {
     alerts=$(watch_open_alerts | jq -sc '.')
   done <<<"$holders"
 
-  # 3. Lanes whose PM is not live: the lead hears once per lane.
-  local l pmaddr
+  st=$(watch_get '.')
+  while IFS= read -r a; do
+    [ -n "$a" ] && lead_line "$a"
+  done < <(jq -r --argjson st "$st" --argjson now "$now" --arg rid "$REPO_ID" '.[] | select(.repo_id == $rid) | .addr as $a
+    | ($st.seats[$a] // null) | select(. != null and (.to_lead // false))
+    | "stale\t- \($a) quiet since \(($now - .last) / 60 | floor)m ago while holding work"' <<<"$seats")
+
+  # 3. Lanes whose PM is not live. `agent-bus lane park <lane>` silences one
+  # until a PM takes the role again (the role file is newer than the park).
+  local l pmaddr parks
+  parks=$(lq 'lane_rows($L) | with_entries(select(.key | startswith($me.repo_id + ":")) | .key |= ltrimstr($me.repo_id + ":"))
+              | map_values({state, at: (.at // 0)})')
   while IFS=$'\t' read -r l pmaddr; do
     [ -n "$l" ] || continue
     if seat_live "$pmaddr"; then
       watch_update 'del(.dark[$l])' --arg l "$l"; continue
     fi
-    [ -n "$(jq -r --arg l "$l" '.dark[$l] // empty' <<<"$st")" ] && continue
-    watch_update '.dark[$l] = $now' --arg l "$l" --argjson now "$now"
-    lead_open "$l" && continue
-    watch_alert "$lead" "watch: @$l has no live PM (last $pmaddr)" \
-      "The PM role for lane @$l points at $pmaddr, which is not live. Its work goes nowhere until a PM takes the role (agent-bus role pm --lane $l)." \
-      "$(jq -nc --arg l "$l" --arg a "$pmaddr" '{kind: "no-pm", lane: $l, seat: $a}')" || true
-    alerts=$(watch_open_alerts | jq -sc '.')
+    if [ "$(jq -r --arg l "$l" '.[$l].state // ""' <<<"$parks")" = parked ] \
+       && (( $(jq -r --arg l "$l" '.[$l].at // 0' <<<"$parks") >= $(stat -c %Y "$(lane_pm_file "$l")" 2>/dev/null || stat -f %m "$(lane_pm_file "$l")" 2>/dev/null || echo 0) )); then
+      watch_update 'del(.dark[$l])' --arg l "$l"; continue
+    fi
+    [ -n "$(jq -r --arg l "$l" '.dark[$l] // empty' <<<"$st")" ] || watch_update '.dark[$l] = $now' --arg l "$l" --argjson now "$now"
+    lead_line "$(printf 'dark\t- @%s has no live PM (last %s): agent-bus role pm --lane %s, or agent-bus lane park %s if it is stopped on purpose' "$l" "$pmaddr" "$l" "$l")"
   done < <(jq -r 'to_entries[] | "\(.key)\t\(.value)"' <<<"$lpms")
+  watch_update '.lead_lines[$rid] = {at: $now, lines: $lines}' --arg rid "$REPO_ID" --argjson now "$now" \
+    --argjson lines "$(printf '%s' "$leadlines" | jq -Rsc 'split("\n") | map(select(length > 0))')"
 
   # 4. Alerts close themselves once nothing they report still stands.
   st=$(watch_get '.')
@@ -2988,13 +3006,47 @@ watch_repo() {
          .alert as $x
          | if $x.kind == "unread" then ($x.items | any(. as $i | $unread | index($i) != null))
            elif $x.kind == "stale" then ($st.seats[$x.seat] // null) != null
-           elif $x.kind == "no-pm" then ($st.dark[$x.lane] // null) != null and ($lpms[$x.lane] // "") != ""
+           elif $x.kind == "no-pm" then false
            else true end' <<<"$a" >/dev/null; then continue; fi
     ledger_append "$(jq -nc --arg msg "$(jq -r .id <<<"$a")" --arg by "$ADDR" --argjson epoch "$now" \
       '{kind:"resolve",msg:$msg,by:$by,reason:"superseded",note:"watch: resolved itself",epoch:$epoch}')"
     printf '  closed alert %s: what it reported is resolved\n' "$(jq -r .id <<<"$a")"
   done < <(jq -c '.[]' <<<"$alerts")
   return 0
+}
+
+# The lead's one rolling packet: everything every repo pass found for the
+# lead, in one open packet whose body is rewritten in place as the list
+# changes. It closes itself when the list is empty.
+watch_lead_digest() {
+  local now lead lines open id body
+  now=$(now_epoch); lead=$(watch_conf lead @lead)
+  lines=$(watch_get '[(.lead_lines // {})[] | select(.at >= $now - 900) | .lines[]] | unique' --argjson now "$now" 2>/dev/null \
+    || jq -nc --argjson now "$now" --slurpfile w "$(watch_file)" '[($w[0].lead_lines // {})[] | select(.at >= $now - 900) | .lines[]] | unique')
+  open=$(lq 'closed($L) as $c | [$L[] | select(.kind == "msg" and .from == $me.addr and (.alert.kind // "") == "lead" and ($c[.id] | not))] | last // empty')
+  if [ "$(jq length <<<"$lines")" = 0 ]; then
+    [ -n "$open" ] || return 0
+    id=$(jq -r .id <<<"$open")
+    ledger_append "$(jq -nc --arg msg "$id" --arg by "$ADDR" --argjson epoch "$now" \
+      '{kind:"resolve",msg:$msg,by:$by,reason:"superseded",note:"watch: nothing left for the lead",epoch:$epoch}')"
+    printf '  closed the lead packet %s: nothing left for the lead\n' "$id"; return 0
+  fi
+  body=$(jq -r --arg at "$(date -u +%H:%MZ)" '
+    def section($k; $title): [.[] | select(startswith($k + "\t")) | ltrimstr($k + "\t")] as $l
+      | if ($l | length) > 0 then "\n" + $title + "\n" + ($l | join("\n")) else empty end;
+    "Watch: \(length) thing(s) need you. Updated \($at); this packet is rewritten in place while it is open and closes itself when the list is empty.",
+    section("unread"; "Work nobody picked up (owner and PM were both told):"),
+    section("stale"; "Seats quiet while holding work, with no live PM to tell:"),
+    section("dark"; "Lanes with no live PM:")' <<<"$lines")
+  if [ -n "$open" ]; then
+    id=$(jq -r .id <<<"$open")
+    if [ "$(sed 1d "$BUS/msg/$id.md" 2>/dev/null)" != "$(sed 1d <<<"$body")" ]; then
+      printf '%s\n' "$body" >"$BUS/msg/$id.md.tmp" && mv "$BUS/msg/$id.md.tmp" "$BUS/msg/$id.md"
+      printf '  updated the lead packet %s in place (%s line(s))\n' "$id" "$(jq length <<<"$lines")"
+    fi
+    return 0
+  fi
+  watch_alert "$lead" "watch: things that need you (one packet, updated in place)" "$body" '{"kind":"lead"}' || true
 }
 
 # Every repo with live seats or open work, from one representative folder.
@@ -3029,16 +3081,18 @@ cmd_watch() {
     if [ -n "$(find "$lockd" -maxdepth 0 -mmin +10 2>/dev/null)" ]; then rmdir "$lockd" 2>/dev/null; mkdir "$lockd" 2>/dev/null || return 0
     else printf 'watch: another pass is running\n'; return 0; fi
   fi
-  if ((here)); then watch_as_self; watch_repo
+  if ((here)); then watch_as_self; watch_repo; [ "$(policy_get supervise)" = on ] && watch_lead_digest
   else
-    local cwds c
+    local cwds c last=''
     while IFS= read -r cwds; do
       for c in $(jq -r '.[]' <<<"$cwds"); do
         [ -d "$c" ] || continue
         ( cd "$c" && unset AGENT_BUS_REPO_ID && watch_as_self && watch_repo ) || true
-        break
+        last="$c"; break
       done
     done < <(watch_repos)
+    [ -n "$last" ] && ( cd "$last" && unset AGENT_BUS_REPO_ID && watch_as_self \
+      && [ "$(policy_get supervise)" = on ] && watch_lead_digest ) || true
   fi
   rmdir "$lockd" 2>/dev/null || true
 }

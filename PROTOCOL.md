@@ -188,6 +188,24 @@ current lane (`--lane`, `--repo-wide`). `--supersedes <id>` replaces an older
 one. `agent-bus decisions` lists the current ones. With `decisions=on`, every
 session on the lane is told them at start; agents follow them or ask the lead.
 
+**Standing decisions** are the user's own calls that hold everywhere: a
+permission, a direction, a fact that keeps getting forgotten. Only the lead,
+or the seat named in `watch.lead`, records one, and it names where the user
+said it:
+
+```sh
+agent-bus decide --global --confirmed "Scott, ask panel, 9:14 PM" "Agents may write Dev secrets" -m "why"
+agent-bus decide --global --confirmed "…" --supersedes <id> "<the new call>"
+agent-bus decide --retract <id> -m "why"
+agent-bus decisions --global
+```
+
+Every seat in every repo reads the current ones at its first digest, and
+again whenever its host's SessionStart hook fires: a resume, `/clear` or a
+compaction, which is when a seat loses what it knew. They are stated as
+replacing anything the seat remembers, so a stale fact dies with the next
+reset instead of surviving it. Superseded and retracted ones drop out.
+
 ## The PM
 
 One seat per repo may hold the PM role (`agent-bus role pm`). To supervise one

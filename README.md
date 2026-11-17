@@ -223,6 +223,16 @@ agent-bus decide "Ship behind the flag" -m "Rollout risk on mobile"
 Every new session in the lane is shown the lane's decisions, so you don't
 re-explain them.
 
+### Make your decisions stick
+
+When you settle something that should hold everywhere, have your lead agent
+record it. Every agent, in every repo, reads it when it starts and again
+after it compacts, so an old fact can't come back:
+
+```sh
+agent-bus decide --global --confirmed "me, 9:14 PM" "Agents may write Dev secrets"
+```
+
 ### Stay out of each other's files
 
 Before editing a file another agent might be in:

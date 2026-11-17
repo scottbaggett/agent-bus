@@ -2276,6 +2276,7 @@ repo_is_new() {
 }
 
 orient() {
+  standing_decisions
   [ "$REPO" = - ] && return 0
   orient_seat
   if policy_configured; then
@@ -2313,7 +2314,7 @@ orient_seat() {
   fi
   # Decisions settled for this lane (and repo-wide): follow them, or escalate.
   if [ "$(policy_get decisions)" = on ]; then
-    decisions_rows '' | jq -rs --argjson now "$(now_epoch)" '
+    decisions_rows '' | jq -c 'select((.global // false) | not)' | jq -rs --argjson now "$(now_epoch)" '
       if length == 0 then empty else
         "agent-bus decisions to follow here: " + (.[:3] | map(.text + " (" + .by + ")") | join("; "))
         + (if length > 3 then " · +\(length - 3) more: agent-bus decisions" else "" end) end' | sanitize
@@ -2441,9 +2442,12 @@ cmd_review() {
 
 # Decisions: settled answers that later sessions on the lane should follow.
 cmd_decide() {
-  local text='' why='' lane="$LANE" sup='' id
+  local text='' why='' lane="$LANE" sup='' id global=0 confirmed='' retract=''
   while [ $# -gt 0 ]; do
     case "$1" in
+      --global) global=1; lane=''; shift ;;
+      --confirmed) [ $# -ge 2 ] || die "decide: --confirmed needs where the user confirmed it"; confirmed="$2"; shift 2 ;;
+      --retract) [ $# -ge 2 ] && valid_id "$2" || die "decide: --retract needs a decision id"; retract="$2"; shift 2 ;;
       --lane) [ $# -ge 2 ] || die "decide: --lane needs a value"; lane="$2"; shift 2 ;;
       -m|--why) [ $# -ge 2 ] || die "decide: -m needs a value"; why="$2"; shift 2 ;;
       --supersedes) [ $# -ge 2 ] && valid_id "$2" || die "decide: --supersedes needs a decision id"; sup="$2"; shift 2 ;;
@@ -2452,22 +2456,60 @@ cmd_decide() {
       *) [ -z "$text" ] || die "decide: one decision at a time (quote it)"; text="$1"; shift ;;
     esac
   done
-  [ -n "$text" ] || die "decide: usage — agent-bus decide \"<decision>\" [--lane l | --repo-wide] [-m why] [--supersedes <id>]"
-  [ "$REPO" != - ] || die "decide: run this inside the repo the decision is about"
+  # A standing decision (--global) is the user's own call, read by every
+  # seat in every repo at start and after every reset. Only the lead or the
+  # seat the lead works through records one, and it says where the user
+  # confirmed it, so no agent can plant a "fact" for the others.
+  if ((global)) || [ -n "$retract" ]; then
+    decide_authority || die "decide: only the lead (or the seat named in watch.lead) records or retracts standing decisions; ask it with: agent-bus post --to @lead --state question"
+  fi
+  if [ -n "$retract" ]; then
+    [ -n "$text" ] && die "decide: --retract takes no new text (to replace a decision: --supersedes <id> \"<new>\")"
+    [ -n "$why" ] || die "decide: --retract needs -m why"
+    text="(retracted)"; sup="$retract"
+  fi
+  [ -n "$text" ] || die "decide: usage — agent-bus decide \"<decision>\" [--lane l | --repo-wide | --global --confirmed \"<where>\"] [-m why] [--supersedes <id> | --retract <id>]"
+  ((global)) && [ -z "$confirmed" ] && die "decide: --global needs --confirmed \"<where the user said it, e.g. Scott, ask panel, 9:14 PM>\""
+  ((global)) || [ "$REPO" != - ] || [ -n "$retract" ] || die "decide: run this inside the repo the decision is about (or --global for a standing decision)"
   id="$(date -u +%Y%m%dT%H%M%SZ)-$(head -c4 /dev/urandom | xxd -p)"
   ledger_append "$(jq -nc --arg id "$id" --arg text "${text:0:300}" --arg why "${why:0:2000}" --arg lane "$lane" \
     --arg repo "$REPO" --arg repo_id "$REPO_ID" --arg by "$ADDR" --arg sup "$sup" --argjson epoch "$(now_epoch)" \
+    --argjson global "$global" --arg confirmed "${confirmed:0:200}" --arg retract "$retract" \
     '{kind:"decision",id:$id,text:$text,lane:$lane,repo:$repo,repo_id:$repo_id,by:$by,epoch:$epoch}
-     + (if $why == "" then {} else {why:$why} end) + (if $sup == "" then {} else {supersedes:$sup} end)')"
-  printf 'decided%s: %s  (%s)\n' "${lane:+ for @$lane}" "$text" "$id"
+     + (if $why == "" then {} else {why:$why} end) + (if $sup == "" then {} else {supersedes:$sup} end)
+     + (if $global == 1 then {global:true} else {} end) + (if $confirmed == "" then {} else {confirmed:$confirmed} end)
+     + (if $retract == "" then {} else {retract:true} end)')"
+  if [ -n "$retract" ]; then printf 'retracted %s  (%s)\n' "$retract" "$id"
+  elif ((global)); then printf 'standing decision: %s  (confirmed: %s; %s)\nevery seat reads it at start and after a reset\n' "$text" "$confirmed" "$id"
+  else printf 'decided%s: %s  (%s)\n' "${lane:+ for @$lane}" "$text" "$id"; fi
 }
 
 # Current decisions in this repo: newest first, superseded ones left out.
-decisions_rows() { # lane ('' = this lane and repo-wide, '*' = all)
+# Who may record or retract a standing decision: the lead, or the seat named
+# as watch.lead (the agent the lead works through).
+decide_authority() {
+  [ "$TOOL" = lead ] && return 0
+  local l; l=$(watch_conf lead @lead)
+  case "$l" in */*) [ "$ADDR" = "$l" ] ;; *) return 1 ;; esac
+}
+
+decisions_rows() { # lane ('' = this lane and repo-wide, '*' = all, 'global' = standing only)
   lq '([$L[] | select(.kind == "decision" and (.supersedes // "") != "") | .supersedes] | map({(.): true}) | add // {}) as $gone
-    | [$L[] | select(.kind == "decision" and .repo_id == $me.repo_id and ($gone[.id] | not))
-        | select($lane == "*" or .lane == "" or .lane == (if $lane == "" then $me.lane else $lane end))]
+    | [$L[] | select(.kind == "decision" and ((.retract // false) | not) and ($gone[.id] | not))
+        | select(if $lane == "global" then (.global // false)
+                 else (.global // false) or (.repo_id == $me.repo_id
+                   and ($lane == "*" or .lane == "" or .lane == (if $lane == "" then $me.lane else $lane end))) end)]
     | sort_by(-.epoch) | .[]' --arg lane "$1"
+}
+
+# Standing decisions, for orientation: what the user has settled, stated so it
+# outranks anything a seat remembers from before a reset.
+standing_decisions() {
+  decisions_rows global | jq -rs '
+    if length == 0 then empty else
+      "agent-bus: standing decisions from your user. They replace anything you remember, read or were told that says otherwise:",
+      (.[:12][] | "  - \(.text) (confirmed: \(.confirmed // "?"); \(.id))"),
+      (if length > 12 then "  … \(length - 12) more: agent-bus decisions --global" else empty end) end' | sanitize
 }
 
 cmd_decisions() {
@@ -2475,14 +2517,15 @@ cmd_decisions() {
   case "${1:-}" in
     --lane) lane="${2:-}"; valid_lane "$lane" || die "decisions: --lane needs a lane name" ;;
     --all) lane='*' ;;
+    --global) lane=global ;;
     '') ;;
-    *) die "decisions: usage — agent-bus decisions [--lane <l> | --all]" ;;
+    *) die "decisions: usage — agent-bus decisions [--lane <l> | --all | --global]" ;;
   esac
   local rows; rows=$(decisions_rows "$lane")
   if [ -z "$rows" ]; then printf 'no decisions recorded%s\n' "${LANE:+ for @$LANE}"; return 0; fi
   jq -r --argjson now "$(now_epoch)" '
     def age($e): ($now - $e) as $s | if $s < 3600 then "\($s / 60 | floor)m" elif $s < 86400 then "\($s / 3600 | floor)h" else "\($s / 86400 | floor)d" end;
-    "\(if .lane == "" then "repo" else "@" + .lane end)  \(.text)\n    — \(.by), \(age(.epoch)) ago  (\(.id))\(if .why then "\n    why: " + .why else "" end)"' <<<"$rows" | sanitize
+    "\(if .global then "standing" elif .lane == "" then "repo" else "@" + .lane end)  \(.text)\n    — \(.by)\(if .confirmed then ", confirmed: " + .confirmed else "" end), \(age(.epoch)) ago  (\(.id))\(if .why then "\n    why: " + .why else "" end)"' <<<"$rows" | sanitize
 }
 
 cmd_resolve() {
@@ -3286,6 +3329,15 @@ cmd_role() {
     ((n > 15)) && printf '  … %d more: agent-bus triage%s\n' "$((n - 15))" "${lane:+ --lane $lane}"
     mark_read "$(jq -c 'map(.id)' <<<"$open")"
   fi
+}
+
+# Whether this digest runs from a host's SessionStart hook (Claude passes the
+# event as JSON on stdin). A start, resume, /clear or compaction is when a
+# seat loses what it knew, so orientation and standing decisions come again.
+hook_session_start() {
+  [ "${AGENT_BUS_VIA:-cli}" = hook ] && [ ! -t 0 ] || return 1
+  local line=''; IFS= read -r -d '' -t 1 line 2>/dev/null || true
+  [ -n "$line" ] && [ "$(jq -r '.hook_event_name // ""' <<<"$line" 2>/dev/null)" = SessionStart ]
 }
 
 # Join, show or leave a lane: the feature this seat is working on.
@@ -4214,6 +4266,14 @@ agent-bus — handoff bus for coding agents sharing repos and worktrees.
                               open work, a live feed; reply and close from it
   snapshot                    machine-wide JSON: seats (with pid and worktree path), open work, lanes,
                               attention, recent activity (read-only; for viewers)
+  decide "<decision>" [--lane <l> | --repo-wide] [-m why] [--supersedes <id>]
+                              record a settled answer for this lane or repo
+  decide --global --confirmed "<where>" "<decision>" | --retract <id> -m why
+                              a standing decision from the user (lead only):
+                              every seat in every repo reads it at start and
+                              after a resume, /clear or compaction
+  decisions [--lane <l> | --all | --global]
+                              the current decisions
   doctor                      identity, host install, live seats
   watch [--here | --status | --install | --uninstall]
                               the supervisor (policy supervise=on): wakes owners
@@ -4290,7 +4350,8 @@ case "$cmd" in
   who) touch_seat; reclaim_pm_roles; cmd_who ;;
   post) touch_seat; case " $* " in *" --close "*) ;; *) seat_offboarded 0 ;; esac; cmd_post "$@" ;;
   read) touch_seat; cmd_read "$@" ;;
-  digest) if [ "${AGENT_BUS_VIA:-cli}" = hook ]; then AGENT_BUS_ACTIVITY=${AGENT_BUS_ACTIVITY:-working} touch_seat; seat_offboarded 0
+  digest) hook_session_start && state_update 'del(.oriented)'
+    if [ "${AGENT_BUS_VIA:-cli}" = hook ]; then AGENT_BUS_ACTIVITY=${AGENT_BUS_ACTIVITY:-working} touch_seat; seat_offboarded 0
     else touch_seat; fi; maybe_gc; peer_catchup; reclaim_pm_roles; cmd_read --digest ;;
   heartbeat) touch_seat; maybe_gc; peer_catchup; reclaim_pm_roles ;;
   show) cmd_show "$@" ;;

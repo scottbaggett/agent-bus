@@ -106,6 +106,28 @@ assert_has "--allow-claude overrides" "posted" "$(AGENT_BUS_POLICY_CLAUDE= raw_s
 assert_has "claude may post to an opencode seat" "posted" "$(AGENT_BUS_POLICY_CLAUDE= raw_seat a claude wa post --to "$B" -m '# to oc')"
 out=$(AGENT_BUS_POLICY_CLAUDE=bogus raw_seat a claude wa post --to "$C" -m x 2>&1 || true)
 assert_has "an unknown claude value falls back to refuse" "use Claude session messaging (SendMessage)" "$out"
+# the repo's committed .agent-bus.json may open the rule, but a personal
+# value (env or config.json) always wins; with none set, the repo file applies.
+RP="$BUS_HOME/claude-repo.json"; PCFG="$BUS_HOME/config.json"
+printf '{"policy":{"claude":"allow"}}' >"$RP"
+rc() { AGENT_BUS_POLICY_CLAUDE="${RC_ENV:-}" AGENT_BUS_REPO_POLICY="$RP" raw_seat "$@"; }
+assert_has "repo claude=allow opens the rule when nothing personal is set" "posted" "$(rc a claude wa post --to "$C" -m '# repo opens')"
+assert_has "init --show names the repo layer" "claude is set by: repo $RP" "$(rc a claude wa init --show)"
+printf '{"policy":{"claude":"refuse"}}' >"$PCFG"
+out=$(rc a claude wa post --to "$C" -m x 2>&1 || true)
+assert_has "personal claude=refuse beats the repo's allow" "use Claude session messaging (SendMessage)" "$out"
+assert_has "init --show names the personal layer" "claude is set by: personal" "$(rc a claude wa init --show)"
+assert_has "env allow beats personal refuse" "posted" "$(RC_ENV=allow rc a claude wa post --to "$C" -m '# env wins')"
+printf '{"policy":{"claude":"allow"}}' >"$PCFG"; printf '{"policy":{"claude":"refuse"}}' >"$RP"
+assert_has "personal claude=allow beats the repo's refuse" "posted" "$(rc a claude wa post --to "$C" -m '# personal wins')"
+rm -f "$PCFG"
+printf '{"policy":{"claude":"refuse"}}' >"$RP"
+out=$(rc a claude wa post --to "$C" -m x 2>&1 || true)
+assert_has "repo claude=refuse keeps the rule closed" "use Claude session messaging (SendMessage)" "$out"
+# A child seat (a subagent) is a Claude seat too, so the default refusal covers it.
+out=$(AGENT_BUS_POLICY_CLAUDE= raw_seat a claude wa --as-child kid post --to "$C" -m x 2>&1 || true)
+assert_has "a child seat's post to a claude seat is refused by default" "use Claude session messaging (SendMessage)" "$out"
+rm -f "$RP"
 c read >/dev/null; b read >/dev/null
 
 # --- PM: role, auto-CC, ownership ---

@@ -178,11 +178,16 @@ seat and a crashed one look different.
 
 ## Team rules
 
-Each repo sets five rules once, with `agent-bus init` (asks) or
-`agent-bus init --set k=v,...` (an agent saving its user's answers). They are
+Each repo has five rules. `agent-bus init` asks about the first four (`claude`
+is set only with `--set`); `agent-bus init --set k=v,...` is for an agent saving
+its user's answers. They are
 written to `.agent-bus.json` at the repo root; commit it so the team shares them.
 `~/.agents/bus/config.json` holds personal overrides and `AGENT_BUS_POLICY_<KEY>`
-overrides both. `agent-bus init --show` prints what applies.
+overrides both. `agent-bus init --show` prints what applies and, for `claude`,
+which layer set it. For `claude`, a personal value (the env var or
+`config.json`) always beats a repo `.agent-bus.json`, so a repo file can only
+open the rule (`claude=allow`) for someone who has set nothing personally; set
+`claude=refuse` in `config.json` to keep it closed everywhere.
 
 | Rule | Values (default first) | Effect |
 |---|---|---|

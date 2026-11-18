@@ -2116,6 +2116,15 @@ policy_json() {
   done
   jq -nc --argjson d "$POLICY_DEFAULTS" --argjson r "$repo" --argjson p "$personal" --argjson e "$env" '$d + $r + $p + $e'
 }
+# Which layer decides `claude`: env, personal config, the repo file, or the default.
+# A personal value beats a repo file (policy_json merges the repo layer first).
+claude_policy_source() {
+  local v; v=$(printenv AGENT_BUS_POLICY_CLAUDE || true)
+  if [ -n "$v" ] && policy_valid claude "$v"; then printf 'env AGENT_BUS_POLICY_CLAUDE'
+  elif [ "$(policy_layer "$BUS/config.json" | jq -r '.claude // empty')" != "" ]; then printf 'personal %s/config.json' "$BUS"
+  elif [ "$REPO" != - ] && [ -n "$(policy_layer "$(repo_policy_file)" | jq -r '.claude // empty')" ]; then printf 'repo %s' "$(repo_policy_file)"
+  else printf 'default'; fi
+}
 policy_get() { policy_json | jq -r --arg k "$1" '.[$k] // ""'; }
 # Whether anyone has set rules for this repo (or personally).
 policy_configured() {
@@ -3330,6 +3339,7 @@ cmd_init() {
   if ((show)); then
     printf 'rules for %s%s:\n' "$REPO" "$(policy_configured || echo ' (not set — these are the defaults)')"
     policy_json | jq -r 'to_entries[] | "  \(.key) = \(.value)"'
+    printf '  (claude is set by: %s; a personal value beats the repo file)\n' "$(claude_policy_source)"
     printf '\n%s\n' "$(policy_summary)"
     return 0
   fi

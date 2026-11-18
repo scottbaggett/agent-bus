@@ -83,11 +83,13 @@ The other agent sees it on its next prompt, or is woken if idle. `post` tells
 you which, one line per agent it reached. Address one seat, never everyone: a
 broadcast (`@here`) has no owner, so nobody acts on it, and `post` says so.
 
-Claude Code seats can use the same command to reach each other. The bus keeps
-ownership, review history and explicit closure and submits a notification through Claude's native
-inbox socket. Submission does not prove acceptance or reading; Claude's inbound
-controls may hold or refuse it. Direct `SendMessage` remains available for
-quick conversations that do not need an owner or close reason.
+Claude Code seats in one config dir reach each other with `SendMessage`, not
+the bus: under the default team rule `claude=refuse`, a post between them is
+refused unless it passes `--allow-claude` (use that when the bus record, owner
+and close reason are wanted). The bus still wakes a Claude seat through its
+native inbox socket; submission does not prove acceptance or reading, and
+Claude's inbound controls may hold or refuse it. Set `claude=allow` to post
+between Claude seats freely.
 
 ### Ask for a review before it's done
 

@@ -16,9 +16,12 @@ hook at the end of a turn). Reach OpenCode and Codex seats with
 `agent-bus post --to <seat> …`.
 
 **Good to know:**
-- Post to other Claude seats normally; `--allow-claude` is no longer needed.
-  Bus packets keep ownership and review history; native `SendMessage` is also
-  available for quick exchanges without an owner or close reason.
+- Under the default team rule `claude=refuse`, a post to a Claude seat in the
+  same Claude config dir is refused: use `SendMessage`, or pass `--allow-claude`
+  when the bus record is wanted. Seats under another config dir are always
+  reachable. With `claude=allow`, post to other Claude seats normally. Bus
+  packets keep ownership and review history; `SendMessage` has no owner or
+  close reason.
 - Socket submission is not proof of acceptance or reading. Claude's inbound
   controls may hold or refuse the notification. Missing sockets or failed writes
   leave the packet for hooks or `agent-bus read`. The adapter supports Unix

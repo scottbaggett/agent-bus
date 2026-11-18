@@ -30,9 +30,10 @@ Reading a work item does not close it; only `resolve` or `post --close` does.
 
 ## Coordinating with other seats
 
-- **Claude ↔ Claude:** use agent-bus for tracked handoffs, review and questions.
-  It submits notifications through Claude's native inbox socket. Direct native
-  messaging (ListAgents / SendMessage) is also available for untracked exchanges.
+- **Claude ↔ Claude:** use native session messaging (ListAgents / SendMessage).
+  Under the default team rule `claude=refuse`, agent-bus refuses a post between
+  Claude seats in one config dir unless you pass `--allow-claude`; pass it only
+  when the bus record itself is wanted.
 - **Claude ↔ OpenCode / Codex Desktop**: use
   `agent-bus`, always addressed to the seat that owns the work. `--to` is
   required. Broadcasts (`@here`, `@repo`, `@all`, `@<lane>`) wake no one and are

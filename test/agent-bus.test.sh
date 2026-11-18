@@ -2367,6 +2367,33 @@ mvstub del "$HKM2"; hkmv "$HKM2"
 assert_eq "a marker removed mid-write: none left" "" "$(ls "$HKM2/state/hooks-failing")"
 assert_eq "a marker removed mid-write: health says ok" true "$(jq -r .ok "$HKM2/state/hook-health.json")"
 
+# --- role and lane names; refusal and lane-broadcast messages ---
+out=$(a role drop pm 2>&1 || true)
+assert_has "role refuses a verb as a name" "is a verb, not a name" "$out"
+assert_has "and lists the valid forms" "role [pm" "$out"
+assert_lacks "no role named drop was created" "@drop" "$(a role)"
+out=$(a role release2 pm 2>&1 || true)
+assert_has "role refuses a name together with pm" "usage" "$out"
+out=$(a role one two 2>&1 || true)
+assert_has "role refuses two names" "usage" "$out"
+assert_has "role release is still a legitimate name" "@release" "$(a role release)"
+a role release --clear >/dev/null
+out=$(a lane drop 2>&1 || true)
+assert_has "lane refuses a verb as a lane name" "lane [<name>" "$out"
+assert_eq "no lane called drop was set" "no" "$(a lane | grep -q '^drop' && echo yes || echo no)"
+out=$(a lane done 2>&1 || true)
+assert_has "lane refuses a lifecycle verb given alone" "lane <name> done" "$out"
+
+out=$(pm lane drop done --reason merged 2>&1 || true)
+assert_has "a lifecycle verb is not accepted after a verb-named lane" "is a verb, not a name" "$out"
+assert_eq "no lane row was written for it" "0" "$(grep -c '"lane":"drop"' "$BUS_HOME/ledger.jsonl" || true)"
+out=$(pm lane somelane bogus 2>&1 || true)
+assert_has "an unknown lane verb gets the usage, not a standing error" "usage" "$out"
+assert_lacks "and is not reported as a permission problem" "only the lead" "$out"
+assert_has "a drop-like verb is pointed at --clear" "--clear" "$(a role drop 2>&1 || true)"
+assert_lacks "another verb is not told to use --clear" "to drop it use --clear" "$(a role start 2>&1 || true)"
+assert_has "the drop hint is shown for a drop verb" "to drop it use --clear" "$(a role drop 2>&1 || true)"
+
 # --- isolation: nothing from the host session reached the fixtures ---
 assert_eq "no host session, socket or pane variable is set" "" "$(env | grep -E "$HOST_ENV" | grep -v '^AGENT_BUS_' | cut -d= -f1)"
 assert_eq "no Codex variable reaches the fixtures" "" "$(env | grep -E '^CODEX_' | cut -d= -f1)"

@@ -3139,13 +3139,26 @@ cmd_claims() {
   jq -r '"\(.addr)  \(.path)"' <<<"$c" | sanitize
 }
 
+# A verb typed where a name goes is refused, because the command would take it
+# as a name and create it: `role drop pm` made a role called "drop". (release
+# is a fine role name, so it is not here.) Only a verb that means "let go" is
+# told about --clear.
+NAME_VERBS='drop remove delete rm unset leave clear resign quit stop start show list set add take give join on off done park reopen sweep'
+CLEAR_VERBS='drop remove delete rm unset leave clear resign quit stop'
+not_a_verb() { # command word usage
+  in_list "$2" "$NAME_VERBS" || return 0
+  die "$1: '$2' is a verb, not a name, and $1 has no such verb — usage: agent-bus $3$(in_list "$2" "$CLEAR_VERBS" && printf ' (to drop it use --clear)' || :)"
+}
+
 cmd_role() {
   local take=0 clear=0 force=0 lane='' cur f label name=''
   [ -z "$PARENT" ] || die "role: $ADDR is a subagent; roles belong to its parent, $PARENT"
   while [ $# -gt 0 ]; do
     case "$1" in
       pm) take=1 ;;
-      [a-z0-9]*) valid_lane "$1" || die "role: '$1' is not a role name ([a-z0-9-], max 32, not here|repo|all|pm|repo-pm|lead)"
+      [a-z0-9]*) not_a_verb role "$1" 'role [pm [--lane <name>] | <name>] [--force | --clear]'
+                 [ -z "$name" ] || die "role: usage — one role name at a time (got '$name' and '$1')"
+                 valid_lane "$1" || die "role: '$1' is not a role name ([a-z0-9-], max 32, not here|repo|all|pm|repo-pm|lead)"
                  name="$1" ;;
       --clear) clear=1 ;;
       --force) force=1 ;;
@@ -3155,6 +3168,7 @@ cmd_role() {
     esac
     shift
   done
+  [ -z "$name" ] || ((!take)) || die "role: usage — 'pm' and a role name ('$name') are separate: agent-bus role pm  |  agent-bus role $name"
   # A named role (@release, @lead-architect): what this seat does. Pure
   # addressing — the holder owns packets sent to @<name>; no copies.
   if [ -n "$name" ]; then
@@ -3235,6 +3249,9 @@ days_secs() { local d="${1%d}"; [[ "$d" =~ ^[0-9]+$ ]] || die "expected a number
 lane_lifecycle() {
   local name="$1" verb="$2" reason='' older='' older_raw='' title='' state='' before=0 n
   shift 2
+  not_a_verb lane "$name" 'lane [<name> | --clear]  |  lane <name> done|park|reopen|sweep|title'
+  in_list "$verb" 'done park reopen sweep title' ||
+    die "lane: '$verb' is not a lane verb — usage: agent-bus lane <name> done|park|reopen|sweep|title [--reason r] [--older Nd] [--title t]"
   while [ $# -gt 0 ]; do
     [ $# -ge 2 ] || die "lane: $1 needs a value"
     case "$1" in
@@ -3293,7 +3310,8 @@ cmd_lane() {
              if [ -n "$LANE" ]; then printf 'explicit lane cleared; now in @%s (%s)\n' "$LANE" "$LANE_SRC"
              else printf 'left lane\n'; fi ;;
     -*) die "lane: usage — agent-bus lane [<name> | --clear]" ;;
-    *) valid_lane "$1" || die "lane: '$1' is not a lane name ([a-z0-9-], max 32, not here|repo|all|pm|repo-pm)"
+    *) not_a_verb lane "$1" 'lane [<name> | --clear]  |  lane <name> done|park|reopen|sweep|title'
+       valid_lane "$1" || die "lane: '$1' is not a lane name ([a-z0-9-], max 32, not here|repo|all|pm|repo-pm)"
        state_update '.lane = $l' --arg l "$1"; LANE="$1"; touch_seat
        printf '%s is in lane @%s%s\n' "$ADDR" "$1" "$( [ -n "$(lane_pm_seat "$1")" ] && echo " (PM: $(lane_pm_seat "$1"))")" ;;
   esac

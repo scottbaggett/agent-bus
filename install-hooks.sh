@@ -168,12 +168,15 @@ link_skill() { # dir name
   return 0
 }
 install_skills() {
-  local dirs=''
-  ((do_claude)) && dirs="$CLAUDE_DIR/skills"
-  ((do_opencode)) && [ "$dirs" != "$HOME/.claude/skills" ] && dirs="$dirs $HOME/.claude/skills"
-  ((do_codex)) && dirs="$dirs ${CODEX_HOME:-$HOME/.codex}/skills"
+  # Claude reads skills from its own config dir; OpenCode always reads ~/.claude/skills.
+  # An array, so a config dir with spaces in its path is never word-split.
+  local dirs=()
+  ((do_claude)) && dirs+=("$CLAUDE_DIR/skills")
+  ((do_opencode)) && dirs+=("$HOME/.claude/skills")
+  ((do_codex)) && dirs+=("${CODEX_HOME:-$HOME/.codex}/skills")
   local d
-  for d in $dirs; do
+  while IFS= read -r d; do
+    [ -n "$d" ] || continue
     link_skill "$d" agent-bus
     # The opt-out is remembered per skills dir, so `agent-bus update` and the curl
     # installer (which pass host flags only) keep it there, and no other dir is affected.
@@ -182,7 +185,8 @@ install_skills() {
       if ((handoff_alias)); then rm -f "$optout"; link_skill "$d" handoff; fi
     elif ((! handoff_alias)); then mkdir -p "$d" && : >"$optout"
     elif [ ! -e "$optout" ]; then link_skill "$d" handoff; fi
-  done
+  done < <(printf '%s\n' ${dirs[@]+"${dirs[@]}"} | awk '!seen[$0]++')
+  return 0
 }
 
 ((do_claude)) && install_claude

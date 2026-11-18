@@ -62,9 +62,19 @@ assert_eq "re-install does not duplicate hooks" 4 "$n"
 assert_eq "agent-bus hooks keeps the stable path" "$hooks" "$(jq -r '[.hooks[][].hooks[].command] | join("\n")' "$HOME/.claude/settings.json")"
 assert_eq "agent-bus hooks keeps the skill on current" "$SHARE/current/skills/agent-bus" "$(readlink "$HOME/.claude/skills/agent-bus")"
 
+# A Claude config dir with a space in its path still gets the skill (the dir
+# list is an array, never word-split).
+SP="$T/cfg with space"; mkdir -p "$SP"
+out=$(CLAUDE_CONFIG_DIR="$SP" "$BINDIR/agent-bus" hooks --claude 2>&1)
+assert_eq "skills install into a config dir with spaces" "$SHARE/current/skills/agent-bus" "$(readlink "$SP/skills/agent-bus")"
+assert_eq "the handoff alias lands there too" "1" "$([ -L "$SP/skills/handoff" ] && echo 1 || echo 0)"
+assert_eq "nothing was split into stray dirs" "no" "$([ -e "$T/cfg" ] || [ -e "$PWD/with" ] && echo yes || echo no)"
+out=$(CLAUDE_CONFIG_DIR="$SP" "$BINDIR/agent-bus" hooks --claude --no-handoff-alias 2>&1)
+assert_eq "--no-handoff-alias still installs agent-bus there" "$SHARE/current/skills/agent-bus" "$(readlink "$SP/skills/agent-bus")"
+
 # The opt-out is remembered: the installer accepts the flag, and `agent-bus update`
 # (which passes host flags only) keeps honouring it.
-SP2="$T/cfg-optout"; mkdir -p "$SP2"
+SP2="$T/cfg optout"; mkdir -p "$SP2"
 out=$(CLAUDE_CONFIG_DIR="$SP2" inst 9.9.2 --no-handoff-alias 2>&1)
 assert_eq "install.sh --no-handoff-alias installs agent-bus" "$SHARE/current/skills/agent-bus" "$(readlink "$SP2/skills/agent-bus")"
 assert_eq "install.sh --no-handoff-alias leaves /handoff free" "absent" "$([ -e "$SP2/skills/handoff" ] && echo present || echo absent)"
@@ -76,7 +86,7 @@ assert_eq "update keeps /handoff free" "absent" "$([ -e "$SP2/skills/handoff" ] 
 CLAUDE_CONFIG_DIR="$SP2" "$BINDIR/agent-bus" hooks --claude >/dev/null
 assert_eq "agent-bus hooks keeps /handoff free" "absent" "$([ -e "$SP2/skills/handoff" ] && echo present || echo absent)"
 # Per config dir: another dir is not affected by SP2's opt-out.
-SP3="$T/cfg-other"; mkdir -p "$SP3"
+SP3="$T/cfg other"; mkdir -p "$SP3"
 CLAUDE_CONFIG_DIR="$SP3" "$BINDIR/agent-bus" hooks --claude >/dev/null
 assert_eq "an opt-out for one config dir leaves another linked" "1" "$([ -L "$SP3/skills/handoff" ] && echo 1 || echo 0)"
 rm -f "$SP2/skills/.agent-bus-no-handoff"

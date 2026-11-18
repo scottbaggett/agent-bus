@@ -669,7 +669,11 @@ touch_seat() {
 # over, however recently it was seen: its rows come back with epoch 0.
 seat_rows() {
   local rows dead='' p
-  rows=$(cat "$BUS"/seats/*.json 2>/dev/null | jq -cR 'fromjson? // empty' || true)
+  # Each file is read on its own and its last line ended, so a seat file with
+  # no trailing newline can't run into the first line of the next one, and one
+  # that vanished or can't be read costs only itself.
+  rows=$(for p in "$BUS"/seats/*.json; do [ -f "$p" ] && { cat "$p" 2>/dev/null; echo; }; done \
+    | jq -cR 'fromjson? // empty' || true)
   [ -n "$rows" ] || return 0
   rows=$(wake_annotate <<<"$rows")
   # A child seat is no more live than its parent, which may end without offboarding it.

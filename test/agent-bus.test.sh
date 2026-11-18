@@ -2112,6 +2112,30 @@ cx read --peek >/dev/null
 assert_lacks "a command from the seat confirms it again" "UNCONFIRMED" "$(r2 unconf rpm who)"
 assert_eq "and its lane's work comes back to it" "$CX" "$(r2owner 'for the ux lane PM')"
 
+# --- a seat file with no trailing newline can't swallow the next seat's row ---
+NL1=$(r2addr nonl s1); NL2=$(r2addr nonl s2)
+r2 nonl s1 who >/dev/null; r2 nonl s2 who >/dev/null
+nlf=$(grep -l "\"addr\":\"$NL1\"" "$R2"/seats/*.json | head -1)
+printf '%s' "$(cat "$nlf")" >"$nlf"
+assert_eq "the fixture seat file ends without a newline" no "$([ "$(tail -c1 "$nlf" | xxd -p)" = 0a ] && echo yes || echo no)"
+nl_who=$(r2 nonl s2 who)
+assert_has "a seat file without a trailing newline is still listed" "$NL1" "$nl_who"
+assert_has "and the seat after it is too" "$NL2" "$nl_who"
+nl_snap=$(AGENT_BUS_HOME="$R2" "$BIN" snapshot | jq -c --arg a "$NL1" --arg b "$NL2" '[.seats[] | select(.addr == $a or .addr == $b) | .addr] | sort')
+assert_eq "snapshot lists both seats" "$(jq -nc --arg a "$NL1" --arg b "$NL2" '[$a,$b] | sort')" "$nl_snap"
+
+# --- a seat file removed between the glob and the read doesn't drop the seats after it ---
+r2 nonl s3 who >/dev/null
+NL3=$(r2addr nonl s3)
+ln -s "$R2/seats/gone-between.json" "$R2/seats/nonl_zz_dangling.json"
+nl_who=$(r2 nonl s3 who)
+assert_has "a seat after an unreadable file is still listed" "$NL3" "$nl_who"
+rm -f "$R2/seats/nonl_zz_dangling.json"
+ln -s "$R2/seats/gone-between.json" "$R2/seats/a_dangling.json"
+nl_who=$(r2 nonl s3 who)
+assert_has "and so is every seat after one that comes first" "$NL1" "$nl_who"
+rm -f "$R2/seats/a_dangling.json"
+
 # --- a repo with no commits records its branch by name ---
 NC="$BUS_HOME/nocommits"; mkdir -p "$NC"; git -C "$NC" init -q -b firstbranch
 (cd "$NC" && env -u AGENT_BUS_BRANCH -u AGENT_BUS_REPO_ID AGENT_BUS_HOME="$R2" AGENT_BUS_TOOL=opencode AGENT_BUS_SESSION=nc1 \

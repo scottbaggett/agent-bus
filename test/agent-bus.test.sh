@@ -1286,6 +1286,15 @@ ss d2 offboard >/dev/null
 assert_has "offboarding ends the pin, so a new session starts fresh" "claude/d2." "$(ss d2 whoami | awk '/^seat/{print $2}')"
 unset AGENT_BUS_SEAT_KEY
 
+# --- triage and role outside a git repo, with the scope set by AGENT_BUS_REPO_ID ---
+out=$(cd "$SB/plain" && AGENT_BUS_HOME="$SB/bus" AGENT_BUS_REPO_ID=acme AGENT_BUS_TOOL=claude AGENT_BUS_SESSION=t1 "$BIN" triage 2>&1)
+assert_lacks "triage works outside a git repo when the scope is set" "not in a git repo" "$out"
+assert_has "and lists the scope's open work" "report from a worker" "$out"
+out=$(cd "$SB/plain" && AGENT_BUS_HOME="$SB/bus" AGENT_BUS_TOOL=claude AGENT_BUS_SESSION=t1 "$BIN" triage 2>&1 || true)
+assert_has "triage outside a repo with no scope still says why it can't" "not in a git repo" "$out"
+out=$(cd "$SB/plain" && AGENT_BUS_HOME="$SB/bus" AGENT_BUS_REPO_ID=acme AGENT_BUS_TOOL=claude AGENT_BUS_SESSION=t1 "$BIN" role pm --lane other-1 2>&1)
+assert_has "role works outside a git repo" "PM for lane @other-1" "$out"
+
 rm -rf "$SB"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"

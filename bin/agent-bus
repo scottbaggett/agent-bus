@@ -2445,9 +2445,9 @@ cmd_triage() {
     esac
     shift
   done
-  [ "$REPO" = - ] && die "triage: not in a git repo — cd to a worktree first"
+  [ "$REPO" = - ] && [ -z "${AGENT_BUS_REPO_ID:-}" ] && die "triage: not in a git repo — cd to a worktree first"
   local items; items=$(open_items "$lane")
-  if [ -z "$items" ]; then printf 'agent-bus: no open work in %s%s\n' "$REPO" "${lane:+ lane @$lane}"; return 0; fi
+  if [ -z "$items" ]; then printf 'agent-bus: no open work in %s%s\n' "$( [ "$REPO" = - ] && echo "$REPO_ID" || echo "$REPO")" "${lane:+ lane @$lane}"; return 0; fi
   jq -rs --argjson now "$(now_epoch)" "$JQ_LIB"'
     def age: ($now - (.epoch // $now)) as $s
       | if $s < 3600 then "\($s / 60 | floor)m" elif $s < 86400 then "\($s / 3600 | floor)h"

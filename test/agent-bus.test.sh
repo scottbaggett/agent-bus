@@ -2054,6 +2054,13 @@ for cmd in stop-hook digest; do
   assert_eq "$cmd runs jq as often with six lane PMs as with one" "$(jq_calls cost1 pl1 "$cmd")" "$(jq_calls cost6 pl1 "$cmd")"
 done
 
+# --- a repo with no commits records its branch by name ---
+NC="$BUS_HOME/nocommits"; mkdir -p "$NC"; git -C "$NC" init -q -b firstbranch
+(cd "$NC" && env -u AGENT_BUS_BRANCH -u AGENT_BUS_REPO_ID AGENT_BUS_HOME="$R2" AGENT_BUS_TOOL=opencode AGENT_BUS_SESSION=nc1 \
+  AGENT_BUS_WT=wnc "$BIN" heartbeat >/dev/null)
+assert_eq "a repo with no commits records its unborn branch" '"firstbranch"' \
+  "$(jq -c 'select(.wt == "wnc") | .branch' "$R2"/seats/*.json)"
+
 # --- isolation: nothing from the host session reached the fixtures ---
 assert_eq "no host session, socket or pane variable is set" "" "$(env | grep -E "$HOST_ENV" | grep -v '^AGENT_BUS_' | cut -d= -f1)"
 assert_eq "no Codex variable reaches the fixtures" "" "$(env | grep -E '^CODEX_' | cut -d= -f1)"

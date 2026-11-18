@@ -189,8 +189,11 @@ resolve_identity() {
       b=$(basename "$TOP"); p=$(basename "$(dirname "$TOP")")
       if [ "$b" = "$REPO" ]; then WT="$p"; else WT="$b"; fi
     fi
-    BRANCH=$(cd "$TOP" && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo -)
-    [ "$BRANCH" = HEAD ] && BRANCH="detached@$(cd "$TOP" && git rev-parse --short HEAD)"
+    # symbolic-ref names the branch even before its first commit, where
+    # rev-parse --abbrev-ref HEAD prints "HEAD" and fails.
+    if ! BRANCH=$(cd "$TOP" && git symbolic-ref --short -q HEAD 2>/dev/null); then
+      BRANCH=$(cd "$TOP" && git rev-parse -q --short HEAD 2>/dev/null) && BRANCH="detached@$BRANCH" || BRANCH=-
+    fi
   else
     REPO=-; WT=$(basename "$PWD"); BRANCH=-; TOP="$PWD"
     REPO_ID=$(printf '%s' "$TOP" | shasum -a 256 | cut -c1-16)

@@ -26,6 +26,13 @@ two clones sharing a basename never share a PM, claims or `@repo`.
 Identity follows the current directory. Run bus commands from the repo you are
 working in, or you post as a different seat.
 
+With `AGENT_BUS_SEAT_KEY=session`, identity follows the session instead. The
+first command a session runs pins its worktree name in
+`state/sessions/<tool>.<hash>`, and every later command reuses it, wherever the
+process has moved. So one session is one seat, and its roles stay on that seat.
+`cwd`, repo, branch and lane still follow the current directory, as attributes.
+An explicit `AGENT_BUS_WT` still wins, and `offboard` removes the pin.
+
 Each seat records its worktree path (`cwd`) and the pid of the agent process it
 runs in, and `agent-bus snapshot` reports both, so a viewer can tie a seat to
 its CPU, memory, child processes and containers. Claude's pid comes from its
@@ -517,6 +524,7 @@ timeout.  The Python Codex adapter (`lib/codex_queue.py`) uses the same
   seats/<seat>.json     seat registry (grok seats include grok_webhook, grok_secret_env)
   secrets/grok_<n>.secret  0600 webhook bearer token (written at grok register)
   state/<seat>.json     read cursor, wake count, grok_attempts list
+  state/sessions/<tool>.<hash>  a session's pinned worktree name (AGENT_BUS_SEAT_KEY=session)
   state/roles/<r>.pm    repo PM
   state/roles/<r>.lane.<l>.pm  lane PM
   claims/<hash>.json    claims

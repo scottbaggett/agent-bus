@@ -185,7 +185,6 @@ resolve_identity() {
     REPO=-; WT=$(basename "$PWD"); BRANCH=-; TOP="$PWD"
     REPO_ID=$(printf '%s' "$TOP" | shasum -a 256 | cut -c1-16)
   fi
-  [ -n "${AGENT_BUS_WT:-}" ] && WT="$AGENT_BUS_WT"
   [ -n "${AGENT_BUS_REPO_ID:-}" ] && REPO_ID="$AGENT_BUS_REPO_ID"
   # The session id follows the tool: an OpenCode started from a Claude shell
   # inherits CLAUDE_CODE_SESSION_ID, which must not name its seats.
@@ -195,6 +194,9 @@ resolve_identity() {
     claude) SESSION="${AGENT_BUS_SESSION:-${CLAUDE_CODE_SESSION_ID:-local}}" ;;
     *) SESSION="${AGENT_BUS_SESSION:-local}" ;;
   esac
+  if [ -n "${AGENT_BUS_WT:-}" ]; then WT="$AGENT_BUS_WT"
+  elif [ "${AGENT_BUS_SEAT_KEY:-}" = session ] && [ "$SESSION" != local ]; then WT=$(session_pin "$WT")
+  fi
   SCOPE="$TOOL/$WT"
   if [ "$SESSION" != local ]; then
     ADDR="$SCOPE.$(printf '%s' "$SESSION" | shasum -a 256 | cut -c1-4)"
@@ -218,6 +220,17 @@ resolve_identity() {
     --arg repo "$REPO" --arg repo_id "$REPO_ID" --arg wt "$WT" --arg lane "$LANE" \
     --arg tool "$TOOL" \
     '{addr:$addr,tool:$tool,scope:$scope,session:$session,repo:$repo,repo_id:$repo_id,wt:$wt,lane:$lane}')
+}
+
+# A session's seat is pinned to the worktree name it first ran from, so a
+# process that cd's elsewhere stays one seat. First writer wins (noclobber).
+session_pin_file() { printf '%s/state/sessions/%s.%s' "$BUS" "$TOOL" "$(printf '%s' "$SESSION" | shasum -a 256 | cut -c1-16)"; }
+session_pin() {
+  local f pinned; f=$(session_pin_file)
+  mkdir -p "${f%/*}"
+  ( set -C; printf '%s\n' "$1" >"$f" ) 2>/dev/null || true
+  pinned=$(head -1 "$f" 2>/dev/null || true)
+  printf '%s' "${pinned:-$1}"
 }
 
 # The agent process a seat runs in, so viewers can tie the seat to its CPU,

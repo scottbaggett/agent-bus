@@ -1261,5 +1261,32 @@ assert_has "doctor checks the hooks in CLAUDE_CONFIG_DIR's settings" "claude    
   "$(HOME="$ih" CLAUDE_CONFIG_DIR="$ih/ctx" AGENT_BUS_HOME="$ih/bus" "$BIN" doctor 2>&1)"
 rm -rf "$ih"
 
+# --- session-pinned seats (AGENT_BUS_SEAT_KEY=session) ---
+SB=$(mktemp -d); mkdir -p "$SB/d1" "$SB/d2" "$SB/plain"
+ss() { (cd "$SB/$1" && shift && AGENT_BUS_HOME="$SB/bus" AGENT_BUS_REPO_ID=acme AGENT_BUS_TOOL=claude \
+  AGENT_BUS_SESSION=${SS_SESSION:-sess1} "$BIN" "$@"); }
+unpinned1=$(ss d1 whoami | awk '/^seat/{print $2}'); unpinned2=$(ss d2 whoami | awk '/^seat/{print $2}')
+[ "$unpinned1" != "$unpinned2" ] && ok "without a seat key, a session's seat follows its folder" \
+  || bad "without a seat key, a session's seat follows its folder" "$unpinned1"
+SS_SESSION=sess2
+export AGENT_BUS_SEAT_KEY=session
+p1=$(ss d1 whoami | awk '/^seat/{print $2}'); p2=$(ss d2 whoami | awk '/^seat/{print $2}')
+assert_eq "with AGENT_BUS_SEAT_KEY=session, a session keeps one seat wherever it runs" "$p1" "$p2"
+assert_has "the seat is named for where the session started" "claude/d1." "$p1"
+assert_has "its cwd still follows the folder" "cwd      $SB/d2" "$(ss d2 whoami)"
+assert_has "an explicit AGENT_BUS_WT still wins" "claude/other." "$(AGENT_BUS_WT=other ss d2 whoami | awk '/^seat/{print $2}')"
+ss d2 role pm --lane lane-b >/dev/null
+assert_has "a lane PM taken from another folder binds to the one seat" "PM for lane @lane-b: $p1" "$(ss d1 role pm --lane lane-b --clear >/dev/null; ss d2 role pm --lane lane-b >/dev/null; ss d1 role --lane lane-b)"
+ss d1 who >/dev/null; ss d2 who >/dev/null
+assert_eq "who shows one row per session" "1" "$(ss d1 who | grep -c " $p1 .* ago" || true)"
+(cd "$SB/plain" && AGENT_BUS_HOME="$SB/bus" AGENT_BUS_REPO_ID=acme AGENT_BUS_TOOL=codex AGENT_BUS_SESSION=w1 \
+  AGENT_BUS_LANE=lane-b "$BIN" post --to @lane-b --state needs-review -m "# report from a worker" >/dev/null)
+assert_has "work for the lane reaches the PM session from any folder" "report from a worker" "$(ss d2 read --peek)"
+ss d2 offboard >/dev/null
+assert_has "offboarding ends the pin, so a new session starts fresh" "claude/d2." "$(ss d2 whoami | awk '/^seat/{print $2}')"
+unset AGENT_BUS_SEAT_KEY
+
+rm -rf "$SB"
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 ((fail == 0))

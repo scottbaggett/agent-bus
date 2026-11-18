@@ -4647,10 +4647,13 @@ usage() {
 agent-bus — handoff bus for coding agents sharing repos and worktrees.
 
   version                     version, and where this CLI runs from
-  update [--version <tag>]    install the latest (or a given) release
+  update [--version <tag>] [--no-handoff-alias]
+                              install the latest (or a given) release
   uninstall                   remove hooks, skills and the install (not the bus)
-  hooks [--claude|--opencode|--codex] [--uninstall]
-                              (re)wire agents on this machine to this CLI
+  hooks [--claude|--opencode|--codex] [--uninstall] [--no-handoff-alias]
+                              (re)wire agents on this machine to this CLI;
+                              --no-handoff-alias leaves /handoff alone
+                              (remembered per config dir)
   codex enable|disable|status control or inspect this chat's queue delivery
                               enable requires python3 and a queue-capable Codex
   grok register|unregister|status  register/remove a remote Grok Bot seat and its

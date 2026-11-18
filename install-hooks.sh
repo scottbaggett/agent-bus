@@ -5,8 +5,12 @@
 # and is stripped before re-adding. Each config is backed up once, next to
 # itself, before the first write.
 #
-# Usage: install-hooks.sh [--claude] [--opencode] [--codex] [--uninstall] [--remove-legacy]
+# Usage: install-hooks.sh [--claude] [--opencode] [--codex] [--uninstall] [--remove-legacy] [--no-handoff-alias]
 #   Each host also gets the /agent-bus skill (linked from skills/agent-bus).
+#   --no-handoff-alias skips the old `handoff` skill name, for hosts where /handoff means something else.
+#     It is remembered for each skills dir it is run for (a `.agent-bus-no-handoff` file in that dir), so updates
+#     and re-runs keep honouring it there and other config dirs are unaffected; delete that file to link the alias
+#     again. A plain --uninstall ignores it and removes the link; with --no-handoff-alias too, an existing link stays.
 #   default: --claude --opencode
 #   --remove-legacy strips hooks a v1 install left in Codex and Cursor configs.
 set -euo pipefail
@@ -35,7 +39,7 @@ OPENCODE_DIR="$HOME/.config/opencode"
 PLUGIN_SRC="$ROOT/plugins/agent-bus"
 CODEX_SETTINGS="${AGENT_BUS_CODEX_SETTINGS:-${CODEX_HOME:-$HOME/.codex}/hooks.json}"
 
-do_claude=0 do_opencode=0 do_codex=0 uninstall=0 legacy=0
+do_claude=0 do_opencode=0 do_codex=0 uninstall=0 legacy=0 handoff_alias=1
 for a in "$@"; do
   case "$a" in
     --claude) do_claude=1 ;;
@@ -43,6 +47,7 @@ for a in "$@"; do
     --codex) do_codex=1 ;;
     --uninstall) uninstall=1 ;;
     --remove-legacy) legacy=1 ;;
+    --no-handoff-alias) handoff_alias=0 ;;
     *) echo "unknown flag: $a" >&2; exit 1 ;;
   esac
 done
@@ -168,12 +173,25 @@ link_skill() { # dir name
   return 0
 }
 install_skills() {
-  local dirs=''
-  ((do_claude)) && dirs="$CLAUDE_DIR/skills"
-  ((do_opencode)) && [ "$dirs" != "$HOME/.claude/skills" ] && dirs="$dirs $HOME/.claude/skills"
-  ((do_codex)) && dirs="$dirs ${CODEX_HOME:-$HOME/.codex}/skills"
+  # Claude reads skills from its own config dir; OpenCode always reads ~/.claude/skills.
+  # An array, so a config dir with spaces in its path is never word-split.
+  local dirs=()
+  ((do_claude)) && dirs+=("$CLAUDE_DIR/skills")
+  ((do_opencode)) && dirs+=("$HOME/.claude/skills")
+  ((do_codex)) && dirs+=("${CODEX_HOME:-$HOME/.codex}/skills")
   local d
-  for d in $dirs; do link_skill "$d" agent-bus; link_skill "$d" handoff; done
+  while IFS= read -r d; do
+    [ -n "$d" ] || continue
+    link_skill "$d" agent-bus
+    # The opt-out is remembered per skills dir, so `agent-bus update` and the curl
+    # installer (which pass host flags only) keep it there, and no other dir is affected.
+    local optout="$d/.agent-bus-no-handoff"
+    if ((uninstall)); then
+      if ((handoff_alias)); then rm -f "$optout"; link_skill "$d" handoff; fi
+    elif ((! handoff_alias)); then mkdir -p "$d" && : >"$optout"
+    elif [ ! -e "$optout" ]; then link_skill "$d" handoff; fi
+  done < <(printf '%s\n' ${dirs[@]+"${dirs[@]}"} | awk '!seen[$0]++')
+  return 0
 }
 
 ((do_claude)) && install_claude

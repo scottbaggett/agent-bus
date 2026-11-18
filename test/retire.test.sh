@@ -50,7 +50,7 @@ SH
 cat >"$T/bin/glab" <<SH
 #!/bin/sh
 # glab mr list --source-branch <b> --all --output json
-case "\$4" in feat-merged|feat-dirty|feat-unpushed|feat-pm|feat-exempt|feat-busy) echo '[{"state":"merged"}]' ;; *) echo '[{"state":"opened"}]' ;; esac
+case "\$4" in feat-merged|feat-dirty|feat-unpushed|feat-pm|feat-exempt|feat-busy|feat-stalepm|feat-where) echo '[{"state":"merged"}]' ;; *) echo '[{"state":"opened"}]' ;; esac
 SH
 chmod +x "$T/bin/"*
 export AGENT_BUS_HC="$T/bin/hc" AGENT_BUS_DOCKER="$T/bin/docker" AGENT_BUS_GLAB="$T/bin/glab"
@@ -146,6 +146,25 @@ assert_has "an OpenCode seat with no terminal is resumed" "wake $B8 for $nw3: re
 assert_eq "and the pass does not wait for the resumed turn" yes "$( (( t1 - t0 < 15 )) && echo yes || echo "no ($((t1 - t0))s)")"
 sleep 1; assert_has "the resumed run got the packet" "$nw3" "$(cat "$T/oc.log" 2>/dev/null)"
 pkill -f "$T/bin/opencode" 2>/dev/null || true
+
+# --- never a PM, however it shows: stale role file, "/ PM" terminal, main checkout ---
+wt w9 feat-stalepm; wt w9o feat-stalepm-old; wt w10 feat-where
+seat b9 w9o who >/dev/null; OLD9=$(addr b9 w9o)
+printf '%s\n' "$OLD9" >"$AGENT_BUS_HOME/state/roles/$(ls "$AGENT_BUS_HOME/state/roles" | head -1 | cut -d. -f1).lane.orch.pm"
+seat b9 w9 stop-hook </dev/null >/dev/null; seat b10 w10 stop-hook </dev/null >/dev/null
+(cd "$T/repo" && AGENT_BUS_SESSION=b11 AGENT_BUS_TOOL=claude HC_TERMINAL_ID=t11 "$BIN" who >/dev/null)
+a11=$(pm post --to "$(cd "$T/repo" && AGENT_BUS_SESSION=b11 AGENT_BUS_TOOL=claude "$BIN" whoami | awk '/^seat/{print $2}')" --state handoff -m "# main job" | idof)
+pm resolve "$a11" --reason done >/dev/null
+jq -c --arg t9 "$T/w9" --arg t10 "$T/w10" --arg r "$T/repo" '.terminals += [
+  {"address":"t9","agent":"opencode","status":"idle","state":"live","cwd":$t9,"where":"Builds / SALT-1"},
+  {"address":"t10","agent":"opencode","status":"idle","state":"live","cwd":$t10,"where":"Orchestration / PM"},
+  {"address":"t11","agent":"claude-code","status":"idle","state":"live","cwd":$r,"where":"Repo / 1"}]' "$T/hc.json" >"$T/hc.t" && mv "$T/hc.t" "$T/hc.json"
+for f in "$AGENT_BUS_HOME"/seats/*.json; do jq -c '.epoch -= 4000 | .activity_at = ((.activity_at // .epoch) - 4000)' "$f" >"$f.t" && mv "$f.t" "$f"; done
+jq -c '.epoch -= 4000' "$L" >"$L.t" && mv "$L.t" "$L"
+out=$(R "$BIN" watch --retire-dry-run --here)
+assert_lacks "a PM whose role file names its old address (same session) is never retired" "$(addr b9 w9)" "$out"
+assert_lacks "nor a seat in a terminal titled '/ PM'" "$(addr b10 w10)" "$out"
+assert_lacks "nor a seat in the repo's main checkout" "claude/main" "$out"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 ((fail == 0))

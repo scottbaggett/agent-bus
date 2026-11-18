@@ -235,7 +235,7 @@ assert_has "unrelated seat has no standing" "not its sender" "$out"
 
 # Handoff: one ledger row closes the parent and opens the next item.
 rows_before=$(wc -l <"$BUS_HOME/ledger.jsonl")
-out=$(pm post --re "$rid" --close handed-off --to "$C" --state handoff -m $'# take review\n\ngo')
+out=$(pm post --re "$rid" --close handed-off --to "$C" --state handoff -m $'# take review\n\ngo' || true)
 hid=$(idof <<<"$out")
 assert_has "handoff reports the close" "closed $rid (handed-off)" "$out"
 assert_eq "handoff is one ledger row" "$((rows_before + 1))" "$(wc -l <"$BUS_HOME/ledger.jsonl" | tr -d ' ')"
@@ -385,7 +385,7 @@ assert_has "AGENT_BUS_LANE overrides everything" "lane     forced (env)" "$(AGEN
 assert_has "AGENT_BUS_TICKET_PREFIXES limits ticket keys" "lane     salt-8947-skills (branch name)" \
   "$(AGENT_BUS_TICKET_PREFIXES=eng br feature/salt-8947-skills whoami)"
 br fix/salt-8947-other who >/dev/null
-out=$(br feature/salt-8947-skills post --to @salt-8947 --state question -m '# lane q')
+out=$(br feature/salt-8947-skills post --to @salt-8947 --state question -m '# lane q' || true)
 assert_has "a derived lane is addressable" "posted" "$out"
 assert_eq "posts carry the lane and the ticket ref" '"salt-8947" ["SALT-8947"]' \
   "$(tail -n 1 "$BUS_HOME/ledger.jsonl" | jq -rc '"\(.lane | tojson) \(.refs | tojson)"')"
@@ -478,7 +478,7 @@ assert_has "triage names lead as the owner of @lead items, as snapshot does" "->
 assert_lacks "and doesn't call them GONE" "GONE" "$tri"
 assert_has "@lead items lead attention" "needs-you" "$(jq -r '.attention[].kind' <<<"$out")"
 assert_has "the lead sees @lead items" "need a call on scope" "$(lead read --peek)"
-out=$(lc post --re "$rid" --close escalated --to @lead --state question -m '# escalating release review')
+out=$(lc post --re "$rid" --close escalated --to @lead --state question -m '# escalating release review' || true)
 assert_has "escalated hands an item to the lead" "closed $rid (escalated)" "$out"
 out=$(lc resolve "$lid" --reason escalated 2>&1 || true)
 assert_has "resolve cannot escalate" "needs a destination" "$out"
@@ -524,10 +524,10 @@ assert_has "status shows the rules" "rules here:" "$(pol p1 status)"
 newr() { AGENT_BUS_REPO_ID=fresh00000000001 AGENT_BUS_REPO_POLICY="$BUS_HOME/no-rules.json" pol "$@"; }
 N1=$(newr n1 whoami | awk '/^seat/{print $2}'); N2=$(newr n2 whoami | awk '/^seat/{print $2}'); newr n2 who >/dev/null
 assert_has "a new repo says so in status" "new here" "$(newr n1 status)"
-out=$(newr n1 post --to "$N2" --state handoff -m "# first job" 2>&1)
+out=$(newr n1 post --to "$N2" --state handoff -m "# first job" 2>&1 || true)
 assert_has "the first work item in a new repo explains the default" "tip: the first piece of work" "$out"
 assert_has "the tip says checking finished work is a team rule" "Who checks finished work" "$out"
-out=$(newr n1 post --to "$N2" --state handoff -m "# second job" 2>&1)
+out=$(newr n1 post --to "$N2" --state handoff -m "# second job" 2>&1 || true)
 assert_lacks "the tip comes once per repo" "tip:" "$out"
 assert_lacks "status stops calling the repo new" "new here" "$(newr n1 status)"
 # After a rotation the repo's rows may sit only in the previous archive: still not new.
@@ -542,7 +542,7 @@ assert_has "a broadcast work item with no supervisor is refused" "has no owner" 
 assert_has "the refusal suggests a live lane peer" "--to $P2" "$out"
 assert_has "and the lead" "--to @lead" "$out"
 assert_has "messages still broadcast" "posted" "$(pol p1 post --to @here -m '# just so you know')"
-out=$(PO=lead pol p1 post --to @here --state blocked -m '# lead owns me' 2>&1)
+out=$(PO=lead pol p1 post --to @here --state blocked -m '# lead owns me' 2>&1 || true)
 assert_has "owner=lead gives it to the lead" "the lead owns this" "$out"
 assert_eq "the lead owns it in snapshot" "lead" \
   "$("$BIN" snapshot | jq -r '.open[] | select(.subject == "lead owns me") | .owner')"
@@ -906,7 +906,7 @@ PY
   O1=$(addr seat o1 claude wp)
   owner_state="$BUS_HOME/state/$(printf '%s' "$O1" | tr '/' '_').json"
   printf '%s' "$owner_state" >"$SOCKD/owner.statepath"
-  out=$(AGENT_BUS_NO_PUSH=0 seat o3 claude wx post --to "$O1" --state needs-review -m '# wake owner')
+  out=$(AGENT_BUS_NO_PUSH=0 seat o3 claude wx post --to "$O1" --state needs-review -m '# wake owner' || true)
   sleep 0.3
   rid=$(idof <<<"$out")
   assert_eq "owner receives one complete native inbox frame" 'user agent-bus' \
@@ -981,25 +981,26 @@ PY_SOCKET
   assert_has "transport failure retains the unread packet" "$transport_failed" "$(seat o1 claude wp read --peek)"
   assert_eq "failed transport sends no additional frame" "$sent_frames" "$(wc -l <"$SOCKD/owner.log" | tr -d ' ')"
   assert_eq "bystander got nothing" "" "$(cat "$SOCKD/bystander.log" 2>/dev/null)"
-  out=$(AGENT_BUS_NO_PUSH=0 seat o3 claude wp post --to @here --state needs-review -m '# broadcast review' 2>/dev/null)
+  out=$(AGENT_BUS_NO_PUSH=0 seat o3 claude wp post --to @here --state needs-review -m '# broadcast review' 2>/dev/null || true)
   assert_eq "broadcast review opens no bystander socket" "" "$(cat "$SOCKD/bystander.connections" 2>/dev/null)"
-  out=$(AGENT_BUS_NO_PUSH=0 seat o3 claude wp post --to @here -m '# broadcast fyi')
+  out=$(AGENT_BUS_NO_PUSH=0 seat o3 claude wp post --to @here -m '# broadcast fyi' || true)
   assert_eq "broadcast fyi opens no bystander socket" "" "$(cat "$SOCKD/bystander.connections" 2>/dev/null)"
+  assert_has "post says a broadcast reaches nobody" "nobody owns this, so nobody is woken" "$out"
   # A restarted agent's new seat inherits posts sent to the old name.
   seat h1 opencode wheir who >/dev/null
   H1=$(addr seat h1 opencode wheir)
   f="$BUS_HOME/seats/$(printf '%s' "$H1" | tr '/' '_').json"; jq '.epoch = 0' "$f" >"$f.t" && mv "$f.t" "$f"
   seat h2 opencode wheir who >/dev/null
   H2=$(addr seat h2 opencode wheir)
-  out=$(AGENT_BUS_NO_PUSH=0 seat o3 claude wx post --to "$H1" --state handoff -m '# for the restarted seat' 2>&1)
+  out=$(AGENT_BUS_NO_PUSH=0 seat o3 claude wx post --to "$H1" --state handoff -m '# for the restarted seat' 2>&1 || true)
   assert_has "a post to a gone seat goes to its live heir" "is gone; sending to $H2" "$out"
   assert_has "the heir owns it" "for the restarted seat" "$(seat h2 opencode wheir read --peek)"
   # OpenCode that isn't running is reported, not silently queued.
   AGENT_BUS_PID=999999 seat h3 opencode wstop who >/dev/null
-  out=$(AGENT_BUS_NO_PUSH=0 seat o3 claude wx post --to "$(addr seat h3 opencode wstop)" -m '# are you there')
+  out=$(AGENT_BUS_NO_PUSH=0 seat o3 claude wx post --to "$(addr seat h3 opencode wstop)" -m '# are you there' || true)
   assert_has "post says an OpenCode seat is stopped" "not running; it sees this when restarted" "$out"
   AGENT_BUS_TOOL=shell AGENT_BUS_WT=wsh "$BIN" who >/dev/null
-  out=$(AGENT_BUS_NO_PUSH=0 seat o3 claude wx post --to shell/wsh -m '# plain shell')
+  out=$(AGENT_BUS_NO_PUSH=0 seat o3 claude wx post --to shell/wsh -m '# plain shell' || true)
   assert_has "post says a hookless seat must read" "has no hooks" "$out"
   # A claim left by an ended seat doesn't block.
   seat h2 opencode wheir claim src/left.ts >/dev/null
@@ -1074,7 +1075,7 @@ PY
 
   # Delivery: post to grok seat triggers webhook
   out=$(AGENT_BUS_NO_PUSH=0 a post --to "$GADDR" --state needs-review \
-    -m $'# needs-review for grok\n\nplease check' 2>&1)
+    -m $'# needs-review for grok\n\nplease check' 2>&1 || true)
   sleep 0.3
   assert_has "webhook delivery reported" "webhook notice delivered" "$out"
 
@@ -1097,14 +1098,14 @@ PY
   # Opt-in budget exhaustion (AGENT_BUS_WAKE_BUDGET=3; first post above used slot 1)
   w2=$(AGENT_BUS_WAKE_BUDGET=3 AGENT_BUS_NO_PUSH=0 a post --to "$GADDR" --state question -m '# q2' | idof)
   AGENT_BUS_WAKE_BUDGET=3 AGENT_BUS_NO_PUSH=0 a post --to "$GADDR" --state question -m '# q3' >/dev/null
-  out=$(AGENT_BUS_WAKE_BUDGET=3 AGENT_BUS_NO_PUSH=0 a post --to "$GADDR" --state question -m '# q4' 2>&1)
+  out=$(AGENT_BUS_WAKE_BUDGET=3 AGENT_BUS_NO_PUSH=0 a post --to "$GADDR" --state question -m '# q4' 2>&1 || true)
   assert_has "opt-in budget exhausted: delivery skipped" "budget_exhausted" "$out"
   assert_has "delivery row for exhausted attempt" '"status":"budget_exhausted"' \
     "$(cat "$BUS_HOME/ledger.jsonl")"
 
   # Closing an item resets the opt-in budget
   gbot resolve "$w2" --reason done >/dev/null
-  out=$(AGENT_BUS_WAKE_BUDGET=3 AGENT_BUS_NO_PUSH=0 a post --to "$GADDR" --state question -m '# after-reset' 2>&1)
+  out=$(AGENT_BUS_WAKE_BUDGET=3 AGENT_BUS_NO_PUSH=0 a post --to "$GADDR" --state question -m '# after-reset' 2>&1 || true)
   assert_has "closing resets grok wake budget" "webhook notice delivered" "$out"
 
   # Packet stays unread after successful delivery (only cmd_read marks packets read)
@@ -1120,7 +1121,7 @@ PY
   greg grok register --name bot2 --webhook "http://127.0.0.1:1/unreachable" >/dev/null
   GADDR2=$(AGENT_BUS_TOOL=grok AGENT_BUS_WT=bot2 AGENT_BUS_SESSION=local "$BIN" whoami \
     | awk '/^seat/{print $2}')
-  out=$(AGENT_BUS_NO_PUSH=0 a post --to "$GADDR2" --state question -m '# unreachable' 2>&1)
+  out=$(AGENT_BUS_NO_PUSH=0 a post --to "$GADDR2" --state question -m '# unreachable' 2>&1 || true)
   assert_has "failure: packet saved message" "packet saved" "$out"
   state2="$BUS_HOME/state/$(printf '%s' "$GADDR2" | tr '/:@ ' '____').json"
   assert_eq "failure: packet remains unread" "0" \
@@ -1254,7 +1255,7 @@ b read >/dev/null
 # next call without blocking.
 ( : ) & _dead=$!; wait $_dead 2>/dev/null || true
 printf '%d\n' "$_dead" > "$BUS_HOME/ledger.jsonl.buslock"
-out=$(a post --to "$B" -m "# after stale lock" 2>&1)
+out=$(a post --to "$B" -m "# after stale lock" 2>&1 || true)
 assert_has "post succeeds after stale ledger buslock" "posted" "$out"
 assert_eq "stale buslock file removed" "no" \
   "$( [ -f "$BUS_HOME/ledger.jsonl.buslock" ] && echo yes || echo no )"
@@ -1341,7 +1342,7 @@ PY
   # Delivery reads from secrets file even when env var is unset.
   unset TEST_GROK_SECRET
   _GS_ADDR=$(raw_seat gsreg shell tester grok status --name gstest | jq -r .seat)
-  out=$(AGENT_BUS_NO_PUSH=0 a post --to "$_GS_ADDR" --state question -m "# secret file delivery" 2>&1)
+  out=$(AGENT_BUS_NO_PUSH=0 a post --to "$_GS_ADDR" --state question -m "# secret file delivery" 2>&1 || true)
   sleep 0.3
   assert_has "delivery with secret from file" "webhook notice delivered" "$out"
   _GS_REQ=$(tail -1 "$_GSD/requests.jsonl" 2>/dev/null || echo '{}')
@@ -1349,7 +1350,7 @@ PY
 
   # Warning when secret_env is set but resolves empty (no file, no env var).
   rm -f "$BUS_HOME/secrets/grok_gstest.secret"
-  out=$(AGENT_BUS_NO_PUSH=0 a post --to "$_GS_ADDR" --state question -m "# warn empty" 2>&1)
+  out=$(AGENT_BUS_NO_PUSH=0 a post --to "$_GS_ADDR" --state question -m "# warn empty" 2>&1 || true)
   sleep 0.1
   assert_has "warning when secret resolves empty" "WARNING" "$out"
   raw_seat gsreg shell tester grok unregister --name gstest >/dev/null
@@ -1722,18 +1723,18 @@ assert_lacks "the repo PM is not told it receives work from any worktree" "from 
 assert_has "the repo PM is told which lanes have their own PM" "lanes with their own PM: @alpha" "$out"
 for s in lpm rpm; do pr "$s" read >/dev/null; done
 
-out=$(prpost w1 --to @pm --state fyi -m '# alpha note')
+out=$(prpost w1 --to @pm --state fyi -m '# alpha note' || true)
 assert_has "@pm from a lane worker reaches its lane PM" "delivery: $LPM" "$out"
 assert_lacks "and not the repo PM as well" "delivery: $RPM" "$out"
-out=$(prpost w1 --to @pm --state question -m '# alpha ask')
+out=$(prpost w1 --to @pm --state question -m '# alpha ask' || true)
 assert_has "a question to @pm from a lane worker goes to its lane PM" "delivery: $LPM" "$out"
 assert_lacks "a question to @pm from a lane worker skips the repo PM" "delivery: $RPM" "$out"
 for st in question blocked needs-review handoff; do
-  out=$(prpost w1 --to @here --state "$st" -m "# alpha $st")
+  out=$(prpost w1 --to @here --state "$st" -m "# alpha $st" || true)
   assert_has "an unaddressed $st from a lane worker goes to its lane PM" "delivery: $LPM" "$out"
   assert_lacks "an unaddressed $st from a lane worker skips the repo PM" "delivery: $RPM" "$out"
 done
-out=$(prpost w1 --to "$RPM" --allow-claude --state needs-review -m '# alpha direct')
+out=$(prpost w1 --to "$RPM" --allow-claude --state needs-review -m '# alpha direct' || true)
 assert_has "the supervisory copy of a lane worker's direct item goes to its lane PM" "delivery: $LPM" "$out"
 assert_eq "the repo PM is not woken for a lane that has its own PM" "{}" \
   "$(pr rpm read >/dev/null; prpost w1 --to @here --state blocked -m '# alpha later' >/dev/null; pr rpm stop-hook </dev/null)"
@@ -1742,22 +1743,22 @@ assert_has "the repo PM still sees the lane's work" "alpha later" "$out"
 assert_has "labeled as someone else's" "broadcast copy" "$out"
 assert_has "the lane PM is woken for it" "block" "$(pr lpm stop-hook </dev/null | jq -r .decision)"
 
-out=$(prpost w2 --to @pm --state question -m '# beta question')
+out=$(prpost w2 --to @pm --state question -m '# beta question' || true)
 assert_has "a lane with no PM falls back to the repo PM" "delivery: $RPM" "$out"
 assert_lacks "a lane with no PM never reaches another lane's PM" "delivery: $LPM" "$out"
-out=$(prpost w0 --to @pm --state question -m '# unfiled question')
+out=$(prpost w0 --to @pm --state question -m '# unfiled question' || true)
 assert_has "a seat in no lane reaches the repo PM" "delivery: $RPM" "$out"
 assert_lacks "a seat in no lane never reaches a lane PM" "delivery: $LPM" "$out"
 
 out=$(prpost w1 --to @repo-pm --state question -m '# over the lane PM' 2>&1 || true)
 assert_has "a seat whose lane has a live PM can't jump to @repo-pm" "send it --to @pm" "$out"
 assert_lacks "and nothing is posted" "posted" "$out"
-out=$(prpost lpm --to @repo-pm --state question -m '# lane PM to repo PM')
+out=$(prpost lpm --to @repo-pm --state question -m '# lane PM to repo PM' || true)
 assert_has "a lane PM may post @repo-pm" "delivery: $RPM" "$out"
-out=$(prpost w2 --to @repo-pm --state question -m '# beta to repo PM')
+out=$(prpost w2 --to @repo-pm --state question -m '# beta to repo PM' || true)
 assert_has "a seat in a lane with no PM may post @repo-pm" "delivery: $RPM" "$out"
 assert_lacks "and no lane PM gets it" "delivery: $LPM" "$out"
-out=$(prpost w0 --to @repo-pm --state fyi -m '# unfiled to repo PM')
+out=$(prpost w0 --to @repo-pm --state fyi -m '# unfiled to repo PM' || true)
 assert_has "a seat in no lane may post @repo-pm" "delivery: $RPM" "$out"
 assert_has "triage names the repo PM as the owner of @repo-pm work" "-> $RPM" \
   "$(pr rpm triage --by lane | grep 'lane PM to repo PM')"
@@ -1768,7 +1769,7 @@ assert_eq "snapshot names the repo PM as the owner of @repo-pm work" "$RPM" \
   "$(jq -r '.open[] | select(.subject == "lane PM to repo PM") | .owner' <<<"$snap")"
 assert_eq "snapshot names the lane PM as the owner of @pm work" "$LPM" \
   "$(jq -r '.open[] | select(.subject == "alpha ask") | .owner' <<<"$snap")"
-out=$(prpost lpm --to @pm --state question -m '# lane PM escalates')
+out=$(prpost lpm --to @pm --state question -m '# lane PM escalates' || true)
 assert_has "a lane PM's own @pm goes up to the repo PM" "delivery: $RPM" "$out"
 out=$(pr rpm role pm --clear >/dev/null; pr rpm role pm)
 assert_has "a repo PM taking the role lists the work it owns" "beta question" "$out"
@@ -1780,7 +1781,7 @@ assert_has "the repo PM's own @repo-pm is refused, not sent to itself" "@repo-pm
 # filed by the ticket in its subject, and a `file` row moves it.
 TPM=$(pr tpm whoami | awk '/^seat/{print $2}')
 pr tpm lane tix-42 >/dev/null; pr tpm role pm --lane tix-42 >/dev/null; pr tpm read >/dev/null
-out=$(prpost w0 --to @pm --state question -m '# TIX-42: stuck on the parser')
+out=$(prpost w0 --to @pm --state question -m '# TIX-42: stuck on the parser' || true)
 assert_has "a no-lane item filed by its subject goes to that lane's PM" "delivery: $TPM" "$out"
 assert_lacks "and not to the repo PM" "delivery: $RPM" "$out"
 assert_has "the subject's lane PM is woken for it" "TIX-42: stuck" "$(pr tpm stop-hook </dev/null | jq -r .reason)"
@@ -1794,10 +1795,10 @@ assert_has "and triage names that PM" "-> $LPM" "$(pr rpm triage --by lane | gre
 # A lane PM whose session has ended routes nothing: its lane falls back.
 lseat=$(grep -l "\"addr\":\"$LPM\"" "$PR"/seats/*.json | head -1)
 jq -c '.epoch = 1' "$lseat" >"$lseat.tmp" && mv "$lseat.tmp" "$lseat"
-out=$(prpost w1 --to @pm --state question -m '# lane PM gone')
+out=$(prpost w1 --to @pm --state question -m '# lane PM gone' || true)
 assert_has "a gone lane PM's work falls back to the repo PM" "delivery: $RPM" "$out"
 assert_lacks "nothing waits on a gone lane PM" "nobody owns this" "$out"
-out=$(prpost w1 --to @repo-pm --state question -m '# gone lane PM, so up')
+out=$(prpost w1 --to @repo-pm --state question -m '# gone lane PM, so up' || true)
 assert_has "a seat whose lane PM is gone may post @repo-pm" "delivery: $RPM" "$out"
 assert_has "triage names the repo PM while the lane PM is gone" "-> $RPM" "$(pr rpm triage --by lane | grep 'lane PM gone')"
 out=$(pr rpm role pm --clear >/dev/null; pr rpm role pm)
@@ -1818,7 +1819,7 @@ assert_has "repo-pm is reserved, never a role" "not a role name" "$out"
 kid() { local p="$1" k="$2"; shift 2; AGENT_BUS_NO_PUSH=0 AGENT_BUS_NO_PEERS=1 pr "$p" --as-child "$k" "$@"; }
 pr par lane alpha >/dev/null; pr lpm who >/dev/null
 assert_has "a child seat takes its parent's lane" "lane     alpha (parent)" "$(kid par k1 whoami)"
-out=$(kid par k1 post --to @pm --state question -m '# from a subagent')
+out=$(kid par k1 post --to @pm --state question -m '# from a subagent' || true)
 assert_has "a child's @pm reaches its parent's lane PM" "delivery: $LPM" "$out"
 kid par k2 lane tix-42 >/dev/null
 assert_has "a child's own lane wins over its parent's" "lane     tix-42 (explicit)" "$(kid par k2 whoami)"
@@ -1857,14 +1858,14 @@ RPM=$(r2addr direct rpm); LPM=$(r2addr direct lpm); W1=$(r2addr direct w1)
 r2 direct rpm role pm >/dev/null; r2 direct lpm lane alpha >/dev/null; r2 direct lpm role pm --lane alpha >/dev/null
 r2 direct w1 lane alpha >/dev/null
 for s in rpm lpm w1; do r2 direct "$s" read >/dev/null; done
-out=$(r2post direct lpm --to "$W1" --state handoff -m '# lane PM assigns work')
+out=$(r2post direct lpm --to "$W1" --state handoff -m '# lane PM assigns work' || true)
 assert_has "a lane PM's handoff reaches its worker" "delivery: $W1" "$out"
 assert_lacks "a lane PM's handoff to its worker doesn't go to the repo PM" "delivery: $RPM" "$out"
 assert_eq "the repo PM isn't woken by a lane PM's handoff" "{}" "$(r2 direct rpm stop-hook </dev/null)"
-out=$(r2post direct w1 --to "$LPM" --state needs-review -m '# worker to lane PM direct')
+out=$(r2post direct w1 --to "$LPM" --state needs-review -m '# worker to lane PM direct' || true)
 assert_lacks "a worker's direct item to its lane PM doesn't go to the repo PM" "delivery: $RPM" "$out"
 assert_eq "the repo PM isn't woken by it" "{}" "$(r2 direct rpm stop-hook </dev/null)"
-out=$(r2post direct rpm --to "$W1" --state handoff -m '# repo PM assigns work')
+out=$(r2post direct rpm --to "$W1" --state handoff -m '# repo PM assigns work' || true)
 assert_lacks "a repo PM's direct handoff doesn't go to the lane PM" "delivery: $LPM" "$out"
 
 # `lane unfiled` sweeps and closes count what they closed.

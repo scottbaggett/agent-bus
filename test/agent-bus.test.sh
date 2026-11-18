@@ -26,7 +26,7 @@ for _v in CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_SESSION_ID HERDR_PANE_ID HERD
 done
 for _v in $(env | grep -E "$HOST_ENV" | cut -d= -f1); do unset "$_v"; done
 BUS_HOME=$(mktemp -d)
-trap 'rm -rf "$BUS_HOME"; [ -n "${SRV:-}" ] && kill "$SRV" 2>/dev/null; [ -n "${GROK_SRV:-}" ] && kill "$GROK_SRV" 2>/dev/null; true' EXIT
+trap 'rm -rf "$BUS_HOME"; [ -n "${SRVPID:-}" ] && kill "$SRVPID" 2>/dev/null; [ -n "${SRV2:-}" ] && kill "$SRV2" 2>/dev/null; [ -n "${SRV:-}" ] && kill "$SRV" 2>/dev/null; [ -n "${GROK_SRV:-}" ] && kill "$GROK_SRV" 2>/dev/null; true' EXIT
 GROK_SRV=
 export AGENT_BUS_HOME="$BUS_HOME" AGENT_BUS_NO_PUSH=1 AGENT_BUS_NO_AUTO_GC=1
 # Lanes are derived from the branch; pin a trunk branch so fixtures start
@@ -1412,8 +1412,15 @@ out=$(AGENT_BUS_SERVER_PID=$SRVPID raw_seat srv1 opencode wsrv whoami)
 OCS=$(awk '/^seat/{print $2}' <<<"$out")
 AGENT_BUS_SERVER_PID=$SRVPID raw_seat srv1 opencode wsrv who >/dev/null
 assert_has "a seat under a live opencode server is live" "$OCS" "$(a who)"
-kill "$SRVPID" 2>/dev/null; wait "$SRVPID" 2>/dev/null || true
-assert_lacks "its seat ends when the server exits" "$OCS" "$(a who)"
+sleep 300 & SRV2=$!
+OCS2=$(AGENT_BUS_SERVER_PID=$SRV2 raw_seat srv2 opencode wsrv2 whoami | awk '/^seat/{print $2}')
+AGENT_BUS_SERVER_PID=$SRV2 raw_seat srv2 opencode wsrv2 who >/dev/null
+kill "$SRVPID" 2>/dev/null; wait "$SRVPID" 2>/dev/null || true; SRVPID=
+out=$(a who 2>&1)
+assert_lacks "its seat ends when the server exits" "$OCS" "$out"
+assert_has "a seat under a server still running stays live" "$OCS2" "$out"
+assert_lacks "and reading the seats raises no jq error" "jq: error" "$out"
+kill "$SRV2" 2>/dev/null; wait "$SRV2" 2>/dev/null || true; SRV2=
 out=$(AGENT_BUS_BRANCH=fix/solo-thing raw_seat solo1 opencode wsolo digest)
 assert_has "a seat alone on its work gets a short orientation" "No other agent is on this work" "$out"
 assert_lacks "and no lane jargon" "in lane @" "$out"

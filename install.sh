@@ -33,7 +33,7 @@ while [ $# -gt 0 ]; do
     --no-hooks) hooks=0 ;;
     --no-handoff-alias) alias_flag=--no-handoff-alias ;;
     --uninstall) uninstall=1 ;;
-    -h|--help) sed -n '2,18p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0" 2>/dev/null; exit 0 ;;
     *) die "unknown option: $1" ;;
   esac
   shift

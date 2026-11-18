@@ -24,6 +24,11 @@ SHARE="$HOME/.local/share/agent-bus" BINDIR="$HOME/.local/bin"
 # Only Claude is "on this machine": hide opencode and codex binaries.
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin:$(dirname "$(command -v jq)")"
 
+help=$(bash "$ROOT/install.sh" --help)
+assert_has "--help starts with the title" "agent-bus installer." "$help"
+assert_has "--help ends with the last header line" "(the bus itself, ~/.agents/bus, is never touched)" "$help"
+assert_lacks "--help stops before the script body" "set -euo pipefail" "$help"
+
 # A release tarball of this working tree, laid out like GitHub's archives.
 tarball() { # name
   mkdir -p "$T/pkg"

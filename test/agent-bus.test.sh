@@ -1315,7 +1315,7 @@ assert_eq "AGENT_BUS_CHILD does the same" "$KID" "$(AGENT_BUS_CHILD=reviewer cs 
 out=$(cs --as-child 'Bad Name!' whoami 2>&1 || true)
 assert_has "a child name is validated" "child name" "$out"
 cs who >/dev/null; cs --as-child reviewer who >/dev/null
-assert_eq "the child's seat records its parent" "$PAR" "$(jq -r .parent "$SB/bus/seats/$(printf '%s' "$KID" | tr '/:@ ' '____').json")"
+assert_eq "the child's seat records its parent" "$PAR" "$(cat "$SB"/bus/seats/*.json | jq -r --arg k "$KID" 'select(.addr == $k) | .parent')"
 assert_has "who shows the child under its parent" "$PAR / reviewer" "$(cs who)"
 assert_eq "snapshot attributes the child to its parent" "$PAR" \
   "$(AGENT_BUS_HOME="$SB/bus" "$BIN" snapshot | jq -r --arg k "$KID" '.seats[] | select(.addr == $k) | .parent')"
@@ -1337,6 +1337,48 @@ assert_has "a child offboarding leaves the parent's roles" "PM for lane @kid-lan
 cs --as-child reviewer who >/dev/null
 cs offboard >/dev/null
 assert_lacks "the parent offboarding ends its children" "$PAR / reviewer" "$(cs who)"
+
+# --- a child seat never takes its parent's or broadcast work ---
+cs2() { (cd "$SB/plain" && AGENT_BUS_HOME="$SB/bus" AGENT_BUS_REPO_ID=acme AGENT_BUS_TOOL=claude AGENT_BUS_SESSION=par2 \
+  AGENT_BUS_LANE=kl "$BIN" "$@"); }
+wk() { (cd "$SB/plain" && AGENT_BUS_HOME="$SB/bus" AGENT_BUS_REPO_ID=acme AGENT_BUS_TOOL=codex AGENT_BUS_SESSION=w3 \
+  AGENT_BUS_LANE=kl "$BIN" "$@"); }
+cs2 who >/dev/null; cs2 --as-child kid who >/dev/null; wk who >/dev/null
+sid=$(wk post --to claude/plain --state question -m "# to the scope" | idof)
+wk post --to @here -m "# here broadcast" >/dev/null
+wk post --to @repo -m "# repo broadcast" >/dev/null
+wk post --to @kl -m "# lane broadcast" >/dev/null
+out=$(cs2 --as-child kid read --peek)
+assert_lacks "a child doesn't get packets sent to its parent's scope" "to the scope" "$out"
+assert_lacks "nor @here broadcasts" "here broadcast" "$out"
+assert_lacks "nor @repo broadcasts" "repo broadcast" "$out"
+assert_lacks "nor lane broadcasts" "lane broadcast" "$out"
+assert_has "the parent still owns the scope's packet" "to the scope" "$(cs2 read --peek)"
+out=$(cs2 --as-child kid reply "$sid" -m "not mine" 2>&1 || true)
+assert_has "a child can't reply to its parent's packet" "not its sender, a recipient" "$out"
+out=$(cs2 --as-child kid resolve "$sid" 2>&1 || true)
+assert_has "nor resolve it" "not its sender, a recipient" "$out"
+assert_has "which stays open for the parent" "to the scope" "$(cs2 read --peek)"
+
+# --- seat files: a child never shares a file with another seat ---
+lc() { (cd "$SB/plain" && AGENT_BUS_HOME="$SB/bus" AGENT_BUS_REPO_ID=acme AGENT_BUS_TOOL=shell "$BIN" "$@"); }
+AGENT_BUS_WT=wt lc who >/dev/null; AGENT_BUS_WT=wt lc --as-child x who >/dev/null
+AGENT_BUS_WT=wt_x lc who >/dev/null
+assert_has "a local child keeps its own seat" "shell/wt / x" "$(AGENT_BUS_WT=wt_x lc who)"
+assert_has "beside a seat whose worktree slug looks like it" "shell/wt_x " "$(AGENT_BUS_WT=wt_x lc who)"
+assert_eq "a worktree name can't contain the child separator" "shell/a-b" \
+  "$(AGENT_BUS_WT=a/b lc whoami | awk '/^seat/{print $2}')"
+
+# --- a session pin is never read half-written ---
+pin="$SB/bus/state/sessions/claude.$(printf '%s' sess-empty | shasum -a 256 | cut -c1-16)"
+mkdir -p "${pin%/*}"; : >"$pin"
+out=$(SS_SESSION=sess-empty AGENT_BUS_SEAT_KEY=session ss d2 whoami 2>&1 || true)
+assert_has "an empty pin is an error, not a fresh seat" "session pin" "$out"
+assert_lacks "the reader never adopts its own folder" "claude/d2." "$out"
+rm -f "$pin"
+assert_eq "a pin is written whole before anyone can read it" "d1" \
+  "$(SS_SESSION=sess-new AGENT_BUS_SEAT_KEY=session ss d1 whoami >/dev/null; cat "$SB/bus/state/sessions/claude.$(printf '%s' sess-new | shasum -a 256 | cut -c1-16)")"
+assert_eq "and no temp file is left behind" "0" "$(ls "$SB/bus/state/sessions" | grep -c 'XXXX\|\.[A-Za-z0-9]\{6\}$' || true)"
 
 rm -rf "$SB"
 

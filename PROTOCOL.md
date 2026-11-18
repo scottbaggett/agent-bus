@@ -31,6 +31,8 @@ first command a session runs pins its worktree name in
 `state/sessions/<tool>.<hash>`, and every later command reuses it, wherever the
 process has moved. So one session is one seat, and its roles stay on that seat.
 `cwd`, repo, branch and lane still follow the current directory, as attributes.
+The pin is written in full, then linked into place, so the first session to
+write it wins. An empty pin is an error, never a fresh seat.
 An explicit `AGENT_BUS_WT` still wins, and `offboard` removes the pin.
 
 ### Subagents
@@ -46,7 +48,12 @@ child seat `<parent-addr>/<name>`, whose seat file records `parent`. The name is
   "for your subagent <name>", because the parent's hooks are the only ones
   that run. A Claude child records its parent's inbox socket, so a post to it
   notifies the parent's session.
-- A child gets none of the parent's packets or roles, and can't take a role.
+- A child owns only packets sent to its own address. It doesn't get packets
+  sent to its parent, its scope, `@here`, `@repo`, `@all` or its lane, and it
+  can't reply to or resolve them. It holds no roles and can't take one.
+- Its seat file is `<parent seat file>@<name>.json`. No other seat's file can
+  contain `@`, and a `/` in a worktree name becomes `-`, so only a child's
+  address has two slashes.
 - A child is no more live than its parent. Offboarding a child removes only the
   child; offboarding the parent removes its children and their claims.
 

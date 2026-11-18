@@ -71,6 +71,9 @@ mkdir -p "$BUS/msg" "$BUS/state/roles" "$BUS/seats" "$BUS/claims" "$BUS/secrets"
 
 now_epoch() { date -u +%s; }
 slugify() { printf '%s' "$1" | tr '/:@ ' '____'; }
+# A seat's file name. Only a child address has two slashes (worktree names
+# can't hold one); its "@" can't come out of slugify, so no other seat shares it.
+seat_slug() { case "$1" in */*/*) printf '%s@%s' "$(slugify "${1%/*}")" "${1##*/}" ;; *) slugify "$1" ;; esac; }
 # Strip C0 controls (but newline/tab) and DEL: packet text lands in terminals
 # and agent contexts, and must not smuggle escapes into either.
 sanitize() { LC_ALL=C tr -d '\000-\010\013\014\016-\037\177'; }
@@ -197,6 +200,7 @@ resolve_identity() {
   if [ -n "${AGENT_BUS_WT:-}" ]; then WT="$AGENT_BUS_WT"
   elif [ "${AGENT_BUS_SEAT_KEY:-}" = session ] && [ "$SESSION" != local ]; then WT=$(session_pin "$WT")
   fi
+  WT="${WT//\//-}"
   SCOPE="$TOOL/$WT"
   if [ "$SESSION" != local ]; then
     ADDR="$SCOPE.$(printf '%s' "$SESSION" | shasum -a 256 | cut -c1-4)"
@@ -211,7 +215,7 @@ resolve_identity() {
     valid_child "$CHILD" || die "child name '$CHILD' must be [a-z0-9][a-z0-9_-], max 32"
     PARENT="$ADDR"; ADDR="$ADDR/$CHILD"; SESSION="$SESSION/$CHILD"
   fi
-  SEAT=$(slugify "$ADDR")
+  SEAT=$(seat_slug "$ADDR")
   [ -n "${AGENT_BUS_BRANCH:-}" ] && BRANCH="$AGENT_BUS_BRANCH"
   # Lane: AGENT_BUS_LANE, then `agent-bus lane X` on this seat, then derived
   # from the branch or worktree name. LANE_SRC says which, so a wrong guess is
@@ -227,18 +231,27 @@ resolve_identity() {
   ME=$(jq -nc --arg addr "$ADDR" --arg scope "$SCOPE" --arg session "$SESSION" \
     --arg repo "$REPO" --arg repo_id "$REPO_ID" --arg wt "$WT" --arg lane "$LANE" \
     --arg tool "$TOOL" \
-    '{addr:$addr,tool:$tool,scope:$scope,session:$session,repo:$repo,repo_id:$repo_id,wt:$wt,lane:$lane}')
+    --arg parent "$PARENT" \
+    '{addr:$addr,tool:$tool,scope:$scope,session:$session,repo:$repo,repo_id:$repo_id,wt:$wt,lane:$lane}
+     + (if $parent != "" then {parent:$parent} else {} end)')
 }
 
 # A session's seat is pinned to the worktree name it first ran from, so a
 # process that cd's elsewhere stays one seat. First writer wins (noclobber).
 session_pin_file() { printf '%s/state/sessions/%s.%s' "$BUS" "$TOOL" "$(printf '%s' "$SESSION" | shasum -a 256 | cut -c1-16)"; }
 session_pin() {
-  local f pinned; f=$(session_pin_file)
+  local f tmp pinned; f=$(session_pin_file)
   mkdir -p "${f%/*}"
-  ( set -C; printf '%s\n' "$1" >"$f" ) 2>/dev/null || true
+  if [ ! -e "$f" ]; then
+    # Written whole, then linked into place: ln never replaces, so the first wins.
+    tmp=$(mktemp "${f%/*}/.pin.XXXXXX") || die "session pin: can't write in ${f%/*}"
+    printf '%s\n' "$1" >"$tmp"
+    ln "$tmp" "$f" 2>/dev/null || true
+    rm -f "$tmp"
+  fi
   pinned=$(head -1 "$f" 2>/dev/null || true)
-  printf '%s' "${pinned:-$1}"
+  [ -n "$pinned" ] || die "session pin $f is empty or unreadable — remove it, and this session starts a new seat"
+  printf '%s' "$pinned"
 }
 valid_child() { [[ "$1" =~ ^[a-z0-9][a-z0-9_-]{0,31}$ ]]; }
 
@@ -359,7 +372,7 @@ seat_rows() {
 
 seat_live() {
   local f now
-  f="$BUS/seats/$(slugify "$1").json"
+  f="$BUS/seats/$(seat_slug "$1").json"
   [ -f "$f" ] || return 1
   local sp; sp=$(jq -r '.server_pid // ""' "$f" 2>/dev/null)
   [ -n "$sp" ] && ! kill -0 "$sp" 2>/dev/null && return 1
@@ -518,20 +531,22 @@ def lane_pm_of: first(lanes_of[] | ($lanepms[.] // empty)) // "";
 # The repo PM supervises everything; a lane PM only its lane.
 def pm_for($me): is_pm($me) or (lanes_of | any(($lanepms[.] // "") == $me.addr));
 def seatme: {addr, scope: ((.tool // "") + "/" + (.wt // "")), session: (.session // "local"),
-             repo, repo_id, wt, lane: (.lane // "")};
+             repo, repo_id, wt, lane: (.lane // ""), parent: (.parent // "")};
+# A child seat shares its parent'"'"'s scope and lane but owns only what names it.
+def is_child($me): ($me.parent // "") != "";
 # The seat expected to act: direct or scope addressee, or a PM for @pm and for
 # supervisory traffic in its scope (senders default to @here, and a PM is never
 # in the worker'"'"'s worktree).
 def owns($me):
   .to == $me.addr
-  or ((.to == "@lead" or .assign == "@lead") and is_lead($me))
+  or (is_child($me) | not) and ( ((.to == "@lead" or .assign == "@lead") and is_lead($me))
   or (same_repo($me) and (.to == $me.scope or (role_holder != "" and role_holder == $me.addr)
-      or (pm_for($me) and (.to == "@pm" or (sup and ((.probe // false) | not))))));
+      or (pm_for($me) and (.to == "@pm" or (sup and ((.probe // false) | not)))))));
 # Broadcasts deliver context, never ownership.
 def gets($me):
-  owns($me) or .to == "@all"
+  owns($me) or (is_child($me) | not) and (.to == "@all"
   or (same_repo($me) and (.to == "@repo" or (.to == "@here" and .wt == $me.wt)
-      or ((.to // "") | startswith("@") and (.[1:] == $me.lane or ($lanepms[.[1:]] // "") == $me.addr))));
+      or ((.to // "") | startswith("@") and (.[1:] == $me.lane or ($lanepms[.[1:]] // "") == $me.addr)))));
 def from_pm($me): .from == $pm or ($me.lane != "" and .from == ($lanepms[$me.lane] // ""));
 '
 
@@ -589,7 +604,7 @@ session_reads() {
   local a f
   { state_get '.read // []'
     for a in $(jq -r '.[]' <<<"$1"); do
-      f="$BUS/state/$(slugify "$a").json"
+      f="$BUS/state/$(seat_slug "$a").json"
       [ -f "$f" ] && jq -c '.read // []' "$f" 2>/dev/null
     done; } | jq -sc 'add // [] | unique'
 }
@@ -628,7 +643,7 @@ open_items() {
     --argjson codex_cut "$(( now - CODEX_MAX_IDLE_TTL ))" \
     "$JQ_SEAT_LIVE"'[.[] | select(buslive($cut; $codex_cut)) | {addr, scope: ((.tool // "") + "/" + (.wt // ""))}]')
   reads=$(for a in $(jq -r '.[].addr' <<<"$live"); do
-      f="$BUS/state/$(slugify "$a").json"
+      f="$BUS/state/$(seat_slug "$a").json"
       [ -f "$f" ] && jq -c --arg a "$a" '{($a): (.read // [])}' "$f" 2>/dev/null
     done | jq -sc 'add // {}')
   lq '
@@ -718,7 +733,7 @@ poke_seat() {
 # This only defers duplicate hook delivery for 30 seconds; it is never a read
 # acknowledgement. Failed sends release the reservation immediately.
 claude_notice() { # addr packet set|clear
-  ( SEAT=$(slugify "$1")
+  ( SEAT=$(seat_slug "$1")
     if [ "$3" = set ]; then
       state_update '.claude_notices = ((.claude_notices // {})
         | with_entries(select(.value > ($now - 30))))
@@ -740,7 +755,7 @@ claude_hook_packets() {
   notices=$( {
     state_get '.claude_notices // {}'
     for a in $(session_seats | jq -r '.[]') $(child_seats | jq -r '.[]'); do
-      f="$BUS/state/$(slugify "$a").json"
+      f="$BUS/state/$(seat_slug "$a").json"
       [ ! -f "$f" ] || jq -c '.claude_notices // {}' "$f"
     done
   } | jq -sc --argjson now "$(now_epoch)" \
@@ -825,7 +840,7 @@ cmd_codex() {
       # Installer rollback: pause existing Codex seats without touching peers.
       ( local row f
         while IFS= read -r row; do
-          SEAT=$(slugify "$(jq -r .addr <<<"$row")")
+          SEAT=$(seat_slug "$(jq -r .addr <<<"$row")")
           state_update 'del(.codex_queue) | .codex_disabled = true'
           f="$BUS/seats/$SEAT.json"
           jq -c '.codex_queue = ""' <<<"$row" >"$f.tmp" && mv "$f.tmp" "$f"
@@ -874,7 +889,7 @@ cmd_codex() {
 codex_end_session() (
   local row f
   while IFS= read -r row; do
-    ADDR=$(jq -r .addr <<<"$row"); SEAT=$(slugify "$ADDR")
+    ADDR=$(jq -r .addr <<<"$row"); SEAT=$(seat_slug "$ADDR")
     for f in "$BUS"/state/roles/*; do
       [ -f "$f" ] || continue
       if [ "$(head -1 "$f")" = "$ADDR" ]; then rm -f "$f"; fi
@@ -905,7 +920,7 @@ grok_targets() {
 # invariants: reserve before submitting; never retry an attempted packet.
 grok_reserve() {
   local seat_addr="$1" packet_id="$2"
-  local sf="$BUS/state/$(slugify "$seat_addr").json"
+  local sf="$BUS/state/$(seat_slug "$seat_addr").json"
   local result prev='{}'
   bus_lock "$sf" 5
   [ -f "$sf" ] && prev=$(jq -c . "$sf" 2>/dev/null || echo '{}')
@@ -1102,7 +1117,7 @@ cmd_grok() {
         wh=$(jq   -r '.grok_webhook    // ""' <<<"$row")
         se=$(jq   -r '.grok_secret_env // ""' <<<"$row")
         local rname; rname=$(jq -r '.wt // ""' <<<"$row")
-        local sf="$BUS/state/$(slugify "$addr").json"
+        local sf="$BUS/state/$(seat_slug "$addr").json"
         wakes=$(jq -r '.wakes // 0' "$sf" 2>/dev/null || echo 0)
         local secret_stored='false'
         [ -f "$BUS/secrets/grok_${rname}.secret" ] && secret_stored='true'
@@ -1157,7 +1172,7 @@ queue_codex_targets() {
     binary=$(jq -r .codex_queue <<<"$row")
     if command -v python3 >/dev/null 2>&1; then
       result=$(python3 "$(codex_helper)" "$binary" "$session" \
-        "$BUS/state/$(slugify "$addr").json" "$(jq -r .id <<<"$rec")" "$WAKE_BUDGET") \
+        "$BUS/state/$(seat_slug "$addr").json" "$(jq -r .id <<<"$rec")" "$WAKE_BUDGET") \
         || result='{"status":"unavailable","detail":"queue helper failed; packet remains unread"}'
     else result='{"status":"unavailable","detail":"python3 is required for Codex queue delivery"}'; fi
     # A post is durable even when the host cannot accept its wake notification.
@@ -1869,7 +1884,7 @@ peer_ingest() { # from-host
   return 0
 }
 # A seat this machine has never seen, while peers are linked, is taken to be on a peer.
-seat_on_peer() { peer_of_seat "$1" >/dev/null || { [ -n "$(peer_list)" ] && [ ! -f "$BUS/seats/$(printf '%s' "$1" | tr / _).json" ]; }; }
+seat_on_peer() { peer_of_seat "$1" >/dev/null || { [ -n "$(peer_list)" ] && [ ! -f "$BUS/seats/$(seat_slug "$1").json" ]; }; }
 peer_self() { /usr/sbin/scutil --get LocalHostName 2>/dev/null || hostname -s; }
 
 peer_push() { # host
@@ -2731,7 +2746,7 @@ cmd_offboard() {
   local kid
   for kid in $(child_seats | jq -r '.[]'); do
     release_seat_claims "$kid" >/dev/null
-    rm -f "$BUS/seats/$(slugify "$kid").json"
+    rm -f "$BUS/seats/$(seat_slug "$kid").json"
   done
   rm -f "$(session_pin_file)"
   return 0
@@ -2762,7 +2777,7 @@ snapshot_json() {
       | sort_by(-.epoch)')
   # Each live seat's read cursor and wake count, for NOT PICKED UP and spent budgets.
   seats=$(jq -c '.[]' <<<"$seats" | while IFS= read -r row; do
-      f="$BUS/state/$(slugify "$(jq -r .addr <<<"$row")").json"
+      f="$BUS/state/$(seat_slug "$(jq -r .addr <<<"$row")").json"
       av=$(avatar_art "$(jq -r .addr <<<"$row")" "$(jq -r .tool <<<"$row")" | jq -Rsc 'split("\n") | map(select(length > 0))')
       row=$(jq -c --argjson rows "$av" --arg col "$(avatar_color "$(jq -r .tool <<<"$row")")" \
         --arg name "$(seat_name "$(jq -r .addr <<<"$row")")" \
@@ -3088,7 +3103,7 @@ cmd_gc() {
     [ -f "$f" ] || continue
     local holder; holder=$( (jq -r '.addr // empty' "$f" 2>/dev/null || head -1 "$f") | tr -d '\n')
     seat_live "$holder" && continue
-    local sf="$BUS/seats/$(slugify "$holder").json"
+    local sf="$BUS/seats/$(seat_slug "$holder").json"
     e=0; [ -f "$sf" ] && e=$(jq -r '.epoch // 0' "$sf" 2>/dev/null || echo 0)
     [[ "$e" =~ ^[0-9]+$ ]] || e=0
     if ((e < now - ROLE_TTL)); then rm -f "$f"; n_role=$((n_role + 1)); fi

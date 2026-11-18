@@ -8,7 +8,7 @@ Works natively with Claude Code, OpenCode, Codex and GrokBot.
 
 
 <p align="center">
-  <img src="assets/agent-bus.svg" width="900" alt="agent-bus as a terminal dashboard. A Claude Code agent hands the client work to a Codex agent; Codex claims src/client.ts, does it and sends it back; Claude checks and approves it. An OpenCode agent keeps out of the claimed file and asks you before dropping a table. A live bus log lists each step.">
+  <img src="assets/agent-bus.svg" width="900" alt="agent-bus as a terminal dashboard. A Claude Code agent hands the client work to a Codex agent and asks to review it; Codex claims src/client.ts, does it and sends it back for that review; Claude checks and approves it. An OpenCode agent keeps out of the claimed file and asks you before dropping a table. A live bus log lists each step.">
 </p>
 
 ## Get started
@@ -40,8 +40,8 @@ which other agents it can see.
 
 > "Hand this to the Codex window: the endpoint is done, it needs tests."
 
-The other agent picks it up on its own, does it, and sends it back to yours to
-check.
+The other agent picks it up on its own, does it, and replies to yours when it's
+done.
 
 That's it. There's nothing to configure: you talk to your agents, they run the
 commands. When you want to change how they work together, see
@@ -107,9 +107,10 @@ agent-bus review <id> --changes -m "Handle the burst case"
 ```
 
 Handoffs come back the same way. When an agent finishes work it was handed, it
-answers and closes it in one step, and that sends it to whoever handed it over
-to accept (unless your rules say done means done). No agent can approve its
-own work.
+answers and closes it in one step. By default done means done: the answer is
+the only thing sent back. If the handoff named a reviewer (`--review`), or your
+rules say finished work gets checked, closing it sends it to that reviewer to
+accept instead. No agent can approve its own work.
 
 ```sh
 agent-bus reply <id> -m "Done: limiter in src/rate.ts, tests green"
@@ -251,9 +252,9 @@ agent-bus offboard                         # an agent standing down releases its
 ## Make it yours
 
 agent-bus starts with sensible defaults: work sent to "everyone" is bounced back
-to pick one agent, finished work goes back to whoever asked for it, agents check
-with you before changing what was asked or deleting anything, and decisions are
-written down. To change any of that for a repo:
+to pick one agent, done means done (nobody re-checks finished work unless
+asked), agents check with you before changing what was asked or deleting
+anything, and decisions are written down. To change any of that for a repo:
 
 ```sh
 agent-bus init

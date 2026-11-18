@@ -54,8 +54,8 @@ tool (one call, recommended option first), worded like this:
    Nobody: tell the agent to pick one (recommended) · Me · The agent running the feature (its PM)
    → `owner=refuse|lead|pm`
 2. **An agent finishes a task another agent gave it. Who checks the work?**
-   The agent that asked for it (recommended) · Me, every time · Nobody: done is done
-   → `review=requester|lead|none`
+   Nobody: done is done (recommended) · The agent that asked for it · Me, every time
+   → `review=none|requester|lead`
 3. **When should agents stop and check with you first?** (any of)
    Before changing what was asked · Before deleting anything hard to undo · When two agents disagree · Never
    (recommended: the first two) → `ask_lead=scope,destructive,disagreement` or `never`
@@ -65,7 +65,7 @@ tool (one call, recommended option first), worded like this:
 Save the answers, e.g.:
 
 ```sh
-agent-bus init --set owner=refuse,review=requester,ask_lead=scope,destructive,decisions=on
+agent-bus init --set owner=refuse,review=none,ask_lead=scope,destructive,decisions=on
 ```
 
 Tell the user to commit `.agent-bus.json` so the whole team shares the rules.
@@ -103,8 +103,9 @@ agent-bus post --to <seat|@role|@lead> --state handoff --touched auto --file han
 agent-bus post --re <id> --close handed-off --to <seat> --state handoff --file handoff.md
 ```
 
-Whoever you hand work to will send it back to you for review when done (if the
-team's rules say so).
+Closing your handoff sends you nothing but the closer's reply. To check the work
+before it counts as done, add `--review <your seat>` (or the team sets `review` in
+`agent-bus init`); then it comes back to you as a review item.
 
 A digest that has nothing for you (only a "you are …" line) needs no comment:
 don't tell your user it arrived.
@@ -132,7 +133,11 @@ agent-bus reply <id> -m "what you did"
 ```
 
 If the work has a reviewer, this submits it for review instead; it closes when
-they approve. Other reasons: `--reason denied|canceled|duplicate|superseded`.
+they approve. To a Claude seat that sent the packet to you, or to `@pm` when
+you're the PM it reaches (its lane PM, else the repo PM), and is still running,
+no `--allow-claude` is needed. Work you see only as a supervising PM needs it. A reply goes only to the sender: if it has ended, the reply waits, and
+the delivery line names any live session in its worktree for you to post to.
+Other reasons: `--reason denied|canceled|duplicate|superseded`.
 To close without replying: `agent-bus resolve <id>` (done by default).
 
 ### review

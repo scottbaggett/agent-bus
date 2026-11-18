@@ -35,9 +35,11 @@ print('accepted')
 sys.exit(int(os.environ.get('FAKE_QUEUE_EXIT', '0')))
 ''')
         self.fake.chmod(0o755)
-        self.env = {k:v for k,v in os.environ.items() if not k.startswith('AGENT_BUS_') and k not in (
-            'CLAUDECODE','CLAUDE_CODE_SESSION_ID','CLAUDE_CODE_MESSAGING_SOCKET',
-            'CODEX_THREAD_ID','OPENCODE','OPENCODE_SESSION_ID')}
+        # No host session, socket or pane id reaches the fixtures: a wake could
+        # otherwise land in the real session running the suite.
+        self.env = {k:v for k,v in os.environ.items() if not k.startswith(
+            ('AGENT_BUS_','CLAUDE','CODEX_','HERDR_','TMUX','ZELLIJ','OPENCODE')) and k not in (
+            'WEZTERM_PANE','KITTY_WINDOW_ID')}
         self.env.update(AGENT_BUS_HOME=str(self.home / 'bus'), AGENT_BUS_NO_AUTO_GC='1',
                         AGENT_BUS_CODEX_BIN=str(self.fake), FAKE_CALLS=str(self.calls),
                         AGENT_BUS_REPO_ID='testrepo', AGENT_BUS_WT='testwt',
@@ -71,6 +73,10 @@ sys.exit(int(os.environ.get('FAKE_QUEUE_EXIT', '0')))
 
     def requests(self):
         return [json.loads(x) for x in self.calls.read_text().splitlines()] if self.calls.exists() else []
+
+    def test_fixture_env_carries_no_host_session_variable(self):
+        leaked = sorted(k for k in self.env if k.startswith(('CLAUDE','CODEX_','HERDR_','OPENCODE')))
+        self.assertEqual(leaked, [])
 
     def test_auto_identity_and_host_precedence(self):
         env = dict(AGENT_BUS_TOOL='', AGENT_BUS_SESSION='', CODEX_THREAD_ID=self.thread)

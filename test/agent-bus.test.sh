@@ -14,10 +14,17 @@ assert_has() { if grep -Fq -- "$2" <<<"$3"; then ok "$1"; else bad "$1" "  missi
   in: $3"; fi; }
 assert_lacks() { if grep -Fq -- "$2" <<<"$3"; then bad "$1" "  unexpected: $2"; else ok "$1"; fi; }
 
-# Hermetic: the suite runs inside Claude or OpenCode, whose markers and
-# sockets would otherwise leak into every fixture seat.
-unset CODEX_THREAD_ID CLAUDECODE CLAUDE_CODE_SESSION_ID CLAUDE_CODE_MESSAGING_SOCKET OPENCODE OPENCODE_SESSION_ID
-for _v in $(env | sed -n 's/^\(AGENT_BUS_[A-Z0-9_]*\)=.*/\1/p'); do unset "$_v"; done
+# Hermetic: the suite runs inside Claude, OpenCode, Codex or a terminal
+# multiplexer. Their session, socket and pane ids would otherwise reach the
+# fixture seats, and a test wake could land in the real session. The ids are
+# kept only to prove, at the end, that none reached the throwaway bus.
+HOST_ENV='^(AGENT_BUS_|CLAUDE|HERDR_|TMUX|ZELLIJ|WEZTERM_PANE|KITTY_WINDOW_ID|CODEX_|OPENCODE)[A-Za-z0-9_]*='
+HOST_IDS=()
+for _v in CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_SESSION_ID HERDR_PANE_ID HERDR_SOCKET_PATH TMUX_PANE \
+          CODEX_THREAD_ID OPENCODE_SESSION_ID; do
+  [ -n "${!_v:-}" ] && HOST_IDS+=("${!_v}")
+done
+for _v in $(env | grep -E "$HOST_ENV" | cut -d= -f1); do unset "$_v"; done
 BUS_HOME=$(mktemp -d)
 trap 'rm -rf "$BUS_HOME"; [ -n "${SRV:-}" ] && kill "$SRV" 2>/dev/null; [ -n "${GROK_SRV:-}" ] && kill "$GROK_SRV" 2>/dev/null; true' EXIT
 GROK_SRV=
@@ -513,7 +520,7 @@ N1=$(newr n1 whoami | awk '/^seat/{print $2}'); N2=$(newr n2 whoami | awk '/^sea
 assert_has "a new repo says so in status" "new here" "$(newr n1 status)"
 out=$(newr n1 post --to "$N2" --state handoff -m "# first job" 2>&1)
 assert_has "the first work item in a new repo explains the default" "tip: the first piece of work" "$out"
-assert_has "the tip says who checks the work" "comes back to you to check" "$out"
+assert_has "the tip says checking finished work is a team rule" "Who checks finished work" "$out"
 out=$(newr n1 post --to "$N2" --state handoff -m "# second job" 2>&1)
 assert_lacks "the tip comes once per repo" "tip:" "$out"
 assert_lacks "status stops calling the repo new" "new here" "$(newr n1 status)"
@@ -575,6 +582,160 @@ assert_has "snapshot carries lane decisions" "Cards ship to everyone" "$("$BIN" 
 assert_has "decisions are hidden when the team turned them off" "" \
   "$(PD=off pol p7 digest | grep -c 'decisions to follow' || true)"
 rm -f "$RF"; unset AGENT_BUS_REPO_POLICY
+
+# --- closing a handoff under the default rules sends nothing back ---
+# Claude seats in a repo with no rules set: the harness pins dropped.
+ec() { AGENT_BUS_REPO_ID=echo000000000001 AGENT_BUS_REPO_POLICY="$BUS_HOME/no-rules.json" AGENT_BUS_SESSION="$1" \
+  AGENT_BUS_TOOL=claude AGENT_BUS_WT="w$1" AGENT_BUS_POLICY_OWNER= AGENT_BUS_POLICY_REVIEW= AGENT_BUS_POLICY_CLAUDE= "$BIN" "${@:2}"; }
+E1=$(ec e1 whoami | awk '/^seat/{print $2}'); E2=$(ec e2 whoami | awk '/^seat/{print $2}')
+E3=$(ec e3 whoami | awk '/^seat/{print $2}')
+for s in e1 e2 e3; do ec $s who >/dev/null; done
+# Rows a closing step added besides the closer's own reply.
+echoes() { jq -c --arg id "$1" 'select(.kind == "msg" and .re == $id and .state != "done")' "$BUS_HOME/ledger.jsonl"; }
+assert_has "the default rules have no reviewer" "review = none" "$(ec e1 init --show)"
+assert_has "post --help lists --review, the way to gate one handoff" "--review <seat|@lead|none>" "$("$BIN" post --help)"
+hid=$(ec e1 post --allow-claude --to "$E2" --state handoff -m '# echo by resolve' | idof)
+assert_eq "a default handoff records no reviewer" "null" "$(tail -n 1 "$BUS_HOME/ledger.jsonl" | jq -r .review)"
+assert_has "resolving a handoff closes it" "resolved $hid (done)" "$(ec e2 resolve "$hid")"
+assert_eq "resolving a handoff sends nothing back" "" "$(echoes "$hid")"
+assert_lacks "the sender gets no review item" "Done and ready for review" "$(ec e1 read --peek)"
+hid=$(ec e1 post --allow-claude --to "$E2" --state handoff -m '# echo by reply' | idof)
+assert_has "replying to a handoff closes it" "closed $hid (done)" "$(ec e2 reply "$hid" -m 'built it')"
+assert_eq "replying to a handoff sends only the reply" "" "$(echoes "$hid")"
+hid=$(ec e1 post --allow-claude --to "$E2" --state handoff -m '# echo by hand-on' | idof)
+nid=$(ec e2 post --allow-claude --re "$hid" --close handed-off --to "$E3" --state handoff -m '# take it' | idof)
+assert_eq "handing a handoff on carries no reviewer" "null" "$(tail -n 1 "$BUS_HOME/ledger.jsonl" | jq -r .review)"
+ec e3 resolve "$nid" >/dev/null
+assert_eq "closing the handed-on item sends nothing back" "" "$(echoes "$nid")"
+assert_lacks "nothing from these handoffs is left open" "echo by" "$(ec e1 triage)"
+# A reviewer named on the handoff still gets the work, but a review item the
+# bus posts on a PM's behalf is not PM-assigned work.
+ec e1 read >/dev/null; ec e2 role pm >/dev/null
+hid=$(ec e1 post --allow-claude --to "$E2" --state handoff --review "$E1" -m '# gated by name' | idof)
+assert_has "a named reviewer still gets the work" "for review by $E1" "$(ec e2 resolve "$hid" -m 'done')"
+out=$(ec e1 read --peek)
+assert_has "the review item arrives" "review: gated by name" "$out"
+assert_lacks "an automatic review item carries no PM framing" "from the PM your user put in charge" "$out"
+assert_has "it says the bus posted it" "posted automatically by agent-bus" "$out"
+assert_eq "it is marked automatic in the ledger" "true" \
+  "$(jq -r --arg id "$hid" 'select(.kind == "msg" and .review_of == $id) | .auto' "$BUS_HOME/ledger.jsonl")"
+ec e2 role pm --clear >/dev/null
+
+# --- reply to a Claude seat ---
+qid=$(ec e1 post --allow-claude --to "$E2" --state question -m '# which port?' | idof)
+out=$(ec e2 reply "$qid" -m '5188' 2>&1 || true)
+assert_has "replying to a Claude seat's packet needs no flag" "closed $qid (done)" "$out"
+qid=$(ec e1 post --allow-claude --to "$E2" --state question -m '# which host?' | idof)
+out=$(ec e2 reply "$qid" --allow-claude -m 'localhost' 2>&1 || true)
+assert_has "reply accepts --allow-claude" "closed $qid (done)" "$out"
+qid=$(ec e1 post --allow-claude --to "$E2" --state question -m '# which db?' | idof)
+out=$(ec e2 reply "$qid" --keep-open -m 'still checking' 2>&1 || true)
+assert_has "a keep-open reply to a Claude seat goes through" "posted $E2 -> $E1" "$out"
+# A reply goes only to the packet's sender: never to a seat that took over its
+# worktree, and a seat that wasn't sent the packet gets no implied flag.
+rs() { AGENT_BUS_REPO_ID=echo000000000001 AGENT_BUS_REPO_POLICY="$BUS_HOME/no-rules.json" AGENT_BUS_SESSION="$1" \
+  AGENT_BUS_TOOL=claude AGENT_BUS_WT="$2" AGENT_BUS_POLICY_OWNER= AGENT_BUS_POLICY_REVIEW= AGENT_BUS_POLICY_CLAUDE= "$BIN" "${@:3}"; }
+R1=$(rs r1 wr1 whoami | awk '/^seat/{print $2}'); R2=$(rs r2 wr2 whoami | awk '/^seat/{print $2}')
+R3=$(rs r3 wr3 whoami | awk '/^seat/{print $2}')
+for s in 1 2 3; do rs r$s wr$s who >/dev/null; done
+fid=$(rs r1 wr1 post --allow-claude --to "$R2" -m '# for r2 only' | idof)
+out=$(rs r3 wr3 reply "$fid" --keep-open -m 'not mine to answer' 2>&1 || true)
+assert_has "a seat not sent the packet can't reply to a Claude seat without the flag" "is a Claude session" "$out"
+assert_eq "and nothing is posted" "" "$(jq -r --arg id "$fid" 'select(.kind == "msg" and .re == $id) | .id' "$BUS_HOME/ledger.jsonl")"
+assert_has "with --allow-claude it is that seat's call" "posted $R3 -> $R1" "$(rs r3 wr3 reply "$fid" --keep-open --allow-claude -m 'fyi')"
+# A PM supervises every work item in its repo, but wasn't sent this one.
+rs r2 wr2 role pm >/dev/null
+qid=$(rs r1 wr1 post --allow-claude --to "$R3" --state question -m '# asked of r3, not the PM' | idof)
+out=$(rs r2 wr2 reply "$qid" -m 'the PM answers' 2>&1 || true)
+assert_has "a PM can't reply to a question sent to someone else without the flag" "is a Claude session" "$out"
+assert_eq "and the question stays open with no reply" "" \
+  "$(jq -r --arg id "$qid" 'select((.kind == "msg" and .re == $id) or (.kind == "resolve" and .msg == $id)) | .kind' "$BUS_HOME/ledger.jsonl")"
+assert_has "with --allow-claude the PM may" "closed $qid (done)" "$(rs r2 wr2 reply "$qid" --allow-claude -m 'the PM answers')"
+rs r2 wr2 role pm --clear >/dev/null
+# A question sent to @pm addresses the one PM it resolves to: the sender's lane
+# PM, else the repo PM. Another PM in scope only supervises it.
+rs lw wlw lane lx >/dev/null
+rs lp wlp role pm --lane lx >/dev/null; rs rp wrp role pm >/dev/null
+qid=$(rs lw wlw post --allow-claude --to @pm --state question -m '# lane question for the PM' | idof)
+out=$(rs rp wrp reply "$qid" -m 'the repo PM answers' 2>&1 || true)
+assert_has "a PM that @pm doesn't resolve to can't reply without the flag" "is a Claude session" "$out"
+out=$(rs lp wlp reply "$qid" -m 'the lane PM answers' 2>&1 || true)
+assert_has "the lane PM replies to its lane's @pm question without the flag" "closed $qid (done)" "$out"
+qid=$(rs r3 wr3 post --allow-claude --to @pm --state question -m '# question for the repo PM' | idof)
+out=$(rs rp wrp reply "$qid" -m 'the repo PM answers' 2>&1 || true)
+assert_has "the repo PM replies to an unlaned @pm question without the flag" "closed $qid (done)" "$out"
+rs lp wlp role pm --lane lx --clear >/dev/null; rs rp wrp role pm --clear >/dev/null
+# A role and a lane can share a name. A packet to the role is for its holder,
+# not a broadcast to the lane.
+rs rc wrc role release >/dev/null; rs rd wrd lane release >/dev/null
+qid=$(rs re wre post --allow-claude --to @release --state question -m '# for the release role holder' | idof)
+out=$(rs rd wrd reply "$qid" -m 'a lane seat answers' 2>&1 || true)
+assert_has "a seat in a lane named like a role can't reply to the role's packet without the flag" "is a Claude session" "$out"
+out=$(rs rc wrc reply "$qid" -m 'the role holder answers' 2>&1 || true)
+assert_has "the role holder replies without the flag" "closed $qid (done)" "$out"
+rs rc wrc role release --clear >/dev/null; rs rd wrd lane --clear >/dev/null
+# A role's packet stays the role's after its holder lets go: the reply check
+# uses who held the role when it was sent, and who holds it now.
+rs rc wrc role rel >/dev/null; rs rd wrd lane rel >/dev/null
+RC=$(rs rc wrc whoami | awk '/^seat/{print $2}'); RE=$(rs re wre whoami | awk '/^seat/{print $2}')
+qid=$(rs re wre post --allow-claude --to @rel --state question -m '# for the rel role holder' | idof)
+assert_eq "a packet to a role records the seat that held it" "$RC" \
+  "$(jq -r --arg id "$qid" 'select(.kind == "msg" and .id == $id) | .to_role' "$BUS_HOME/ledger.jsonl")"
+rs rc wrc role rel --clear >/dev/null
+out=$(rs rd wrd reply "$qid" --keep-open -m 'a lane seat answers' 2>&1 || true)
+assert_has "after the holder clears the role, a seat in the same-named lane still needs the flag" "is a Claude session" "$out"
+assert_eq "and nothing is posted" "" "$(jq -r --arg id "$qid" 'select(.kind == "msg" and .re == $id) | .id' "$BUS_HOME/ledger.jsonl")"
+out=$(rs rc wrc reply "$qid" --keep-open -m 'the old holder answers' 2>&1 || true)
+assert_has "the seat that held the role when it was sent replies without the flag" "posted $RC -> $RE" "$out"
+rs rf wrf role rel >/dev/null
+out=$(rs rf wrf reply "$qid" -m 'the new holder answers' 2>&1 || true)
+assert_has "the role's current holder replies without the flag" "closed $qid (done)" "$out"
+rs rf wrf role rel --clear >/dev/null
+rs rc wrc role rel >/dev/null
+qid=$(rs re wre post --allow-claude --to @rel --state question -m '# for a holder who offboards' | idof)
+rs rc wrc offboard >/dev/null
+out=$(rs rd wrd reply "$qid" --keep-open -m 'a lane seat answers' 2>&1 || true)
+assert_has "after the holder offboards, a seat in the same-named lane still needs the flag" "is a Claude session" "$out"
+# A packet written before the field existed keeps the old rule: with no holder
+# now, the lane heard it.
+f="$BUS_HOME/ledger.jsonl"; jq -c --arg id "$qid" 'if .id == $id then del(.to_role) else . end' "$f" >"$f.t" && mv "$f.t" "$f"
+out=$(rs rd wrd reply "$qid" --keep-open -m 'a lane seat answers an old packet' 2>&1 || true)
+assert_has "an old role packet with no holder now counts as heard by the lane" "posted " "$out"
+rs rd wrd lane --clear >/dev/null
+# A broadcast the replier heard counts as sent to it.
+bid=$(rs r1 wr1 post --to @all -m '# to everyone' | idof)
+out=$(rs r3 wr3 reply "$bid" -m 'heard it' 2>&1 || true)
+assert_has "a seat replies to an @all broadcast it heard without the flag" "posted $R3 -> $R1" "$out"
+rs lq wlq lane lq >/dev/null; rs lz wlz role pm --lane lz >/dev/null
+LZ=$(rs lz wlz whoami | awk '/^seat/{print $2}'); LQ=$(rs lq wlq whoami | awk '/^seat/{print $2}')
+bid=$(rs lq wlq post --to @lz -m '# to lane lz' | idof)
+out=$(rs lz wlz reply "$bid" -m 'the lane PM heard it' 2>&1 || true)
+assert_has "a lane's PM replies to a broadcast to that lane without the flag" "posted $LZ -> $LQ" "$out"
+# The mirror image: a role taken after a lane packet was sent doesn't turn it
+# into the role's packet.
+bid=$(rs lq wlq post --to @lz --state question -m '# for lane lz, before any role lz' | idof)
+assert_eq "a packet to a lane records that no role held its name" "" \
+  "$(jq -r --arg id "$bid" 'select(.kind == "msg" and .id == $id) | .to_role' "$BUS_HOME/ledger.jsonl")"
+rs lh wlh role lz >/dev/null
+out=$(rs lh wlh reply "$bid" --keep-open -m 'the new role holder answers' 2>&1 || true)
+assert_has "a seat that takes a role named like the lane after the post needs the flag" "is a Claude session" "$out"
+assert_eq "and nothing is posted" "" "$(jq -r --arg id "$bid" 'select(.kind == "msg" and .re == $id) | .id' "$BUS_HOME/ledger.jsonl")"
+out=$(rs lz wlz reply "$bid" -m 'the lane PM answers' 2>&1 || true)
+assert_has "the lane PM still replies to its lane's packet without the flag after the role is taken" "closed $bid (done)" "$out"
+rs lh wlh role lz --clear >/dev/null
+rs lz wlz role pm --lane lz --clear >/dev/null; rs lq wlq lane --clear >/dev/null
+qid=$(rs r1 wr1 post --allow-claude --to "$R2" --state question -m '# asked by a session that ends' | idof)
+f="$BUS_HOME/seats/$(printf '%s' "$R1" | tr '/' '_').json"; jq '.epoch = 0' "$f" >"$f.t" && mv "$f.t" "$f"
+rs r1b wr1 who >/dev/null; R1B=$(rs r1b wr1 whoami | awk '/^seat/{print $2}')
+out=$(rs r2 wr2 reply "$qid" -m 'answer' 2>&1 || true)
+assert_eq "a reply never goes to the sender's heir" "" \
+  "$(jq -r --arg id "$qid" --arg h "$R1B" 'select(.kind == "msg" and .re == $id and .to == $h) | .id' "$BUS_HOME/ledger.jsonl")"
+assert_has "a reply to an ended Claude seat needs the flag" "is a Claude session" "$out"
+out=$(AGENT_BUS_NO_PUSH=0 AGENT_BUS_NO_PEERS=1 rs r2 wr2 reply "$qid" --allow-claude -m 'answer anyway' 2>&1 || true)
+assert_has "with the flag it goes to the ended sender itself" "posted $R2 -> $R1 " "$out"
+assert_lacks "not to its heir" "sending to" "$out"
+assert_has "the delivery line names the live session in the sender's worktree" \
+  "delivery: $R1 is not running; this waits until it is. A live session in that worktree: $R1B; post to it if you meant to." "$out"
 
 # An unlimited wake budget (the default) never reports a seat out of wakes.
 assert_lacks "budget 0 means nobody runs out of wakes" "budget" "$(AGENT_BUS_WAKE_BUDGET=0 "$BIN" snapshot | jq -r '.attention[].kind')"
@@ -1427,6 +1588,17 @@ AGENT_BUS_POLICY_CLAUDE= AGENT_BUS_REPO_ID=acme AGENT_BUS_HOME="$SB/bus" "$BIN" 
 out=$(AGENT_BUS_POLICY_CLAUDE= cc ctx1 post --to "$SAME" -m "# same context, personal rule" 2>&1 || true)
 assert_has "claude=allow also works from the personal config" "posted" "$out"
 rm -rf "$SB"
+
+# --- isolation: nothing from the host session reached the fixtures ---
+assert_eq "no host session, socket or pane variable is set" "" "$(env | grep -E "$HOST_ENV" | grep -v '^AGENT_BUS_' | cut -d= -f1)"
+assert_eq "no Codex variable reaches the fixtures" "" "$(env | grep -E '^CODEX_' | cut -d= -f1)"
+# Seat files record the checkout path as "cwd" and the config dir as "claude_dir", and a
+# host may keep them under a directory named by its session id; those are paths, not ids
+# leaking in from the environment, so both values are masked before scanning.
+_leaked=''
+_bus_text=$(find "$BUS_HOME" -type f -exec cat {} + | sed -E 's/"(cwd|claude_dir)" *: *"([^"\\]|\\.)*"/"\1":""/g')
+for _id in ${HOST_IDS[@]+"${HOST_IDS[@]}"}; do grep -qF -- "$_id" <<<"$_bus_text" && _leaked="$_leaked $_id"; done
+assert_eq "no host session, socket or pane id reached the test bus" "" "$_leaked"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 ((fail == 0))

@@ -103,6 +103,15 @@ dir is never refused (each Claude seat records its `claude_dir`), because
 `SendMessage` can't reach it. `@pm`, lanes and broadcasts are unaffected: a
 Claude lane PM supervising OpenCode seats is what the bus is for.
 
+Under `claude=refuse`, `reply` needs no `--allow-claude` when the packet was
+sent to the replier (its seat, its scope, a role it holds or held when the
+packet was sent, or a broadcast it heard; a role's packet is never a broadcast
+to a lane of the same name, and a lane's packet never becomes a role's), or to
+`@pm` and the replier is the PM it reaches (the sender's lane PM, else the repo
+PM), and its sender is still live: that sender chose the bus. Supervising the
+packet as PM or lead doesn't count. Otherwise `reply` is refused like `post`
+unless it passes `--allow-claude`.
+
 With `claude=allow`, Claude seats can post directly to each other, including
 tracked handoffs, questions and review requests, and `--allow-claude` is
 accepted but not needed. Either way, a packet to a Claude seat is recorded
@@ -192,7 +201,7 @@ open the rule (`claude=allow`) for someone who has set nothing personally; set
 | Rule | Values (default first) | Effect |
 |---|---|---|
 | `owner` | `refuse` · `lead` · `pm` | A work item sent to a broadcast nobody supervises is refused (with live lane peers and `@lead` suggested), owned by the lead, or owned by a lane PM (the lead if there is none) |
-| `review` | `requester` · `lead` · `none` | Who accepts handed-off work: whoever handed it over, the lead, or nobody |
+| `review` | `none` · `requester` · `lead` | Who accepts handed-off work: nobody (done is done), whoever handed it over, or the lead |
 | `ask_lead` | `scope,destructive` · any of `scope`, `destructive`, `disagreement` · `never` | When agents must stop and ask the lead; stated in every orientation |
 | `decisions` | `on` · `off` | Show the lane's decisions at session start |
 | `claude` | `refuse` · `allow` | Whether a Claude seat may post to a Claude seat under the same config dir without `--allow-claude` (see Claude to Claude) |
@@ -208,9 +217,12 @@ orientation line carries a one-sentence summary of them.
 
 ## Review gates
 
-Closing isn't accepting. A `handoff` records its reviewer (`review` on the
-packet): by default whoever handed it over; `post --review <seat|@lead|none>`
-overrides; handing it on keeps the same reviewer.
+By default, closing a handoff is the end of it: `resolve`, `reply` and
+`post --close handed-off` send nothing back to the sender beyond the closer's
+own reply. A handoff is gated only when it asks for a reviewer: `post --review
+<seat|@lead>`, or a team `review` rule of `requester` or `lead`. A gated
+`handoff` records its reviewer (`review` on the packet); `--review none`
+overrides the team rule; handing it on keeps the same reviewer.
 
 - The doer's `resolve <id> --reason done -m "…"` does not close gated work: it
   hands it to the reviewer as a `needs-review` item (`review_of` → the work).
@@ -218,6 +230,9 @@ overrides; handing it on keeps the same reviewer.
   to the doer as a new `handoff` with the same reviewer.
 - Nobody approves their own work. A reviewer whose session has ended is
   replaced by `@lead`, so nothing waits on nobody.
+- The `needs-review` item is posted by the bus, not chosen by the doer, so it
+  carries `auto: true`. It is never framed as PM-assigned work, even when the
+  doer is the PM; the digest says agent-bus posted it.
 
 ## Decisions
 
@@ -410,7 +425,10 @@ inbox (acceptance and reading unconfirmed), inbox submission unavailable, sees i
 at its next prompt, queued a notice, already has an unread notice, wake limit reached,
 not running, or has no hooks. A packet nobody owns says so instead of looking
 delivered. A post to a seat that has ended goes to the live seat with the same
-tool and worktree (`note: … is gone; sending to …`).
+tool and worktree (`note: … is gone; sending to …`). A `reply` never does: it
+goes only to the packet's sender, and waits for it. When a live session holds
+that worktree, the delivery line names it (`A live session in that worktree:
+…; post to it if you meant to.`).
 
 A Codex chat gets one "check your inbox" notice until it reads; later posts
 don't queue more (a notice older than 30 minutes is assumed lost). An OpenCode
@@ -424,6 +442,10 @@ One host session that runs bus commands from two folders holds two seats.
 
 - `reply <id> -m …` answers the sender and closes the item in one row (reason
   `done` by default). Gated work goes to its reviewer, as `resolve` does.
+  It goes only to the packet's sender, never to a seat that took over the
+  sender's worktree. To a Claude sender it needs no `--allow-claude` when the
+  packet was sent to you (or to `@pm`, and you are the PM it reaches), not only
+  supervised by you, and the sender is still live.
   `--keep-open` answers without closing. `resolve` defaults to `done` too.
 - `ask --to <seat> -m …` posts a `question` and waits (default 600 s) for a
   reply or a close; exit 2 on timeout, with the question left open.
@@ -568,7 +590,11 @@ timeout.  The Python Codex adapter (`lib/codex_queue.py`) uses the same
 ```
 
 A `msg` row carries `re` (the packet it replies to) and, when it closes that
-packet, `close` (the reason). A `resolve` row carries `msg`, `by` and `reason`.
+packet, `close` (the reason). A `msg` sent to an `@` target carries `to_role`:
+the seat that held a role of that name when it was posted (`--to @release`), or
+`""` for a lane or broadcast. `reply` reads it, so a role taken or let go later
+never changes who the packet was sent to. A `resolve` row carries `msg`, `by`
+and `reason`.
 Rows written before v2 have no reason and still close their packet.
 
 gc prunes expired claims, dead seats, old bodies and abandoned roles, and runs

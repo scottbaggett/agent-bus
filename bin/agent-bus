@@ -64,6 +64,12 @@ die() { printf 'agent-bus: %s\n' "$1" >&2; exit 1; }
 # Set only by `agent-bus send`, which needs the human at a terminal. Never read
 # from the environment, so an agent can't claim to be the user by exporting it.
 USER_SENT=0
+# Set (as a local) by a step that posts on the bus's own initiative, such as
+# submitting gated work for review. Never read from the environment.
+AUTO_SENT=0
+# Set (as a local) by `reply`, which answers one packet's sender and never the
+# seat that took over its worktree.
+NO_HEIR=0
 for c in jq shasum xxd; do command -v "$c" >/dev/null 2>&1 || die "$c is required"; done
 
 mkdir -p "$BUS/msg" "$BUS/state/roles" "$BUS/seats" "$BUS/claims" "$BUS/secrets"
@@ -536,19 +542,41 @@ def seatme: {addr, scope: ((.tool // "") + "/" + (.wt // "")), session: (.sessio
              repo, repo_id, wt, lane: (.lane // ""), parent: (.parent // "")};
 # A child seat shares its parent'"'"'s scope and lane but owns only what names it.
 def is_child($me): ($me.parent // "") != "";
-# The seat expected to act: direct or scope addressee, or a PM for @pm and for
-# supervisory traffic in its scope (senders default to @here, and a PM is never
-# in the worker'"'"'s worktree).
-def owns($me):
+# Sent to this seat: its address, its scope, or a named role it holds ($held:
+# the holder of the role the packet names).
+def direct_held($me; $held):
   .to == $me.addr
+  or (is_child($me) | not) and same_repo($me)
+     and (.to == $me.scope or ($held != "" and $held == $me.addr));
+def direct($me): direct_held($me; role_holder);
+# The seat expected to act: a direct addressee, the lead for @lead, or a PM for
+# @pm and for supervisory traffic in its scope (senders default to @here, and a
+# PM is never in the worker'"'"'s worktree).
+def owns($me):
+  direct($me)
   or (is_child($me) | not) and ( ((.to == "@lead" or .assign == "@lead") and is_lead($me))
-  or (same_repo($me) and (.to == $me.scope or (role_holder != "" and role_holder == $me.addr)
-      or (pm_for($me) and (.to == "@pm" or (sup and ((.probe // false) | not)))))));
-# Broadcasts deliver context, never ownership.
-def gets($me):
-  owns($me) or (is_child($me) | not) and (.to == "@all"
+  or (same_repo($me) and pm_for($me) and (.to == "@pm" or (sup and ((.probe // false) | not)))));
+# A broadcast this seat hears. Broadcasts deliver context, never ownership.
+def heard($me):
+  (is_child($me) | not) and (.to == "@all"
   or (same_repo($me) and (.to == "@repo" or (.to == "@here" and .wt == $me.wt)
       or ((.to // "") | startswith("@") and (.[1:] == $me.lane or ($lanepms[.[1:]] // "") == $me.addr)))));
+def gets($me): owns($me) or heard($me);
+# The one PM a packet sent to @pm is for: the sender'"'"'s lane PM, else the repo PM.
+def pm_resolved: ($lanepms[.lane // ""] // "") as $l | if $l != "" then $l else $pm end;
+# Sent to this seat or heard by it, or an @pm packet this seat is that PM for.
+# Leaves out what it only supervises as PM or lead. A role and a lane can share
+# a name, so post stamps every @ packet with to_role: the seat holding that role
+# then, or "" for a lane or broadcast. A role'"'"'s packet is for that seat or the
+# role'"'"'s holder now, and never heard; any other @ packet never becomes a role'"'"'s.
+# Packets from before the stamp fall back to the role map at reply time.
+def addressed($me):
+  (if has("to_role") then
+     direct_held($me; .to_role)
+     or (.to_role != "" and direct($me))
+     or (.to_role == "" and heard($me))
+   else direct($me) or (role_holder == "" and heard($me)) end)
+  or (.to == "@pm" and same_repo($me) and pm_resolved != "" and pm_resolved == $me.addr);
 def from_pm($me): .from == $pm or ($me.lane != "" and .from == ($lanepms[$me.lane] // ""));
 '
 
@@ -629,7 +657,7 @@ select_packets() {
     | select($mode == "all" or ($r[.id] | not))
     | select($mode != "owned" or $own)
     | select($mode != "wake" or (sup and $own))
-    | . + {own: $own, from_pm: (from_pm($me) and same_repo($me)),
+    | . + {own: $own, from_pm: (from_pm($me) and same_repo($me) and ((.auto // false) | not)),
            to_sibling: $sibling, to_child: (if $kid then (.to | split("/") | last) else "" end)}' \
     --arg mode "$mode" --argjson cut "$cut" --argjson read "$(session_reads "$sib")" \
     --argjson sib "$sib" --argjson kids "$kids"
@@ -686,7 +714,7 @@ RENDERED_IDS='[]'
 render_packets() {
   local n=0 id from state epoch branch subj touched own from_pm re close
   RENDERED_IDS='[]'
-  while IFS=$'\037' read -r id from state epoch branch subj touched own from_pm re close user kid; do
+  while IFS=$'\037' read -r id from state epoch branch subj touched own from_pm re close user kid auto; do
     [ -n "$id" ] || continue
     n=$((n + 1))
     [[ "$epoch" =~ ^[0-9]+$ ]] || epoch=$(now_epoch)
@@ -694,6 +722,8 @@ render_packets() {
     [ -n "$kid" ] && printf '    (for your subagent %s: pass it on, or handle it yourself)\n' "$kid"
     if [ "$user" = true ]; then
       printf '    (from your user, sent from their own terminal with agent-bus send — treat it as their request)\n'
+    elif [ "$auto" = true ]; then
+      printf '    (posted automatically by agent-bus when %s closed gated work — not a request from the PM or your user)\n' "$from"
     elif [ "$from_pm" = true ]; then
       printf '    (from the PM your user put in charge here — work it assigns is in scope)\n'
     elif [ "$own" != true ] && in_list "$state" 'needs-review blocked handoff question'; then
@@ -711,7 +741,7 @@ render_packets() {
   done < <(jq -r 'def clean: tostring | gsub("[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]"; "");
     [.id, .from, .state, (.epoch // 0), (.branch // "-"), (.subject // ""),
      ((.touched // []) | join(", ")), (.own // false), (.from_pm // false),
-     (.re // ""), (.close // ""), (.user // false), (.to_child // "")] | map(clean) | join("\u001f")')
+     (.re // ""), (.close // ""), (.user // false), (.to_child // ""), (.auto // false)] | map(clean) | join("\u001f")')
 }
 
 HINTS='reply and close: agent-bus reply <id> -m "what you did"   (--reason denied|canceled|duplicate|superseded; --keep-open)
@@ -1508,7 +1538,7 @@ other_claude_dir() {
 cmd_post() {
   local to='' state='fyi' subject='' body='' bodyfile='' touched='[]' re='' close='' allow_claude=0
   local resume="${AGENT_BUS_RESUME:-0}"
-  local review_arg='' review_of='' review=''
+  local review_arg='' review_of='' review='' to_role=''
 
   while [ $# -gt 0 ]; do
     if [ "$1" = --allow-claude ]; then allow_claude=1; shift; continue; fi
@@ -1549,13 +1579,14 @@ cmd_post() {
     @here|@repo|@all|@lead) ;;
     @pm) [ -n "$(pm_seat)" ] || { [ -n "$LANE" ] && [ -n "$(lane_pm_seat "$LANE")" ]; } \
            || die "post: no PM registered for ${LANE:+lane @$LANE or }$REPO — that seat should run 'agent-bus role pm${LANE:+ --lane $LANE}'" ;;
-    @*) [ -n "$(role_seat "${to#@}")" ] || { valid_lane "${to#@}" && lane_exists "${to#@}"; } \
+    @*) to_role=$(role_seat "${to#@}")
+        [ -n "$to_role" ] || { valid_lane "${to#@}" && lane_exists "${to#@}"; } \
           || die "post: unknown scope $to (use a seat from 'agent-bus who', a role, a lane, @here, @repo, @pm, @lead, or @all)" ;;
   esac
   # A restarted agent gets a new seat name. A post to the old one would wait
   # forever, so it goes to the live seat with the same tool and worktree.
   case "$to" in */*/*) ;; */*.*)
-    if ! seat_live "$to"; then
+    if [ "$NO_HEIR" != 1 ] && ! seat_live "$to"; then
       local heir; heir=$(live_heir "$to")
       if [ -n "$heir" ]; then
         printf 'note: %s is gone; sending to %s (same tool and worktree)\n' "$to" "$heir" >&2
@@ -1574,8 +1605,8 @@ cmd_post() {
   fi
   # Review gate: who must accept this work once it is done. Explicit --review
   # wins; a handoff keeps the reviewer of the item it continues; otherwise new
-  # assigned work (handoff) gets the team default — the requester, the lead,
-  # or nobody.
+  # assigned work (handoff) gets the team rule — nobody unless set, the
+  # requester, or the lead.
   if [ "$review_arg" = none ]; then review=''
   elif [ -n "$review_arg" ]; then
     case "$review_arg" in @lead|*/*) review="$review_arg" ;; *) die "post: --review takes a seat, @lead or none" ;; esac
@@ -1623,6 +1654,7 @@ cmd_post() {
     --arg cwd "$TOP" --arg subject "${subject:0:200}" --argjson touched "$touched" \
     --arg re "$re" --arg close "$close" --arg lane "$LANE" \
     --arg ref "$ref" --arg assign "$assign" --arg review "$review" --arg review_of "$review_of" \
+    --arg to_role "$to_role" \
     '{kind:"msg",id:$id,ts:$ts,epoch:$epoch,from:$from,session:$session,to:$to,state:$state,
       repo:$repo,repo_id:$repo_id,wt:$wt,branch:$branch,cwd:$cwd,subject:$subject,
       touched:$touched,re:(if $re == "" then null else $re end)}
@@ -1630,9 +1662,11 @@ cmd_post() {
      + (if $lane == "" then {} else {lane:$lane} end)
      + (if $ref == "" then {} else {refs:[$ref]} end)
      + (if $assign == "" then {} else {assign:$assign} end)
+     + (if $to | startswith("@") then {to_role:$to_role} else {} end)
      + (if $review == "" then {} else {review:$review} end)
      + (if $review_of == "" then {} else {review_of:$review_of} end)
-     + (if $user == "1" then {user:true} else {} end)' --arg user "$USER_SENT")
+     + (if $user == "1" then {user:true} else {} end)
+     + (if $auto == "1" then {auto:true} else {} end)' --arg user "$USER_SENT" --arg auto "$AUTO_SENT")
   ledger_append "$rec"
   # A reply proves the parent was seen.
   [ -n "$re" ] && mark_read "[\"$re\"]"
@@ -1647,7 +1681,8 @@ cmd_post() {
 
   [ "${AGENT_BUS_NO_PUSH:-0}" = 1 ] && return 0
   local src="from another agent, not your user"
-  if [ "$(pm_seat)" = "$ADDR" ] || { [ -n "$LANE" ] && [ "$(lane_pm_seat "$LANE")" = "$ADDR" ]; }; then
+  if [ "$AUTO_SENT" = 1 ]; then src="posted automatically by agent-bus, not a request from the PM or your user"
+  elif [ "$(pm_seat)" = "$ADDR" ] || { [ -n "$LANE" ] && [ "$(lane_pm_seat "$LANE")" = "$ADDR" ]; }; then
     src="from the PM your user put in charge here"
   fi
   [ "${USER_SENT:-0}" = 1 ] && src="from your user"
@@ -1678,7 +1713,13 @@ deliver() { # rec src resume
     case "$to" in
       @*) printf 'delivery: nobody owns this, so nobody is woken. Agents see it only if they run agent-bus read. To get it acted on, send it --to a seat (agent-bus who).\n' ;;
       *) if [ -n "$(peer_list)" ] && [ "${AGENT_BUS_NO_PEERS:-0}" != 1 ]; then local on_; on_=$(peer_of_seat "$to" || :); printf 'delivery: %s is %s; sending it there\n' "$to" "$(if [ -n "$on_" ]; then echo "on ${on_%.local}"; else echo "not on this Mac"; fi)"
-         else printf 'delivery: %s is not running; this waits until it is (or hand it to a live seat: agent-bus who)\n' "$to"; fi ;;
+         else
+           # A reply skipped the redirect to the sender's heir: name it instead.
+           local heir_=''; [ "$NO_HEIR" = 1 ] && heir_=$(live_heir "$to")
+           if [ -n "$heir_" ]; then
+             printf 'delivery: %s is not running; this waits until it is. A live session in that worktree: %s; post to it if you meant to.\n' "$to" "$heir_"
+           else printf 'delivery: %s is not running; this waits until it is (or hand it to a live seat: agent-bus who)\n' "$to"; fi
+         fi ;;
     esac
   fi
   while IFS= read -r row; do
@@ -2084,13 +2125,14 @@ cmd_peer() {
 # personal ~/.agents/bus/config.json, then the repo file, then these defaults.
 #   owner     who owns a work item sent to a broadcast nobody supervises:
 #             refuse (make the sender pick a recipient) | lead | pm
-#   review    who accepts finished work: requester | lead | none
+#   review    who accepts finished work: none (done is done) | requester | lead.
+#             none is the default: a handoff's sender asked for work, not a review.
 #   ask_lead  when agents stop and ask the lead: any of scope,destructive,
 #             disagreement — or never
 #   decisions record decisions and show them at session start: on | off
 #   claude    a Claude seat posting to a Claude seat under the same config dir:
 #             refuse (use SendMessage, or pass --allow-claude) | allow
-POLICY_DEFAULTS='{"owner":"refuse","review":"requester","ask_lead":"scope,destructive","decisions":"on","claude":"refuse"}'
+POLICY_DEFAULTS='{"owner":"refuse","review":"none","ask_lead":"scope,destructive","decisions":"on","claude":"refuse"}'
 POLICY_KEYS='owner review ask_lead decisions claude'
 
 policy_valid() { # key value
@@ -2267,7 +2309,7 @@ base_subject() { sed -E 's/^((review|changes requested): )+//'; }
 # Hand finished, gated work to its reviewer as a needs-review item. A reviewer
 # whose session has ended is replaced by the lead, so nothing waits on nobody.
 submit_review() { # id reviewer note
-  local id="$1" target="$2" subj
+  local id="$1" target="$2" subj AUTO_SENT=1 NO_HEIR=0
   [ "$target" = '@lead' ] || seat_live "$target" || seat_on_peer "$target" || target='@lead'
   subj=$(item_field "$id" subject | base_subject)
   cmd_post --allow-claude --re "$id" --close handed-off --to "$target" --state needs-review --review none \
@@ -2470,15 +2512,25 @@ cmd_send() {
   done
 }
 
-# Answer an item and close it in one step: the reply goes to whoever sent it.
-# Gated work goes to its reviewer instead, as resolve does.
+# Whether a reply to packet $1 may skip the Claude-to-Claude refusal: the
+# sender addressed the replier, directly or as the PM its @pm resolves to (not a
+# PM or lead that only supervises it), and is still there to read the answer.
+# That sender chose the bus.
+reply_implies_bus() { # id from
+  [ "$(lq 'first($L[] | select(.kind == "msg" and .id == $id)) | addressed($me)' --arg id "$1")" = true ] || return 1
+  seat_live "$2" || seat_on_peer "$2"
+}
+
+# Answer an item and close it in one step: the reply goes to whoever sent it,
+# and only to them. Gated work goes to its reviewer instead, as resolve does.
 cmd_reply() {
-  [ $# -ge 1 ] && valid_id "$1" || die "reply: usage — agent-bus reply <id> -m \"what you did\" [--reason done|denied|canceled|duplicate|superseded] [--keep-open]"
-  local id="$1" reason=done keep=0 body='' bodyfile='' from state gate
+  [ $# -ge 1 ] && valid_id "$1" || die "reply: usage — agent-bus reply <id> -m \"what you did\" [--reason done|denied|canceled|duplicate|superseded] [--keep-open] [--allow-claude]"
+  local id="$1" reason=done keep=0 body='' bodyfile='' from state gate allow=() NO_HEIR=1
   shift
   while [ $# -gt 0 ]; do
     case "$1" in
       --keep-open) keep=1; shift ;;
+      --allow-claude) allow=(--allow-claude); shift ;;
       --reason) [ $# -ge 2 ] || die "reply: --reason needs a value"; reason="$2"; shift 2 ;;
       -m|--message) [ $# -ge 2 ] || die "reply: -m needs a value"; body="$2"; shift 2 ;;
       --file|-f) [ $# -ge 2 ] || die "reply: --file needs a value"; bodyfile="$2"; shift 2 ;;
@@ -2492,14 +2544,15 @@ cmd_reply() {
   [ "$from" = "$ADDR" ] && die "reply: $id is your own packet — use agent-bus resolve $id to close it"
   case "$reason" in handed-off|escalated) die "reply: $reason needs a destination — use agent-bus post --re $id --close $reason --to <seat>" ;; esac
   in_list "$reason" "$REASONS" || die "reply: --reason must be one of: done denied canceled duplicate superseded"
+  [ ${#allow[@]} -eq 0 ] && reply_implies_bus "$id" "$from" && allow=(--allow-claude)
   if ((keep)) || ! in_list "$state" 'needs-review blocked handoff question'; then
-    cmd_post --re "$id" --to "$from" --state fyi -m "$body"; return
+    cmd_post ${allow[@]+"${allow[@]}"} --re "$id" --to "$from" --state fyi -m "$body"; return
   fi
   gate=$(item_field "$id" review)
   if [ "$reason" = done ] && [ -n "$gate" ] && [ "$gate" != "$ADDR" ] && [ "$TOOL" != lead ]; then
     cmd_resolve "$id" --reason done -m "$body"; return
   fi
-  cmd_post --re "$id" --close "$reason" --to "$from" --state done -m "$body"
+  cmd_post ${allow[@]+"${allow[@]}"} --re "$id" --close "$reason" --to "$from" --state done -m "$body"
 }
 
 cmd_triage() {
@@ -3370,8 +3423,8 @@ cmd_init() {
     "Nobody: tell the agent to pick one (recommended)" "Me" "The agent running the feature (its PM)")
   owner=$(printf 'refuse lead pm' | cut -d' ' -f"$a")
   a=$(ask_choice "2. An agent finishes a task another agent gave it. Who checks the work?" \
-    "The agent that asked for it (recommended)" "Me, every time" "Nobody: done is done")
-  review=$(printf 'requester lead none' | cut -d' ' -f"$a")
+    "Nobody: done is done (recommended)" "The agent that asked for it" "Me, every time")
+  review=$(printf 'none requester lead' | cut -d' ' -f"$a")
   a=$(ask_choice "3. When should agents stop and check with you first?" \
     "Before changing what was asked, or deleting anything hard to undo (recommended)" \
     "Those, and also when two agents disagree" \
@@ -3398,7 +3451,7 @@ How to work on the bus (worker):
   2. Work that waits on you arrives on its own at each prompt. See it again: agent-bus read
   3. Hand work to someone specific, never to everyone:
        agent-bus post --to <seat|@lead> --state needs-review --touched auto -m "# what, why, what's left"
-  4. Finished something you were given? Close it with a reason (it may go back to whoever asked):
+  4. Finished something you were given? Close it with a reason (if it names a reviewer, it goes to them):
        agent-bus resolve <id> --reason done
   5. Passing your work on? Close and hand over in one step:
        agent-bus post --re <id> --close handed-off --to <seat> --state handoff -m "..."
@@ -3495,6 +3548,9 @@ agent-bus — handoff bus for coding agents sharing repos and worktrees.
                               (done|handed-off|escalated|denied|canceled|
                               duplicate|superseded; handed-off and escalated
                               need a supervisory --state)
+      --review <seat|@lead|none>  who accepts this handoff when it is done
+                              (default: the team's review rule, none unless
+                              set); handing an item on keeps its reviewer
   read [--peek] [--all]       show packets for this seat (marks read unless --peek)
   show <id>                   a packet, its replies and closes, and its body
   ask --to <seat> -m <body> [--timeout s]
@@ -3503,9 +3559,16 @@ agent-bus — handoff bus for coding agents sharing repos and worktrees.
   send --to <seat>[,<seat>] -m <body>
                               for you, the human, in your own terminal: posts
                               as you, so agents treat it as your request
-  reply <id> -m <body> [--reason r] [--keep-open]
+  reply <id> -m <body> [--reason r] [--keep-open] [--allow-claude]
                               answer an item and close it in one step (reason
-                              default done); gated work goes to its reviewer
+                              default done); gated work goes to its reviewer.
+                              Goes only to the sender; if it has ended, the
+                              reply waits for it and the delivery line names
+                              any live session in its worktree. To a Claude
+                              sender it needs no --allow-claude when the
+                              packet was sent to you, or to @pm and you are
+                              the PM it reaches (not only supervised by you
+                              as PM), and the sender is still live
   resolve <id>... [--reason r]  close items (done by default; denied|canceled|
                               duplicate|superseded)
   triage [--lane <name>] [--by owner|lane]

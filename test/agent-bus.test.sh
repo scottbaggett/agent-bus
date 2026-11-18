@@ -28,6 +28,9 @@ export AGENT_BUS_BRANCH=develop
 # Pin the pre-policy rules for the older tests: broadcasts stay legal and done
 # means done. The policy tests below set their own.
 export AGENT_BUS_POLICY_OWNER=pm AGENT_BUS_POLICY_REVIEW=none
+# Fixture seats are mostly claude and post to each other, so the suite runs with
+# claude=allow; the default refusal is tested with AGENT_BUS_POLICY_CLAUDE= below.
+export AGENT_BUS_POLICY_CLAUDE=allow
 
 # Fixture seats: seat <name> <tool> <worktree> <cmd...>
 raw_seat() { local s="$1" t="$2" w="$3"; shift 3; AGENT_BUS_SESSION="$s" AGENT_BUS_TOOL="$t" AGENT_BUS_WT="$w" "$BIN" "$@"; }
@@ -96,6 +99,13 @@ assert_has "recipient can pick up the Claude review" "$rid" "$(c read --peek)"
 compat=$(raw_seat a claude wa post --allow-claude --to "$C" -m 'compatibility' | idof)
 assert_eq "legacy flag still records a packet" 1 \
   "$(jq -s --arg id "$compat" '[.[] | select(.id == $id and .kind == "msg")] | length' "$BUS_HOME/ledger.jsonl")"
+# The default rule, claude=refuse: Claude seats in one config dir use SendMessage.
+out=$(AGENT_BUS_POLICY_CLAUDE= raw_seat a claude wa post --to "$C" -m x 2>&1 || true)
+assert_has "by default, claude to claude is refused" "use Claude session messaging (SendMessage)" "$out"
+assert_has "--allow-claude overrides" "posted" "$(AGENT_BUS_POLICY_CLAUDE= raw_seat a claude wa post --allow-claude --to "$C" -m '# allowed')"
+assert_has "claude may post to an opencode seat" "posted" "$(AGENT_BUS_POLICY_CLAUDE= raw_seat a claude wa post --to "$B" -m '# to oc')"
+out=$(AGENT_BUS_POLICY_CLAUDE=bogus raw_seat a claude wa post --to "$C" -m x 2>&1 || true)
+assert_has "an unknown claude value falls back to refuse" "use Claude session messaging (SendMessage)" "$out"
 c read >/dev/null; b read >/dev/null
 
 # --- PM: role, auto-CC, ownership ---
@@ -1380,6 +1390,20 @@ assert_eq "a pin is written whole before anyone can read it" "d1" \
   "$(SS_SESSION=sess-new AGENT_BUS_SEAT_KEY=session ss d1 whoami >/dev/null; cat "$SB/bus/state/sessions/claude.$(printf '%s' sess-new | shasum -a 256 | cut -c1-16)")"
 assert_eq "and no temp file is left behind" "0" "$(ls "$SB/bus/state/sessions" | grep -c 'XXXX\|\.[A-Za-z0-9]\{6\}$' || true)"
 
+# --- Claude to Claude across config dirs ---
+cc() { local d="$1"; shift; (cd "$SB/plain" && AGENT_BUS_HOME="$SB/bus" AGENT_BUS_REPO_ID=acme AGENT_BUS_TOOL=claude \
+  CLAUDE_CONFIG_DIR="$SB/$d" AGENT_BUS_SESSION="cc-$d" "$BIN" "$@"); }
+OTHER=$(cc ctx2 whoami | awk '/^seat/{print $2}'); cc ctx2 who >/dev/null
+out=$(AGENT_BUS_POLICY_CLAUDE= cc ctx1 post --to "$OTHER" -m "# across contexts" 2>&1 || true)
+assert_has "by default, a Claude seat may post to a Claude seat under another config dir" "posted" "$out"
+SAME=$(AGENT_BUS_WT=same cc ctx1 whoami | awk '/^seat/{print $2}'); AGENT_BUS_WT=same cc ctx1 who >/dev/null
+out=$(AGENT_BUS_POLICY_CLAUDE= cc ctx1 post --to "$SAME" -m "# same context" 2>&1 || true)
+assert_has "by default, one under the same config dir is sent to SendMessage" "use Claude session messaging" "$out"
+out=$(AGENT_BUS_POLICY_CLAUDE=allow cc ctx1 post --to "$SAME" -m "# same context, open" 2>&1 || true)
+assert_has "with claude=allow, one under the same config dir is posted" "posted" "$out"
+AGENT_BUS_POLICY_CLAUDE= AGENT_BUS_REPO_ID=acme AGENT_BUS_HOME="$SB/bus" "$BIN" init --personal --set claude=allow >/dev/null
+out=$(AGENT_BUS_POLICY_CLAUDE= cc ctx1 post --to "$SAME" -m "# same context, personal rule" 2>&1 || true)
+assert_has "claude=allow also works from the personal config" "posted" "$out"
 rm -rf "$SB"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"

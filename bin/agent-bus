@@ -339,11 +339,13 @@ touch_seat() {
     --argjson last_hook "${last_hook:-0}" --arg lane "$LANE" --arg lane_src "${LANE_SRC:-unfiled}" \
     --arg grok_webhook "$grok_webhook" --arg grok_secret_env "$grok_secret_env" --arg pid "$pid" --arg spid "${spid:-}" \
     --arg focus "$focus" --arg focus_at "${focus_at:-0}" --arg parent "$PARENT" \
+    --arg claude_dir "$([ "$TOOL" = claude ] && printf '%s' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}")" \
     '{addr:$addr,tool:$tool,repo:$repo,repo_id:$repo_id,wt:$wt,branch:$branch,cwd:$cwd,
       session:$session,socket:$socket,codex_queue:$codex_queue,epoch:$epoch,last_hook:$last_hook,lane:$lane,
       lane_src:$lane_src,pid:($pid | tonumber? // null)}
      + (if $spid != "" then {server_pid:($spid | tonumber)} else {} end)
      + (if $parent != "" then {parent:$parent} else {} end)
+     + (if $claude_dir != "" then {claude_dir:$claude_dir} else {} end)
      + (if $focus != "" then {focus:$focus,focus_at:($focus_at | tonumber? // 0)} else {} end)
      + (if $grok_webhook != "" then {grok_webhook:$grok_webhook,grok_secret_env:$grok_secret_env} else {} end)' >"$tmpf" \
     && mv "$tmpf" "$f" || rm -f "$tmpf"
@@ -1496,14 +1498,20 @@ unowned_hint() { # state to
 }"
 }
 
+# SendMessage only reaches sessions under the same Claude config dir; a seat
+# under another one can only be reached through the bus.
+other_claude_dir() {
+  local theirs; theirs=$(jq -r '.claude_dir // ""' "$BUS/seats/$(seat_slug "$1").json" 2>/dev/null || true)
+  [ -n "$theirs" ] && [ "$theirs" != "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" ]
+}
+
 cmd_post() {
-  local to='' state='fyi' subject='' body='' bodyfile='' touched='[]' re='' close=''
+  local to='' state='fyi' subject='' body='' bodyfile='' touched='[]' re='' close='' allow_claude=0
   local resume="${AGENT_BUS_RESUME:-0}"
   local review_arg='' review_of='' review=''
 
   while [ $# -gt 0 ]; do
-    # Compatibility with existing callers; Claude-to-Claude posts are allowed.
-    if [ "$1" = --allow-claude ]; then shift; continue; fi
+    if [ "$1" = --allow-claude ]; then allow_claude=1; shift; continue; fi
     if [ "$1" = --resume ]; then resume=1; shift; continue; fi
     [ $# -ge 2 ] || die "post: $1 needs a value"
     case "$1" in
@@ -1530,6 +1538,13 @@ cmd_post() {
 
   in_list "$state" "$STATES" || die "post: --state must be one of: $STATES"
   [ -n "$to" ] || die "post: --to is required — a seat from 'agent-bus who', @pm, a lane, or @here|@repo|@all to broadcast"
+  # Team rule claude=refuse (the default): Claude sessions that share a config
+  # dir talk through SendMessage; the bus is for everything else.
+  case "$to" in claude/*)
+    if [ "$TOOL" = claude ] && ((!allow_claude)) && [ "$(policy_get claude)" != allow ] && ! other_claude_dir "$to"; then
+      die "post: $to is a Claude session — use Claude session messaging (SendMessage) instead, or --allow-claude if the bus is intended"
+    fi ;;
+  esac
   case "$to" in
     @here|@repo|@all|@lead) ;;
     @pm) [ -n "$(pm_seat)" ] || { [ -n "$LANE" ] && [ -n "$(lane_pm_seat "$LANE")" ]; } \
@@ -2073,14 +2088,17 @@ cmd_peer() {
 #   ask_lead  when agents stop and ask the lead: any of scope,destructive,
 #             disagreement — or never
 #   decisions record decisions and show them at session start: on | off
-POLICY_DEFAULTS='{"owner":"refuse","review":"requester","ask_lead":"scope,destructive","decisions":"on"}'
-POLICY_KEYS='owner review ask_lead decisions'
+#   claude    a Claude seat posting to a Claude seat under the same config dir:
+#             refuse (use SendMessage, or pass --allow-claude) | allow
+POLICY_DEFAULTS='{"owner":"refuse","review":"requester","ask_lead":"scope,destructive","decisions":"on","claude":"refuse"}'
+POLICY_KEYS='owner review ask_lead decisions claude'
 
 policy_valid() { # key value
   case "$1" in
     owner) in_list "$2" 'refuse lead pm' ;;
     review) in_list "$2" 'requester lead none' ;;
     decisions) in_list "$2" 'on off' ;;
+    claude) in_list "$2" 'refuse allow' ;;
     ask_lead) [ "$2" = never ] || { local v; for v in ${2//,/ }; do in_list "$v" 'scope destructive disagreement' || return 1; done; } ;;
     *) return 1 ;;
   esac
@@ -3459,7 +3477,7 @@ agent-bus — handoff bus for coding agents sharing repos and worktrees.
   who                         live seats, the PM, open-work count, claims
   post [flags]                send a packet
       --to <seat|scope|@role|@lane|@pm|@lead|@here|@repo|@all>     required
-      --allow-claude          compatibility flag (Claude-to-Claude is allowed)
+      --allow-claude          let a Claude seat post to another Claude seat (rule claude=refuse)
       --state needs-review|blocked|handoff|question|done|fyi   default fyi
       -m <body> | --file <f> | stdin    --subject <s>    --touched a,b | auto
       --re <id>               reply to a packet

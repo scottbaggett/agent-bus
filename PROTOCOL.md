@@ -95,13 +95,20 @@ accepted once a live seat is in that lane or the lane has a PM.
 
 ### Claude to Claude
 
-Claude seats can post directly to each other, including tracked handoffs,
-questions and review requests. The packet is recorded before a notification is
-submitted through the recipient's native Claude inbox socket. `--allow-claude`
-is accepted for compatibility but is no longer needed. Direct `SendMessage`
-remains available for quick conversation. Use the bus for work that needs an
-owner, review history and an explicit close reason; do not move tracked work to
-`SendMessage` just because both seats are Claude.
+By default (team rule `claude=refuse`), Claude sessions that share a Claude
+config dir talk to each other through Claude session messaging (`SendMessage`),
+not the bus. A Claude seat posting directly to such a seat (`--to claude/...`)
+is refused unless it passes `--allow-claude`. A seat under a different config
+dir is never refused (each Claude seat records its `claude_dir`), because
+`SendMessage` can't reach it. `@pm`, lanes and broadcasts are unaffected: a
+Claude lane PM supervising OpenCode seats is what the bus is for.
+
+With `claude=allow`, Claude seats can post directly to each other, including
+tracked handoffs, questions and review requests, and `--allow-claude` is
+accepted but not needed. Either way, a packet to a Claude seat is recorded
+before a notification is submitted through the recipient's native Claude inbox
+socket. Use the bus for work that needs an owner, review history and an
+explicit close reason.
 
 The socket path comes from `CLAUDE_CODE_MESSAGING_SOCKET`. On macOS and Linux,
 Claude accepts connections from the same OS user without an auth line. The bus
@@ -171,7 +178,7 @@ seat and a crashed one look different.
 
 ## Team rules
 
-Each repo sets four rules once, with `agent-bus init` (asks) or
+Each repo sets five rules once, with `agent-bus init` (asks) or
 `agent-bus init --set k=v,...` (an agent saving its user's answers). They are
 written to `.agent-bus.json` at the repo root; commit it so the team shares them.
 `~/.agents/bus/config.json` holds personal overrides and `AGENT_BUS_POLICY_<KEY>`
@@ -183,6 +190,7 @@ overrides both. `agent-bus init --show` prints what applies.
 | `review` | `requester` · `lead` · `none` | Who accepts handed-off work: whoever handed it over, the lead, or nobody |
 | `ask_lead` | `scope,destructive` · any of `scope`, `destructive`, `disagreement` · `never` | When agents must stop and ask the lead; stated in every orientation |
 | `decisions` | `on` · `off` | Show the lane's decisions at session start |
+| `claude` | `refuse` · `allow` | Whether a Claude seat may post to a Claude seat under the same config dir without `--allow-claude` (see Claude to Claude) |
 
 A repo with no rules runs on the defaults, and nobody is asked about them up
 front: the orientation line states them and tells the agent not to raise them.

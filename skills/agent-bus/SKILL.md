@@ -227,11 +227,12 @@ wherever it runs: changing folders doesn't change who you are.
    still apply).
 2. Work needs an owner: address a seat, a role or `@lead`, never `@here`.
 3. Close with a reason; never leave an item you own silently.
-4. Other Claude sessions: use the bus for tracked work; it submits through
-   Claude's native inbox socket. `SendMessage` is also available for untracked
-   exchanges, but it reaches only the sessions ListAgents shows, which share
-   your Claude config dir. Claude sessions under another config dir (another
-   account or context) are reached only through the bus, as are OpenCode,
-   Codex, Cursor and Grok seats. Socket submission alone does not prove
-   acceptance or reading.
+4. Other Claude sessions under your own config dir (the ones ListAgents
+   shows): use `SendMessage`. Under the default rule (`claude=refuse`),
+   `post --to claude/...` to them is refused unless you pass `--allow-claude`;
+   pass it only when the bus itself is wanted (a ledger record a PM or lane must
+   see). Claude sessions under another config dir (another account or context)
+   are reached only through the bus, as are OpenCode, Codex, Cursor and Grok
+   seats. A post to a Claude seat submits through its native inbox socket;
+   submission alone does not prove acceptance or reading.
 5. `agent-bus guide` prints the short playbook for workers, supervisors and reviewers.

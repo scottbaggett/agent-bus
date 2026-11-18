@@ -1572,12 +1572,13 @@ cmd_who() {
 item_field() { lq '[$L[] | select(.kind == "msg" and .id == $id)][0][$f] // empty | tostring' --arg id "$1" --arg f "$2"; }
 
 # The PM a post from this seat to $1 (@pm or @repo-pm) with subject $2 goes to,
-# or empty.
+# or empty. It resolves the lane the way routing does (with_item_lane, then
+# pm_owner); a packet not yet posted has no `file` row, so its own lane counts.
 pm_route() {
   jq -nr --arg to "$1" --arg subject "${2:-}" --arg from "$ADDR" --arg lane "$LANE" --arg branch "$BRANCH" --arg wt "$WT" \
     --arg pm "$(pm_seat)" --argjson livepms "$LIVE_LANE_PMS" --argjson lanepms "$LANE_PMS" \
-    "$JQ_LANE$JQ_PM"'{to: $to, from: $from, lane: $lane, branch: $branch, wt: $wt, subject: $subject}
-      | pm_owner($livepms; $pm; $lanepms)'
+    "$JQ_LANE$JQ_PM$JQ_CLOSE"'{id: "", to: $to, from: $from, lane: $lane, branch: $branch, wt: $wt, subject: $subject}
+      | with_item_lane({}) | pm_owner($livepms; $pm; $lanepms)'
 }
 
 # Whether `to` is a broadcast (@here, @repo, @all, @<lane>) that no PM covers:
@@ -1658,12 +1659,9 @@ cmd_post() {
     fi ;;
   esac
   case "$to" in
-    @here|@repo|@all|@lead) ;;
-    # Only -m or --subject is known here; a body from --file or stdin is read later.
-    @pm) [ -n "$(pm_route @pm "${subject:-${body%%$'\n'*}}")" ] || {
-           { [ "$(pm_seat)" = "$ADDR" ] || { [ -n "$LANE" ] && [ "$(lane_pm_seat "$LANE")" = "$ADDR" ]; }; } \
-             && die "post: @pm from you has nobody to reach: you are the PM here and no repo PM sits above you — send it --to @lead"
-           die "post: no PM registered for ${LANE:+lane @$LANE or }$REPO — that seat should run 'agent-bus role pm${LANE:+ --lane $LANE}'"; } ;;
+    # @pm is checked once the subject is known (a body from --file or stdin
+    # is read below), since a ticket in it can name the lane.
+    @here|@repo|@all|@lead|@pm) ;;
     @repo-pm)
       if [ -n "$LANE" ] && [ "$(pm_seat)" != "$ADDR" ]; then
         local lpm_; lpm_=$(jq -r --arg l "$LANE" '.[$l] // ""' <<<"$LIVE_LANE_PMS")
@@ -1732,6 +1730,12 @@ cmd_post() {
   local bytes; bytes=$(printf '%s' "$body" | wc -c | tr -d ' ')
   ((bytes <= 65536)) || die "post: body is $bytes bytes (max 65536) — link or trim it"
   [ -n "$subject" ] || subject=$(printf '%s' "$body" | sed -n '1{s/^#\{1,\} *//;s/\r$//;p;}' | cut -c1-120)
+  subject=${subject:0:200}
+  if [ "$to" = @pm ] && [ -z "$(pm_route @pm "$subject")" ]; then
+    { [ "$(pm_seat)" = "$ADDR" ] || { [ -n "$LANE" ] && [ "$(lane_pm_seat "$LANE")" = "$ADDR" ]; }; } \
+      && die "post: @pm from you has nobody to reach: you are the PM here and no repo PM sits above you — send it --to @lead"
+    die "post: no PM registered for ${LANE:+lane @$LANE or }$REPO — that seat should run 'agent-bus role pm${LANE:+ --lane $LANE}'"
+  fi
 
   # A lane taken from a ticket key also travels as an external reference.
   local ref=''
@@ -1745,7 +1749,7 @@ cmd_post() {
   rec=$(jq -nc --arg id "$id" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson epoch "$(now_epoch)" \
     --arg from "$ADDR" --arg session "$SESSION" --arg to "$to" --arg state "$state" \
     --arg repo "$REPO" --arg repo_id "$REPO_ID" --arg wt "$WT" --arg branch "$BRANCH" \
-    --arg cwd "$TOP" --arg subject "${subject:0:200}" --argjson touched "$touched" \
+    --arg cwd "$TOP" --arg subject "$subject" --argjson touched "$touched" \
     --arg re "$re" --arg close "$close" --arg lane "$LANE" \
     --arg ref "$ref" --arg assign "$assign" --arg review "$review" --arg review_of "$review_of" \
     --arg to_role "$to_role" \

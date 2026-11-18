@@ -1933,6 +1933,16 @@ assert_lacks "a ticket in the message's subject is a PM to reach" "no PM registe
 assert_has "and the post reaches that lane's PM" "delivery: $TPM" "$out"
 out=$(r2post subj w0 --to @pm --state question -s 'TIX-42: lexer' -m 'body' 2>&1 || true)
 assert_has "so does a ticket in --subject" "delivery: $TPM" "$out"
+printf '# TIX-42: from a file\n\nbody\n' >"$R2/subj-body.md"
+out=$(r2post subj w0 --to @pm --state question --file "$R2/subj-body.md" 2>&1 || true)
+assert_has "a ticket in a --file body's title reaches that lane's PM" "delivery: $TPM" "$out"
+assert_eq "and routing agrees on the owner" "$TPM" \
+  "$(AGENT_BUS_HOME="$R2" "$BIN" snapshot | jq -r '.open[] | select(.subject == "TIX-42: from a file") | .owner')"
+out=$(printf '# TIX-42: from stdin\n\nbody\n' | r2post subj w0 --to @pm --state question 2>&1 || true)
+assert_has "so does a ticket in a body read from stdin" "delivery: $TPM" "$out"
+out=$(r2post subj w0 --to @pm --state question -m '# no ticket named' 2>&1 || true)
+assert_has "a no-lane @pm naming no ticket, with no repo PM, is refused" "no PM registered" "$out"
+assert_lacks "and nothing is posted" "posted" "$out"
 
 # The hot path reads the lane PMs once: jq runs as often with six lane PMs as with one.
 mkdir -p "$R2/shim"

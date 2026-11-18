@@ -108,8 +108,9 @@ agent-bus codex enable       # resume, or connect manually without hooks
   its notices go unanswered (3 notices sent, or one left 10 minutes, with
   nothing from the chat since) `who` marks it `UNCONFIRMED`. Routing then skips
   it: a lane PM's work goes to the repo PM, a post to the seat goes to a live
-  heir in its worktree, and work with nobody above it waits on it (GONE in
-  triage). Posts that arrive while a notice is outstanding don't count, so a
+  heir in its worktree, and `@pm` work with no PM above it goes to the lead
+  while the seat is unconfirmed (a new post is refused instead under the team
+  rule `owner=refuse`). Any other work waits on it (GONE in triage). Posts that arrive while a notice is outstanding don't count, so a
   busy turn isn't demoted for them; the chat's next hook or command confirms it.
 - Use the same bus directory and Codex home on both sides. With a custom
   `AGENT_BUS_HOME`, give it to the Codex chat and its hooks too.

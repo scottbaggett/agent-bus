@@ -208,8 +208,9 @@ seat and a crashed one look different.
 ### Seeing open work
 
 `agent-bus triage` lists open items in the repo by owner, oldest first. The
-owner is the one `snapshot` names: `lead` for `@lead` work, the holder of a
-named role, the item's PM, or the seat it was sent to. A packet sent to a lane
+owner is the one `snapshot` names: `lead` for `@lead` work (and for `@pm` work
+while no PM above it is live and one is unconfirmed), the holder of a named
+role, the item's PM, or the seat it was sent to. A packet sent to a lane
 never becomes the packet of a role of that name taken later.
 
 - **GONE** — no live seat answers for the owner (an unconfirmed Codex seat
@@ -435,9 +436,13 @@ unmatched lanes fall under their repo:
     doesn't count, so a chat busy in a long turn isn't demoted for the posts
     that pile up meanwhile. Routing, heirs and the live-lane check skip an
     unconfirmed seat, and it gets no further notices. A lane PM's work goes to
-    the repo PM; a post addressed to the seat goes to the live heir in its
+    the repo PM. `@pm` work whose PM is unconfirmed with no live PM above it
+    belongs to `@lead` while that lasts (resolved when read, so items posted
+    earlier move too, and the PM has its work back once it confirms); a new
+    `@pm` work post then follows the team rule `owner`: refused under `refuse`,
+    owned by the lead otherwise. A post addressed to the seat goes to the live heir in its
     worktree if there is one; a review handed to it goes to `@lead`. Otherwise,
-    as for any seat that has gone, its work waits on it and `triage` shows it
+    as for any seat that has gone, its other work waits on it and `triage` shows it
     GONE; nothing else moves to `@lead`. A post to a lane whose only members are
     unconfirmed is refused and names them. `who` marks it `UNCONFIRMED`, and
     `snapshot` gives it `unconfirmed` (when its first unanswered notice went out)

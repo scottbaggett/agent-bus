@@ -660,8 +660,12 @@ touch_seat() {
      + (if $focus != "" then {focus:$focus,focus_at:($focus_at | tonumber? // 0)} else {} end)
      + (if $grok_webhook != "" then {grok_webhook:$grok_webhook,grok_secret_env:$grok_secret_env} else {} end)' >"$tmpf" \
     && mv "$tmpf" "$f" || rm -f "$tmpf"
-  # A lane PM back from idle is live again for the rest of this process.
-  case "$LANE_PMS" in *"\"$ADDR\""*) case "$LIVE_LANE_PMS" in *"\"$ADDR\""*) ;; *) pm_maps_load ;; esac ;; esac
+  # A lane or repo PM back from idle or from unconfirmed is live again for the
+  # rest of this process. (any() never matches the "@unconfirmed" array.)
+  local pm_me=''
+  case "$LANE_PMS" in *"\"$ADDR\""*) pm_me=1 ;; esac
+  [ -n "$pm_me" ] || [ "$(pm_seat)" != "$ADDR" ] || pm_me=1
+  [ -z "$pm_me" ] || jq -e --arg a "$ADDR" 'any(.[]; . == $a)' <<<"$LIVE_LANE_PMS" >/dev/null 2>&1 || pm_maps_load
 }
 
 # Every seat row, one per line; a corrupt file drops out instead of failing.
@@ -772,7 +776,8 @@ lane_pm_seat() { local f; f=$(lane_pm_file "$1"); if [ -f "$f" ]; then head -1 "
 # own seat.
 LANE_PMS='{}' LIVE_LANE_PMS='{}'
 pm_maps_load() {
-  local pre f l a args=() seats=() out sp dead=''
+  local pre f l a args=() seats=() out sp dead='' rpm
+  rpm=$(pm_seat)
   pre="$BUS/state/roles/$(slugify "$REPO_ID").lane."
   for f in "$pre"*.pm; do
     [ -f "$f" ] || continue
@@ -781,24 +786,30 @@ pm_maps_load() {
     args+=(--arg "lane:$l" "$a")
     f="$BUS/seats/$(seat_slug "$a").json"; [ -f "$f" ] && seats+=("$f")
   done
-  if ((${#args[@]} == 0)); then LANE_PMS='{}' LIVE_LANE_PMS='{}'; return 0; fi
+  if ((${#args[@]} == 0)) && [ -z "$rpm" ]; then LANE_PMS='{}' LIVE_LANE_PMS='{}'; return 0; fi
+  f="$BUS/seats/$(seat_slug "$rpm").json"; [ -n "$rpm" ] && [ -f "$f" ] && seats+=("$f")
   # Line 1: "<lane> <server_pid> ..." for live ones that also need that process
   # up (often empty, so it can't be last); line 2: every lane PM; line 3: those
-  # live by their seat's clock.
+  # live by their seat's clock, plus the repo PM if live under "@repo" and the
+  # PMs (lane or repo) that are unconfirmed under "@unconfirmed" (no lane can be
+  # named either), so pm_owner and pm_lead can tell them from PMs that are gone.
   local prog="$JQ_SEAT_LIVE"'
     (now | floor) as $now
     | ($ARGS.named | with_entries(select(.key | startswith("lane:")) | .key |= .[5:])) as $all
-    | ([inputs | fromjson? // empty | select(buslive($now - $ttl; $now - $cttl))]
+    | [inputs | fromjson? // empty] as $rows
+    | ([$rows[] | select(buslive($now - $ttl; $now - $cttl))]
        | map({key: .addr, value: (.server_pid // null)}) | from_entries) as $up
-    | ($all | with_entries(select(.value as $a | $up | has($a)))) as $live
+    | ($all | with_entries(select(.value as $a | $up | has($a)))
+       + (if $rpm != "" and ($up | has($rpm)) then {"@repo": $rpm} else {} end)) as $live
+    | ([$rows[] | select((.unconfirmed // null) != null and ttl_live($now - $ttl; $now - $cttl) and ((.addr // "") as $a | ([$all[]] + [$rpm] | index($a)) != null)) | .addr]) as $unc
     | ([$live | to_entries[] | select($up[.value] != null) | "\(.key) \($up[.value])"] | join(" ")),
-      ($all | tojson), ($live | tojson)'
+      ($all | tojson), ($live + {"@unconfirmed": $unc} | tojson)'
   # Unanswered Codex notices (wake_annotate) are rare; read the files directly otherwise.
   if [ -e "$(set -- "$BUS"/seats/*.wakes; printf '%s' "$1")" ]; then
-    out=$( { ((${#seats[@]} == 0)) || awk 1 "${seats[@]}"; } | wake_annotate -R \
-      | jq -nRr "${args[@]}" --argjson ttl "$SEAT_TTL" --argjson cttl "$CODEX_MAX_IDLE_TTL" "$prog")
+    out=$( { for f in ${seats[@]+"${seats[@]}"}; do cat "$f" 2>/dev/null; echo; done; } | wake_annotate -R \
+      | jq -nRr --arg rpm "$rpm" ${args[@]+"${args[@]}"} --argjson ttl "$SEAT_TTL" --argjson cttl "$CODEX_MAX_IDLE_TTL" "$prog")
   else
-    out=$(jq -nRr "${args[@]}" --argjson ttl "$SEAT_TTL" --argjson cttl "$CODEX_MAX_IDLE_TTL" "$prog" \
+    out=$(jq -nRr --arg rpm "$rpm" ${args[@]+"${args[@]}"} --argjson ttl "$SEAT_TTL" --argjson cttl "$CODEX_MAX_IDLE_TTL" "$prog" \
       ${seats[@]+"${seats[@]}"} </dev/null)
   fi
   { IFS= read -r sp; IFS= read -r LANE_PMS; IFS= read -r LIVE_LANE_PMS; } <<<"$out"
@@ -908,6 +919,17 @@ def pm_owner($lp; $rpm; $reg; $fm): .from as $f | (.to // "") as $t | lanes_of($
     elif ($t | startswith("@") | not) and ($f == $rpm or ([$reg[]] | index($f)) != null) then []
     else [($ls[] | $lp[.] // empty), $rpm, ($ls[] | $reg[.] // empty)] end
   | map(select(. != "" and . != $f)) | first // "";
+# An @pm packet goes to the lead while no PM in its chain (the PMs of its lanes, then
+# the repo PM) is live and one of them is unconfirmed: $lp["@unconfirmed"] lists
+# the unconfirmed PMs and $lp["@repo"] the repo PM when live (pm_maps_load,
+# snapshot). A PM that is merely gone, with nothing unconfirmed in its chain,
+# keeps its work, which waits on it.
+def pm_lead($lp; $rpm; $reg; $fm): (.to // "") == "@pm"
+  and (pm_owner($lp; $rpm; $reg; $fm) as $o
+       | $o != "" and ([$lp | to_entries[] | select(.key != "@unconfirmed") | .value] | index($o)) == null
+         and (.from as $f | lanes_of($fm) as $ls | [($ls[] | $reg[.] // empty), $rpm]
+              | map(select(. != "" and . != $f and (. as $c | ($lp["@unconfirmed"] // []) | index($c) != null)))
+              | length > 0));
 # The holder of the named role a packet is addressed to (@release), or "".
 # Post stamps every @ packet with to_role, "" for a lane or broadcast, and such
 # a packet never becomes the packet of a role of the same name taken later.
@@ -919,7 +941,7 @@ def role_owner($roles): (.to // "") as $t
 # @lead (or work given to it), the holder of a named role (role_owner), the PM
 # (pm_owner), or the seat it was sent to.
 def item_owner($lp; $rpm; $reg; $roles; $fm):
-  if .to == "@lead" or .assign == "@lead" then "lead"
+  if .to == "@lead" or .assign == "@lead" or pm_lead($lp; $rpm; $reg; $fm) then "lead"
   elif ((.to // "") | startswith("@")) then
     first((role_owner($roles) | select(. != "")), (pm_owner($lp; $rpm; $reg; $fm) | select(. != "")), "(no PM)")
   else .to end;
@@ -985,7 +1007,7 @@ def direct($me): direct_held($me; role_holder);
 # ledger'"'"'s file_map, {} for a packet not yet posted.
 def owns($me; $fm):
   direct($me)
-  or (is_child($me) | not) and ( ((.to == "@lead" or .assign == "@lead") and is_lead($me))
+  or (is_child($me) | not) and ( ((.to == "@lead" or .assign == "@lead" or pm_lead($livepms; $pm; $lanepms; $fm)) and is_lead($me))
   or (same_repo($me) and pm_owner($livepms; $pm; $lanepms; $fm) == $me.addr
       and (.to == "@pm" or .to == "@repo-pm" or (sup and ((.probe // false) | not)))));
 # A broadcast this seat hears. Broadcasts deliver context, never ownership.
@@ -1916,7 +1938,7 @@ cmd_who() {
       + ([$lpms | to_entries[] | select(.value == $row) | "  PM @\(.key)"] | join(""))
       + (if .addr == $me then "  <- you" else "" end)
       + (if (.unconfirmed // null) != null
-         then "  UNCONFIRMED: notices unanswered \(($now - .unconfirmed) / 60 | floor)m; routing skips it (work goes to the PM above it, else waits on it: GONE in triage)"
+         then "  UNCONFIRMED: notices unanswered \(($now - .unconfirmed) / 60 | floor)m; routing skips it (work goes to the PM above it; @pm work with no PM above goes to the lead; other work waits on it: GONE in triage)"
          else "" end)]
       | map(tostring | gsub("[\u0000-\u001f\u007f]"; "")) | join("\u001f")')
   if [ -z "$rows" ]; then printf '  (none)\n'; fi
@@ -1965,6 +1987,15 @@ pm_route() {
     --arg pm "$(pm_seat)" --argjson livepms "$LIVE_LANE_PMS" --argjson lanepms "$LANE_PMS" \
     "$JQ_LANE$JQ_PM$JQ_CLOSE"'{id: "", to: $to, from: $from, lane: $lane, branch: $branch, wt: $wt, subject: $subject}
       | pm_owner($livepms; $pm; $lanepms; {})'
+}
+
+# Whether an @pm post from this seat (subject $1) goes to the lead because no PM in
+# its chain is live and one is unconfirmed (pm_lead): the team rule applies to it.
+pm_unconfirmed_route() {
+  [ "$(jq -nr --arg from "$ADDR" --arg lane "$LANE" --arg branch "$BRANCH" --arg wt "$WT" --arg subject "${1:-}" \
+    --arg pm "$(pm_seat)" --argjson livepms "$LIVE_LANE_PMS" --argjson lanepms "$LANE_PMS" \
+    "$JQ_LANE$JQ_PM$JQ_CLOSE"'{id: "", to: "@pm", from: $from, lane: $lane, branch: $branch, wt: $wt, subject: $subject}
+      | pm_lead($livepms; $pm; $lanepms; {})')" = true ]
 }
 
 # Whether `to` is a broadcast (@here, @repo, @all, @<lane>) that no PM covers:
@@ -2125,6 +2156,14 @@ cmd_post() {
       && die "post: @pm from you has nobody to reach: you are the PM here and no repo PM sits above you — send it --to @lead"
     die "post: no PM registered for ${LANE:+lane @$LANE or }$REPO — that seat should run 'agent-bus role pm${LANE:+ --lane $LANE}'"
   fi
+  # A PM that is unconfirmed (its notices go unanswered) with no live PM above it
+  # hands its @pm work to the lead while that lasts; posting follows the team rule.
+  local pmunc_=0
+  if [ "$to" = @pm ] && in_list "$state" 'needs-review blocked handoff question' && pm_unconfirmed_route "$subject"; then
+    pmunc_=1
+    [ "$(policy_get owner)" = refuse ] \
+      && die "post: the PM for ${LANE:+lane @$LANE or }$REPO is unconfirmed (it has not answered its notices) and no live PM sits above it, so this @pm post has no owner now (team rule owner=refuse; see agent-bus init --show). Send it --to a live seat (agent-bus who) or --to @lead (the human decides); the PM takes its work back once it runs any agent-bus command"
+  fi
 
   # A lane taken from a ticket key also travels as an external reference.
   local ref=''
@@ -2165,6 +2204,8 @@ cmd_post() {
 
   [ "$assign" = '@lead' ] && printf 'note: nobody supervises %s, so the lead owns this (team rule owner=%s)\n' \
     "$to" "$(policy_get owner)" >&2
+  ((pmunc_)) && printf 'note: the PM for @pm is unconfirmed and no live PM sits above it, so the lead owns this until the PM answers (team rule owner=%s)\n' \
+    "$(policy_get owner)" >&2
 
   [ "${AGENT_BUS_NO_PUSH:-0}" = 1 ] && return 0
   local src="from another agent, not your user"
@@ -2199,6 +2240,8 @@ deliver() { # rec src resume
   if [ -z "$owners" ]; then
     case "$to" in
       @*) if [ -z "$(role_seat "${to#@}")" ] && valid_lane "${to#@}"; then printf 'delivery: %s is a broadcast to the seats in that lane: it wakes nobody and shows only to a seat that runs agent-bus read. Only a work item (needs-review|blocked|handoff|question) gets an owner, and it wakes that owner: the lane PM, else the repo PM, else the owner rule of the team (it is refused, or goes to @lead); a lane PM is set with agent-bus role pm --lane %s. To wake a particular seat, send it --to that seat (agent-bus who).\n' "$to" "${to#@}"
+         elif in_list "$state" 'needs-review blocked handoff question' && { [ "$(jq -r '.assign // ""' <<<"$rec")" = @lead ] || { [ "$to" = @pm ] && pm_unconfirmed_route "$(jq -r '.subject // ""' <<<"$rec")"; }; }; then
+           printf 'delivery: the lead owns this and is not woken; it shows in agent-bus triage and the lead'"'"'s digest. To get it acted on sooner, send it --to a live seat (agent-bus who).\n'
          else printf 'delivery: nobody owns this, so nobody is woken. Agents see it only if they run agent-bus read. To get it acted on, send it --to a seat (agent-bus who).\n'; fi ;;
       *) if [ -n "$(peer_list)" ] && [ "${AGENT_BUS_NO_PEERS:-0}" != 1 ]; then local on_; on_=$(peer_of_seat "$to" || :); printf 'delivery: %s is %s; sending it there\n' "$to" "$(if [ -n "$on_" ]; then echo "on ${on_%.local}"; else echo "not on this Mac"; fi)"
          else
@@ -3426,7 +3469,10 @@ snapshot_json() {
     | [$L[] | select(.kind == "msg" and sup and ($c[.id] | not) and ((.probe // false) | not))
         | with_item_lane($fm)
         | (.repo_id // "") as $rid | ($lanepms[$rid] // {}) as $lp | .id as $id
-        | item_owner($lp | with_entries(select(live(.value))); $pms[$rid] // ""; $lp; $roles[$rid] // {}; $fm) as $o
+        | item_owner(($lp | with_entries(select(live(.value))))
+                     + (if live($pms[$rid] // "") then {"@repo": $pms[$rid]} else {} end)
+                     + {"@unconfirmed": ([($pms[$rid] // empty)] + [$lp[]] | map(select(. as $a | $seats | any(.addr == $a and .unconfirmed != null))))};
+                   $pms[$rid] // ""; $lp; $roles[$rid] // {}; $fm) as $o
         | {id, epoch: (.epoch // 0), from, to, state, subject: (.subject // ""), repo: (.repo // "-"),
            repo_id: $rid, lane, owner: $o, branch: (.branch // ""),
            review: (.review // null), review_of: (.review_of // null),
@@ -3509,7 +3555,7 @@ snapshot_json() {
               fix: "close or hand on its items: agent-bus triage"}]
          + [$seats[] | select(.unconfirmed != null)
            | {kind: "unconfirmed", repo, lane, seat: .addr, epoch: .unconfirmed,
-              text: "\(.addr) has not answered its notices for \(age(.unconfirmed)); routing skips it, so its work goes to the PM above it or waits on it",
+              text: "\(.addr) has not answered its notices for \(age(.unconfirmed)); routing skips it, so its work goes to the PM above it, @pm work with no PM above goes to the lead, and other work waits on it",
               fix: "open or resume that Codex chat (its next prompt confirms it); if it crashed for good, hand its items on (agent-bus triage) and the seat expires within 24h"}]
          + [$L[] | select(.kind == "delivery" and (.epoch // 0) > $now - 86400
                           and ((.status // "") | IN("delivered", "queued", "accepted", "ok") | not))

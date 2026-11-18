@@ -417,14 +417,14 @@ sys.exit(int(os.environ.get('FAKE_QUEUE_EXIT', '0')))
         self.demote('@pm')
         self.assertIn('posted', self.post('@repo-pm', '# up a level').stdout)
 
-    def test_unconfirmed_work_with_nobody_above_waits_and_shows_gone(self):
+    def test_unconfirmed_pm_work_with_nobody_above_goes_to_the_lead_and_is_not_gone(self):
         target = self.enable()
         self.cmd('role', 'pm', '--lane', 'lanex')
         self.cmd('lane', 'lanex', tool='claude', session='sender')
         self.quiet()
         self.demote('@pm')
-        self.assertEqual(set(self.owners().values()), {target})
-        self.assertIn('GONE', self.cmd('triage', tool='claude', session='observer').stdout)
+        self.assertEqual(set(self.owners().values()), {'lead'})
+        self.assertNotIn('GONE', self.cmd('triage', tool='claude', session='observer').stdout)
 
     def test_a_review_owed_by_an_unconfirmed_seat_goes_to_the_lead(self):
         target = self.enable()

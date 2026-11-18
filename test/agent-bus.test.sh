@@ -2136,6 +2136,118 @@ nl_who=$(r2 nonl s3 who)
 assert_has "and so is every seat after one that comes first" "$NL1" "$nl_who"
 rm -f "$R2/seats/a_dangling.json"
 
+# --- @pm work follows an unconfirmed PM's absence to the lead, at read time ---
+# While the PM is unconfirmed and no live PM sits above it, its @pm work shows
+# under the lead (earlier items too); once it answers, the work is its own again.
+# Posting follows the team rule: refused under owner=refuse.
+unc_unconfirm() { local f; f=$(grep -l "\"addr\":\"$1\"" "$R2"/seats/*.json | head -1)
+  jq -c --argjson e "$((now - 100))" '.tool = "codex" | .epoch = $e | .codex_queue = "q"' "$f" >"$f.t" && mv "$f.t" "$f"
+  printf '%s\n' "$now" "$now" "$now" >"${f%.json}.wakes"; }
+uncx() { env -u CLAUDE_CODE_MESSAGING_SOCKET AGENT_BUS_HOME="$R2" AGENT_BUS_REPO_ID="$1" AGENT_BUS_TOOL=codex \
+  AGENT_BUS_SESSION="$1-$2" AGENT_BUS_WT="$1-w$2" "$BIN" "${@:3}"; }
+now=$(date +%s)
+# repo PM: confirmed, then unconfirmed (earlier item moves), then confirmed again
+UP=$(uncx uncb pm whoami | awk '/^seat/{print $2}'); uncx uncb pm role pm >/dev/null
+r2post uncb w1 --to @pm --state question -m '# unc early item' >/dev/null
+assert_eq "a confirmed PM owns @pm work" "$UP" "$(r2owner 'unc early item')"
+unc_unconfirm "$UP"
+assert_has "the unconfirmed PM is marked" "UNCONFIRMED" "$(r2 uncb w1 who)"
+assert_eq "an earlier @pm item moves to the lead while the PM is unconfirmed" "lead" "$(r2owner 'unc early item')"
+assert_has "triage names the lead" "owner lead" "$(r2 uncb w1 triage)"
+assert_lacks "and does not show it GONE" "GONE" "$(r2 uncb w1 triage)"
+out=$(AGENT_BUS_POLICY_OWNER=lead r2post uncb w1 --to @pm --state question -m '# unc late item' 2>&1 || true)
+assert_has "owner=lead: @pm to an unconfirmed PM is posted" "id=" "$out"
+assert_has "and says the lead owns it for now" "lead owns this" "$out"
+assert_lacks "and doesn't say nobody owns it" "nobody owns this" "$out"
+assert_eq "the lead owns it in snapshot" "lead" "$(r2owner 'unc late item')"
+assert_has "the lead is shown it" "unc late item" "$(env -u CLAUDE_CODE_MESSAGING_SOCKET AGENT_BUS_HOME="$R2" AGENT_BUS_REPO_ID=uncb AGENT_BUS_TOOL=lead AGENT_BUS_SESSION=unc-lead AGENT_BUS_WT=uncb-wlead "$BIN" read --peek 2>&1)"
+out=$(AGENT_BUS_POLICY_OWNER=refuse r2post uncb w1 --to @pm --state question -m '# unc refused item' 2>&1 || true)
+assert_has "owner=refuse: it is refused" "so this @pm post has no owner now" "$out"
+assert_lacks "and not posted" "id=" "$out"
+assert_has "the refusal names the fix" "--to @lead" "$out"
+out=$(AGENT_BUS_POLICY_OWNER=refuse r2post uncb w1 --to @pm --state fyi -m '# unc fyi' 2>&1 || true)
+assert_has "a non-work @pm post (fyi) isn't refused" "id=" "$out"
+out=$(AGENT_BUS_POLICY_OWNER=lead r2post uncb w1 --to @pm --state fyi -m '# unc fyi lead' 2>&1 || true)
+assert_lacks "a fyi to an unconfirmed PM doesn't claim the lead owns it" "the lead owns this" "$out"
+uncx uncb pm read --peek >/dev/null
+assert_lacks "a command from the PM confirms it" "UNCONFIRMED" "$(r2 uncb w1 who)"
+assert_eq "the early item is the PM's again" "$UP" "$(r2owner 'unc early item')"
+assert_eq "and so is the late one" "$UP" "$(r2owner 'unc late item')"
+# an unconfirmed lane PM with a live repo PM above it: that PM, unchanged
+RP=$(r2addr uncc rpm); r2 uncc rpm role pm >/dev/null
+LP3=$(uncx uncc lpm whoami | awk '/^seat/{print $2}'); uncx uncc lpm lane ux >/dev/null; uncx uncc lpm role pm --lane ux >/dev/null
+r2 uncc w1 lane ux >/dev/null
+unc_unconfirm "$LP3"
+AGENT_BUS_POLICY_OWNER=refuse r2post uncc w1 --to @pm --state question -m '# unc lane PM unconfirmed' >/dev/null
+assert_eq "an unconfirmed lane PM's work goes to the live repo PM" "$RP" "$(r2owner 'unc lane PM unconfirmed')"
+# the ticket only in the body (a --file handoff): the lane comes from the derived subject
+BP=$(uncx uncd lpm whoami | awk '/^seat/{print $2}'); uncx uncd lpm lane eng-77 >/dev/null; uncx uncd lpm role pm --lane eng-77 >/dev/null
+r2post uncd w1 --to @pm --state question -m '# ENG-77 body-only ticket' >/dev/null
+assert_eq "ticket only in the body: a confirmed lane PM owns it" "$BP" "$(r2owner 'ENG-77 body-only ticket')"
+unc_unconfirm "$BP"
+out=$(AGENT_BUS_POLICY_OWNER=refuse r2post uncd w1 --to @pm --state question -m '# ENG-77 body-only refused' 2>&1 || true)
+assert_has "ticket only in the body, PM unconfirmed, owner=refuse: refused" "so this @pm post has no owner now" "$out"
+out=$(AGENT_BUS_POLICY_OWNER=lead r2post uncd w1 --to @pm --state question -m '# ENG-77 body-only lead' 2>&1 || true)
+assert_has "owner=lead: posted" "id=" "$out"
+assert_eq "and the lead owns it" "lead" "$(r2owner 'ENG-77 body-only lead')"
+
+# an unconfirmed lane PM's first command after it confirms sees its own item
+SP=$(uncx unce lpm whoami | awk '/^seat/{print $2}'); uncx unce lpm lane ux >/dev/null; uncx unce lpm role pm --lane ux >/dev/null
+r2 unce w1 lane ux >/dev/null
+r2post unce w1 --to @pm --state question -m '# unc own item' >/dev/null
+unc_unconfirm "$SP"
+assert_eq "while unconfirmed (no PM above) its item is the lead's" "lead" "$(r2owner 'unc own item')"
+assert_has "its first command after confirming (triage) shows the item as its own" "owner $SP" "$(uncx unce lpm triage)"
+# a repo PM's first command after it confirms sees its own item, same as a lane PM
+RS=$(uncx unch rpm whoami | awk '/^seat/{print $2}'); uncx unch rpm role pm >/dev/null
+r2post unch w1 --to @pm --state question -m '# unc own repo item' >/dev/null
+unc_unconfirm "$RS"
+assert_eq "repo PM unconfirmed (no PM above): its item is the lead's" "lead" "$(r2owner 'unc own repo item')"
+assert_has "the repo PM's first command after confirming (triage) shows the item as its own" "owner $RS" "$(uncx unch rpm triage)"
+# a repo PM back from stale while a lane PM below it is unconfirmed: the repo PM's own command sees its item
+RB=$(r2addr unci rpm); r2 unci rpm role pm >/dev/null
+LB=$(uncx unci lpm whoami | awk '/^seat/{print $2}'); uncx unci lpm lane ux >/dev/null; uncx unci lpm role pm --lane ux >/dev/null
+r2 unci w1 lane ux >/dev/null
+r2post unci w1 --to @pm --state question -m '# unc stale repo item' >/dev/null
+r2age unci rpm
+unc_unconfirm "$LB"
+assert_eq "lane PM unconfirmed, repo PM stale: the lead's" "lead" "$(r2owner 'unc stale repo item')"
+assert_has "the repo PM back from stale sees the item as its own in that command" "owner $RB" "$(r2 unci rpm triage)"
+# an unconfirmed lane PM that is also idle past the TTL is gone: no reader calls it unconfirmed
+# (its work waits per the gone rule), so triage, snapshot and owner=refuse agree
+IL=$(uncx uncj lpm whoami | awk '/^seat/{print $2}'); uncx uncj lpm lane ux >/dev/null; uncx uncj lpm role pm --lane ux >/dev/null
+r2 uncj w1 lane ux >/dev/null
+r2post uncj w1 --to @pm --state question -m '# unc idle unconfirmed' >/dev/null
+unc_unconfirm "$IL"
+f=$(grep -l "\"addr\":\"$IL\"" "$R2"/seats/*.json | head -1)
+jq -c --argjson e "$((now - 90000))" '.epoch = $e | .codex_queue = "" | .last_hook = 0' "$f" >"$f.t" && mv "$f.t" "$f"
+assert_eq "idle 25h and unconfirmed: snapshot says the PM owns it (it waits)" "$IL" "$(r2owner 'unc idle unconfirmed')"
+assert_has "triage agrees (GONE, not lead)" "GONE" "$(r2 uncj w1 triage)"
+assert_lacks "triage doesn't hand it to the lead" "owner lead" "$(r2 uncj w1 triage)"
+out=$(AGENT_BUS_POLICY_OWNER=refuse r2post uncj w1 --to @pm --state question -m '# unc idle refuse' 2>&1 || true)
+assert_lacks "owner=refuse doesn't refuse for an idle-past-TTL PM" "so this @pm post has no owner now" "$out"
+# a lane PM unconfirmed with a gone repo PM above it: the lead, as with no repo PM
+GR=$(r2addr uncf rpm); r2 uncf rpm role pm >/dev/null
+GL=$(uncx uncf lpm whoami | awk '/^seat/{print $2}'); uncx uncf lpm lane ux >/dev/null; uncx uncf lpm role pm --lane ux >/dev/null
+r2 uncf w1 lane ux >/dev/null
+r2post uncf w1 --to @pm --state question -m '# unc gone early' >/dev/null
+r2age uncf rpm
+unc_unconfirm "$GL"
+assert_eq "unconfirmed lane PM, repo PM gone: an earlier item goes to the lead" "lead" "$(r2owner 'unc gone early')"
+out=$(AGENT_BUS_POLICY_OWNER=refuse r2post uncf w1 --to @pm --state question -m '# unc gone refused' 2>&1 || true)
+assert_has "and under owner=refuse a new post is refused" "so this @pm post has no owner now" "$out"
+out=$(AGENT_BUS_POLICY_OWNER=lead r2post uncf w1 --to @pm --state question -m '# unc gone lead' 2>&1 || true)
+assert_eq "under owner=lead it goes to the lead" "lead" "$(r2owner 'unc gone lead')"
+assert_has "the delivery line says the lead owns it" "the lead owns this" "$out"
+out=$(AGENT_BUS_POLICY_OWNER=lead r2post uncf w1 --to @pm --state fyi -m '# unc gone fyi' 2>&1 || true)
+assert_lacks "a fyi doesn't claim the lead owns it" "the lead owns this" "$out"
+# a gone repo PM with nothing unconfirmed below it keeps its work: it waits, GONE
+GR2=$(r2addr uncg rpm); r2 uncg rpm role pm >/dev/null
+r2post uncg w1 --to @pm --state question -m '# unc gone waits' >/dev/null
+r2age uncg rpm
+assert_eq "a gone PM with nothing unconfirmed below it still owns its work" "$GR2" "$(r2owner 'unc gone waits')"
+assert_has "and triage shows it GONE" "GONE" "$(r2 uncg w1 triage)"
+
 # --- a repo with no commits records its branch by name ---
 NC="$BUS_HOME/nocommits"; mkdir -p "$NC"; git -C "$NC" init -q -b firstbranch
 (cd "$NC" && env -u AGENT_BUS_BRANCH -u AGENT_BUS_REPO_ID AGENT_BUS_HOME="$R2" AGENT_BUS_TOOL=opencode AGENT_BUS_SESSION=nc1 \

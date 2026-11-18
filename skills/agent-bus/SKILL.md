@@ -181,6 +181,8 @@ you're asked to do, ask the lead rather than working around it.
 
 ```sh
 agent-bus role pm --lane <lane>   # every work item from that lane comes to you
+agent-bus role pm                 # the repo PM: work from lanes with no live PM, and @repo-pm
+agent-bus post --to @repo-pm ...  # a lane PM taking something up; a seat with a live lane PM uses @pm
 agent-bus attention               # what needs a decision, with the fix for each
 agent-bus lanes                   # lanes by project: health, open work, who's on them
 agent-bus lane <lane> done --reason merged   # close a finished lane's items

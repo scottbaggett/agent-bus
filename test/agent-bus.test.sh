@@ -1589,6 +1589,238 @@ out=$(AGENT_BUS_POLICY_CLAUDE= cc ctx1 post --to "$SAME" -m "# same context, per
 assert_has "claude=allow also works from the personal config" "posted" "$out"
 rm -rf "$SB"
 
+# --- a repo PM and a lane PM held at once: the lane PM owns its lane's work ---
+PR="$BUS_HOME/pm-routing"; mkdir -p "$PR"
+# These seats record no inbox socket, so posts can run delivery (its report names
+# every seat that owns the packet) without poking any real session.
+pr() { local s="$1"; shift; env -u CLAUDE_CODE_MESSAGING_SOCKET -u CLAUDE_CODE_SESSION_ID -u CLAUDECODE -u HERDR_PANE_ID \
+  AGENT_BUS_HOME="$PR" AGENT_BUS_REPO_ID=pm-routing AGENT_BUS_TOOL=claude \
+  AGENT_BUS_SESSION="pr-$s" AGENT_BUS_WT="w$s" "$BIN" "$@"; }
+prpost() { local s="$1"; shift; AGENT_BUS_NO_PUSH=0 AGENT_BUS_NO_PEERS=1 pr "$s" post "$@"; }
+RPM=$(pr rpm whoami | awk '/^seat/{print $2}'); LPM=$(pr lpm whoami | awk '/^seat/{print $2}')
+pr lpm lane alpha >/dev/null; pr w1 lane alpha >/dev/null; pr w2 lane beta >/dev/null; pr w0 who >/dev/null
+assert_eq "routing test seats have no inbox socket to deliver into" "" \
+  "$(cat "$PR"/seats/*.json | jq -r '.socket // ""' | sort -u | tr -d '\n')"
+out=$(prpost w1 --to @repo-pm --state question -m '# too early' 2>&1 || true)
+assert_has "@repo-pm with no repo PM is refused" "no repo PM registered" "$out"
+pr lpm role pm --lane alpha >/dev/null
+out=$(pr rpm role pm)
+assert_lacks "the repo PM is not told it receives work from any worktree" "from any worktree" "$out"
+assert_has "the repo PM is told which lanes have their own PM" "lanes with their own PM: @alpha" "$out"
+for s in lpm rpm; do pr "$s" read >/dev/null; done
+
+out=$(prpost w1 --to @pm --state fyi -m '# alpha note')
+assert_has "@pm from a lane worker reaches its lane PM" "delivery: $LPM" "$out"
+assert_lacks "and not the repo PM as well" "delivery: $RPM" "$out"
+out=$(prpost w1 --to @pm --state question -m '# alpha ask')
+assert_has "a question to @pm from a lane worker goes to its lane PM" "delivery: $LPM" "$out"
+assert_lacks "a question to @pm from a lane worker skips the repo PM" "delivery: $RPM" "$out"
+for st in question blocked needs-review handoff; do
+  out=$(prpost w1 --to @here --state "$st" -m "# alpha $st")
+  assert_has "an unaddressed $st from a lane worker goes to its lane PM" "delivery: $LPM" "$out"
+  assert_lacks "an unaddressed $st from a lane worker skips the repo PM" "delivery: $RPM" "$out"
+done
+out=$(prpost w1 --to "$RPM" --allow-claude --state needs-review -m '# alpha direct')
+assert_has "the supervisory copy of a lane worker's direct item goes to its lane PM" "delivery: $LPM" "$out"
+assert_eq "the repo PM is not woken for a lane that has its own PM" "{}" \
+  "$(pr rpm read >/dev/null; prpost w1 --to @here --state blocked -m '# alpha later' >/dev/null; pr rpm stop-hook </dev/null)"
+out=$(pr rpm read --peek)
+assert_has "the repo PM still sees the lane's work" "alpha later" "$out"
+assert_has "labeled as someone else's" "broadcast copy" "$out"
+assert_has "the lane PM is woken for it" "block" "$(pr lpm stop-hook </dev/null | jq -r .decision)"
+
+out=$(prpost w2 --to @pm --state question -m '# beta question')
+assert_has "a lane with no PM falls back to the repo PM" "delivery: $RPM" "$out"
+assert_lacks "a lane with no PM never reaches another lane's PM" "delivery: $LPM" "$out"
+out=$(prpost w0 --to @pm --state question -m '# unfiled question')
+assert_has "a seat in no lane reaches the repo PM" "delivery: $RPM" "$out"
+assert_lacks "a seat in no lane never reaches a lane PM" "delivery: $LPM" "$out"
+
+out=$(prpost w1 --to @repo-pm --state question -m '# over the lane PM' 2>&1 || true)
+assert_has "a seat whose lane has a live PM can't jump to @repo-pm" "send it --to @pm" "$out"
+assert_lacks "and nothing is posted" "posted" "$out"
+out=$(prpost lpm --to @repo-pm --state question -m '# lane PM to repo PM')
+assert_has "a lane PM may post @repo-pm" "delivery: $RPM" "$out"
+out=$(prpost w2 --to @repo-pm --state question -m '# beta to repo PM')
+assert_has "a seat in a lane with no PM may post @repo-pm" "delivery: $RPM" "$out"
+assert_lacks "and no lane PM gets it" "delivery: $LPM" "$out"
+out=$(prpost w0 --to @repo-pm --state fyi -m '# unfiled to repo PM')
+assert_has "a seat in no lane may post @repo-pm" "delivery: $RPM" "$out"
+assert_has "triage names the repo PM as the owner of @repo-pm work" "-> $RPM" \
+  "$(pr rpm triage --by lane | grep 'lane PM to repo PM')"
+assert_has "triage names the lane PM as the owner of @pm work" "-> $LPM" \
+  "$(pr rpm triage --by lane | grep 'alpha ask')"
+snap=$(AGENT_BUS_HOME="$PR" "$BIN" snapshot)
+assert_eq "snapshot names the repo PM as the owner of @repo-pm work" "$RPM" \
+  "$(jq -r '.open[] | select(.subject == "lane PM to repo PM") | .owner' <<<"$snap")"
+assert_eq "snapshot names the lane PM as the owner of @pm work" "$LPM" \
+  "$(jq -r '.open[] | select(.subject == "alpha ask") | .owner' <<<"$snap")"
+out=$(prpost lpm --to @pm --state question -m '# lane PM escalates')
+assert_has "a lane PM's own @pm goes up to the repo PM" "delivery: $RPM" "$out"
+out=$(pr rpm role pm --clear >/dev/null; pr rpm role pm)
+assert_has "a repo PM taking the role lists the work it owns" "beta question" "$out"
+assert_lacks "but not work its lane PMs own" "alpha ask" "$out"
+out=$(prpost rpm --to @repo-pm --state question -m '# to myself first' 2>&1 || true)
+assert_has "the repo PM's own @repo-pm is refused, not sent to itself" "@repo-pm from you has nobody to reach" "$out"
+
+# Delivery, the digest and triage read the same lane: a no-lane seat's item is
+# filed by the ticket in its subject, and a `file` row moves it.
+TPM=$(pr tpm whoami | awk '/^seat/{print $2}')
+pr tpm lane tix-42 >/dev/null; pr tpm role pm --lane tix-42 >/dev/null; pr tpm read >/dev/null
+out=$(prpost w0 --to @pm --state question -m '# TIX-42: stuck on the parser')
+assert_has "a no-lane item filed by its subject goes to that lane's PM" "delivery: $TPM" "$out"
+assert_lacks "and not to the repo PM" "delivery: $RPM" "$out"
+assert_has "the subject's lane PM is woken for it" "TIX-42: stuck" "$(pr tpm stop-hook </dev/null | jq -r .reason)"
+assert_has "triage names the same PM" "-> $TPM" "$(pr rpm triage --by lane | grep 'TIX-42: stuck')"
+pr lpm read >/dev/null
+fid=$(pr w0 post --to @here --state blocked -m '# refile me' | idof)
+pr rpm file "$fid" alpha >/dev/null
+assert_has "an item filed into a lane wakes that lane's PM" "refile me" "$(pr lpm stop-hook </dev/null | jq -r .reason)"
+assert_has "and triage names that PM" "-> $LPM" "$(pr rpm triage --by lane | grep 'refile me')"
+
+# A lane PM whose session has ended routes nothing: its lane falls back.
+lseat=$(grep -l "\"addr\":\"$LPM\"" "$PR"/seats/*.json | head -1)
+jq -c '.epoch = 1' "$lseat" >"$lseat.tmp" && mv "$lseat.tmp" "$lseat"
+out=$(prpost w1 --to @pm --state question -m '# lane PM gone')
+assert_has "a gone lane PM's work falls back to the repo PM" "delivery: $RPM" "$out"
+assert_lacks "nothing waits on a gone lane PM" "nobody owns this" "$out"
+out=$(prpost w1 --to @repo-pm --state question -m '# gone lane PM, so up')
+assert_has "a seat whose lane PM is gone may post @repo-pm" "delivery: $RPM" "$out"
+assert_has "triage names the repo PM while the lane PM is gone" "-> $RPM" "$(pr rpm triage --by lane | grep 'lane PM gone')"
+out=$(pr rpm role pm --clear >/dev/null; pr rpm role pm)
+assert_has "role pm marks lane PMs that are gone" "lane PMs no longer running: @alpha" "$out"
+assert_lacks "and doesn't list them as live" "lanes with their own PM: @alpha" "$out"
+assert_has "a gone lane PM still holds standing to close" "resolved" \
+  "$(pr lpm resolve "$fid" --reason done 2>&1)"
+out=$(prpost rpm --to @pm --state question -m '# to myself' 2>&1 || true)
+assert_has "the repo PM's own @pm is refused, not sent to itself" "@pm from you has nobody to reach" "$out"
+out=$(pr rpm role pm --clear >/dev/null; prpost lpm --to @pm --state question -m '# nobody above' 2>&1 || true)
+assert_has "a lane PM with no repo PM above it is refused" "@pm from you has nobody to reach" "$out"
+out=$(pr w1 lane repo-pm 2>&1 || true)
+assert_has "repo-pm is reserved, never a lane" "not a lane name" "$out"
+out=$(pr w1 role repo-pm 2>&1 || true)
+assert_has "repo-pm is reserved, never a role" "not a role name" "$out"
+
+# --- a child seat takes its parent's lane, so its @pm reaches that lane's PM ---
+kid() { local p="$1" k="$2"; shift 2; AGENT_BUS_NO_PUSH=0 AGENT_BUS_NO_PEERS=1 pr "$p" --as-child "$k" "$@"; }
+pr par lane alpha >/dev/null; pr lpm who >/dev/null
+assert_has "a child seat takes its parent's lane" "lane     alpha (parent)" "$(kid par k1 whoami)"
+out=$(kid par k1 post --to @pm --state question -m '# from a subagent')
+assert_has "a child's @pm reaches its parent's lane PM" "delivery: $LPM" "$out"
+kid par k2 lane tix-42 >/dev/null
+assert_has "a child's own lane wins over its parent's" "lane     tix-42 (explicit)" "$(kid par k2 whoami)"
+assert_has "and routes there" "delivery: $TPM" "$(kid par k2 post --to @pm --state question -m '# own lane')"
+assert_has "AGENT_BUS_LANE wins over a child's own lane" "lane     beta (env)" "$(AGENT_BUS_LANE=beta kid par k2 whoami)"
+assert_has "AGENT_BUS_LANE wins over the parent's lane" "lane     beta (env)" "$(AGENT_BUS_LANE=beta kid par k1 whoami)"
+AGENT_BUS_BRANCH=fix/alpha pr par2 who >/dev/null
+assert_has "a parent's lane can come from its branch" "lane     alpha (branch name)" "$(AGENT_BUS_BRANCH=fix/alpha pr par2 whoami)"
+assert_has "a child on another branch still takes its parent's lane" "lane     alpha (parent)" \
+  "$(AGENT_BUS_BRANCH=fix/zebra kid par2 k3 whoami)"
+
+# --- PM routing edges: idle lane PMs, a PM's own direct work, unfiled sweeps, cost ---
+# Each case gets its own repo id on one throwaway bus; seats record no socket.
+R2="$BUS_HOME/pm-routing-2"; mkdir -p "$R2"
+r2() { local r="$1" s="$2"; shift 2; env -u CLAUDE_CODE_MESSAGING_SOCKET -u CLAUDE_CODE_SESSION_ID -u CLAUDECODE -u HERDR_PANE_ID \
+  AGENT_BUS_HOME="$R2" AGENT_BUS_REPO_ID="$r" AGENT_BUS_TOOL=claude \
+  AGENT_BUS_SESSION="$r-$s" AGENT_BUS_WT="$r-w$s" "$BIN" "$@"; }
+r2post() { local r="$1" s="$2"; shift 2; AGENT_BUS_NO_PUSH=0 AGENT_BUS_NO_PEERS=1 r2 "$r" "$s" post --allow-claude "$@"; }
+r2addr() { r2 "$1" "$2" whoami | awk '/^seat/{print $2}'; }
+r2age() { local a f; a=$(r2addr "$1" "$2"); f=$(grep -l "\"addr\":\"$a\"" "$R2"/seats/*.json | head -1)
+  jq -c '.epoch = 1' "$f" >"$f.tmp" && mv "$f.tmp" "$f"; }
+
+# An idle lane PM with no repo PM above it still holds its lane's @pm.
+LPM=$(r2addr idle lpm); r2 idle lpm lane alpha >/dev/null; r2 idle lpm role pm --lane alpha >/dev/null
+r2 idle w1 lane alpha >/dev/null; r2age idle lpm
+out=$(r2post idle w1 --to @pm --state question -m '# idle PM ask' 2>&1 || true)
+assert_lacks "an idle lane PM with no repo PM is not reported as unregistered" "no PM registered" "$out"
+assert_has "the worker's @pm is posted" "id=" "$out"
+assert_has "and the idle lane PM owns it" "-> $LPM" "$(r2 idle w1 triage --by lane | grep 'idle PM ask')"
+RPM=$(r2addr idle rpm); r2 idle rpm role pm >/dev/null
+assert_has "a live repo PM still beats an idle lane PM" "delivery: $RPM" \
+  "$(r2post idle w1 --to @pm --state question -m '# idle PM, repo PM back')"
+
+# A PM's own direct assignment has no supervisory owner: the repo PM isn't woken.
+RPM=$(r2addr direct rpm); LPM=$(r2addr direct lpm); W1=$(r2addr direct w1)
+r2 direct rpm role pm >/dev/null; r2 direct lpm lane alpha >/dev/null; r2 direct lpm role pm --lane alpha >/dev/null
+r2 direct w1 lane alpha >/dev/null
+for s in rpm lpm w1; do r2 direct "$s" read >/dev/null; done
+out=$(r2post direct lpm --to "$W1" --state handoff -m '# lane PM assigns work')
+assert_has "a lane PM's handoff reaches its worker" "delivery: $W1" "$out"
+assert_lacks "a lane PM's handoff to its worker doesn't go to the repo PM" "delivery: $RPM" "$out"
+assert_eq "the repo PM isn't woken by a lane PM's handoff" "{}" "$(r2 direct rpm stop-hook </dev/null)"
+out=$(r2post direct w1 --to "$LPM" --state needs-review -m '# worker to lane PM direct')
+assert_lacks "a worker's direct item to its lane PM doesn't go to the repo PM" "delivery: $RPM" "$out"
+assert_eq "the repo PM isn't woken by it" "{}" "$(r2 direct rpm stop-hook </dev/null)"
+out=$(r2post direct rpm --to "$W1" --state handoff -m '# repo PM assigns work')
+assert_lacks "a repo PM's direct handoff doesn't go to the lane PM" "delivery: $LPM" "$out"
+
+# `lane unfiled` sweeps and closes count what they closed.
+r2 sweep rpm role pm >/dev/null; r2 sweep w0 who >/dev/null
+r2post sweep w0 --to @here --state question -m '# loose one' >/dev/null
+r2post sweep w0 --to @here --state blocked -m '# loose two' >/dev/null
+assert_has "lane unfiled sweep reports the items it closed" "closed 2 item(s)" \
+  "$(r2 sweep rpm lane unfiled sweep --older 0d --reason canceled 2>&1)"
+r2post sweep w0 --to @here --state question -m '# loose three' >/dev/null
+r2post sweep w0 --to @here --state handoff -m '# loose four' >/dev/null
+assert_has "lane unfiled done reports the items it closed" "closed 2 open item(s)" \
+  "$(r2 sweep rpm lane unfiled done --reason canceled 2>&1)"
+
+# A repo PM that sits in a lane (here from its branch) has nobody above it.
+r2 inlane lpm lane alpha >/dev/null; r2 inlane lpm role pm --lane alpha >/dev/null
+AGENT_BUS_BRANCH=fix/alpha r2 inlane rpm role pm >/dev/null
+assert_has "the repo PM's lane comes from its branch" "lane     alpha (branch name)" \
+  "$(AGENT_BUS_BRANCH=fix/alpha r2 inlane rpm whoami)"
+out=$(AGENT_BUS_BRANCH=fix/alpha r2post inlane rpm --to @pm --state question -m '# down to the lane PM?' 2>&1 || true)
+assert_has "a repo PM in a lane can't @pm its lane PM" "@pm from you has nobody to reach" "$out"
+out=$(AGENT_BUS_BRANCH=fix/alpha r2post inlane rpm --to @repo-pm --state question -m '# to myself' 2>&1 || true)
+assert_has "a repo PM in a lane is refused @repo-pm as the repo PM" "@repo-pm from you has nobody to reach" "$out"
+assert_lacks "not pointed at its own lane PM" "send it --to @pm" "$out"
+
+# snapshot routes only to live lane PMs.
+RPM=$(r2addr snap rpm); r2 snap rpm role pm >/dev/null
+r2 snap lpm lane alpha >/dev/null; r2 snap lpm role pm --lane alpha >/dev/null; r2 snap w1 lane alpha >/dev/null
+r2age snap lpm
+r2post snap w1 --to @pm --state question -m '# snapshot gone lane PM' >/dev/null
+assert_eq "snapshot names the repo PM while the lane PM is gone" "$RPM" \
+  "$(AGENT_BUS_HOME="$R2" "$BIN" snapshot | jq -r '.open[] | select(.subject == "snapshot gone lane PM") | .owner')"
+
+# An idle lane PM that is back (its own hook touches the seat) is live again at once: a worker's
+# @pm posted while it was idle still wakes it, not the repo PM. Needs the touch_seat map reload.
+r2 back rpm role pm >/dev/null
+r2 back lpm lane alpha >/dev/null; r2 back lpm role pm --lane alpha >/dev/null; r2 back w1 lane alpha >/dev/null
+for s in rpm lpm; do r2 back "$s" read >/dev/null; done
+r2age back lpm
+r2post back w1 --to @pm --state question -m '# idle lane PM wakes' >/dev/null
+assert_eq "a lane PM that was idle and is back is woken by its worker's @pm" "block" \
+  "$(r2 back lpm stop-hook </dev/null | jq -r '.decision // "none"')"
+assert_eq "and the repo PM is not woken for it" "{}" "$(r2 back rpm stop-hook </dev/null)"
+
+# A no-lane seat's @pm counts the ticket in its subject before it is refused.
+TPM=$(r2addr subj tpm); r2 subj tpm lane tix-42 >/dev/null; r2 subj tpm role pm --lane tix-42 >/dev/null
+r2 subj w0 who >/dev/null
+out=$(r2post subj w0 --to @pm --state question -m '# TIX-42: parser' 2>&1 || true)
+assert_lacks "a ticket in the message's subject is a PM to reach" "no PM registered" "$out"
+assert_has "and the post reaches that lane's PM" "delivery: $TPM" "$out"
+out=$(r2post subj w0 --to @pm --state question -s 'TIX-42: lexer' -m 'body' 2>&1 || true)
+assert_has "so does a ticket in --subject" "delivery: $TPM" "$out"
+
+# The hot path reads the lane PMs once: jq runs as often with six lane PMs as with one.
+mkdir -p "$R2/shim"
+printf '#!/bin/sh\necho x >>"$JQ_CALLS"\nexec %s "$@"\n' "$(command -v jq)" >"$R2/shim/jq"; chmod +x "$R2/shim/jq"
+jq_calls() { : >"$R2/calls"; PATH="$R2/shim:$PATH" JQ_CALLS="$R2/calls" r2 "$@" </dev/null >/dev/null 2>&1; grep -c . "$R2/calls"; }
+for r in cost1 cost6; do
+  r2 "$r" rpm role pm >/dev/null
+  for l in l1 l2 l3 l4 l5 l6; do
+    [ "$r" = cost1 ] && [ "$l" != l1 ] && continue
+    r2 "$r" "p$l" lane "$l" >/dev/null; r2 "$r" "p$l" role pm --lane "$l" >/dev/null
+  done
+  r2 "$r" wl1 lane l1 >/dev/null
+  r2post "$r" wl1 --to @pm --state question -m '# cost probe' >/dev/null
+done
+for cmd in stop-hook digest; do
+  assert_eq "$cmd runs jq as often with six lane PMs as with one" "$(jq_calls cost1 pl1 "$cmd")" "$(jq_calls cost6 pl1 "$cmd")"
+done
+
 # --- isolation: nothing from the host session reached the fixtures ---
 assert_eq "no host session, socket or pane variable is set" "" "$(env | grep -E "$HOST_ENV" | grep -v '^AGENT_BUS_' | cut -d= -f1)"
 assert_eq "no Codex variable reaches the fixtures" "" "$(env | grep -E '^CODEX_' | cut -d= -f1)"

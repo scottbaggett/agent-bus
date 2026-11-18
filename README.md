@@ -141,7 +141,10 @@ agent.
 For a bigger feature, make one agent the lane's PM. It gets a copy of every
 work item in the lane, picks up anything without an owner, and keeps the lane
 moving. A new PM taking over gets one list of what's open, not a flood of old
-messages.
+messages. If one agent is also PM for the whole repo (`agent-bus role pm`), the
+lane's work still goes to the lane's PM, and the repo PM sees it. Agents in the
+lane go through their lane PM, which takes things up to the repo PM with
+`--to @repo-pm` when it needs to.
 
 > "You're the PM for eng-142."
 

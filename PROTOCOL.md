@@ -51,6 +51,8 @@ child seat `<parent-addr>/<name>`, whose seat file records `parent`. The name is
 - A child owns only packets sent to its own address. It doesn't get packets
   sent to its parent, its scope, `@here`, `@repo`, `@all` or its lane, and it
   can't reply to or resolve them. It holds no roles and can't take one.
+- It works in its parent's lane, unless `AGENT_BUS_LANE` or its own
+  `agent-bus lane` says otherwise, so its `@pm` reaches its parent's lane PM.
 - Its seat file is `<parent seat file>@<name>.json`. No other seat's file can
   contain `@`, and a `/` in a worktree name becomes `-`, so only a child's
   address has two slashes.
@@ -86,7 +88,8 @@ and `snapshot` gives each seat `avatar: {rows, color}` for viewers to draw.
 | `@here` | this repo and worktree |
 | `@repo` | this repo, every worktree |
 | `@checkout` | every seat in lane `checkout`, this repo |
-| `@pm` | the sender's lane PM and the repo PM (refused if neither exists) |
+| `@pm` | the sender's lane PM, else the repo PM (refused if neither exists) |
+| `@repo-pm` | the repo PM; refused from a seat whose lane has a live PM (it goes through `@pm`), allowed from that lane PM |
 | `@all` | every seat on the machine |
 
 `--to` is required: nothing broadcasts by default. Any other `@scope` is
@@ -150,10 +153,24 @@ States `fyi` and `done` are messages. States `needs-review`, `blocked`,
 - has one **owner**: its addressee (seat or scope), or the PM when it was sent to
   `@pm` or to a broadcast scope (`@here`, `@repo`, `@all`). Broadcast recipients
   see the item as context, labeled as someone else's, and are never woken for it.
-- is **copied to the PM** wherever in the repo it was sent, because senders
-  default to `@here` and a PM never sits in the worker's worktree.
+- is **copied to its PM** (the *live* PM of its lane, else the repo PM) wherever
+  in the repo it was sent, because senders default to `@here` and a PM never sits
+  in the worker's worktree. A PM's own directly addressed items get no copy.
 - stays **open** until closed with a reason. Reading it does not close it, and
   neither does gc.
+
+"The PM" of an item is the live PM of a lane it belongs to (the lane it was sent
+to, then its own lane, as `triage` groups it), else the repo PM. Only that PM owns
+it and is woken; the repo PM still sees a lane PM's items as context. A lane PM
+whose session has ended routes nothing, so its lane's work falls back to the repo
+PM; with no repo PM, it stays with that lane PM for when it comes back. For `@pm`
+and broadcasts the sender is skipped, so a lane PM's own `@pm` goes up to the repo
+PM. A PM with nobody above it is refused, and that includes the repo PM, whatever
+lane it sits in. `@repo-pm` always means the repo PM. Nobody
+jumps the hierarchy: a seat whose lane has a live PM can't post `@repo-pm` and
+goes through `@pm`, and its lane PM decides whether to take it up with its own
+`@pm` or `@repo-pm`. A seat in no lane, or in a lane with no live PM, may post
+`@repo-pm`.
 
 ### Closing
 
@@ -244,10 +261,13 @@ session on the lane is told them at start; agents follow them or ask the lead.
 ## The PM
 
 One seat per repo may hold the PM role (`agent-bus role pm`). To supervise one
-feature rather than the repo, take a lane's PM role instead (see Lanes). It owns work sent
-to `@pm` or a broadcast scope, receives a copy of every work item in the repo,
-and may close any of them. Taking the role from a live holder needs `--force`;
-a holder gone past `AGENT_BUS_ROLE_TTL` (48h) loses it at gc.
+feature rather than the repo, take a lane's PM role instead (see Lanes). The repo
+PM owns work sent to `@repo-pm` (from lane PMs, and from seats whose lane has no
+live PM), and work sent to `@pm` or a broadcast scope from seats in no lane or in
+a lane without a live PM of its own; it gets a copy of those seats' work items.
+It sees every work item in the repo, and may close any of them. Taking the role
+from a live holder needs `--force`; a holder gone past `AGENT_BUS_ROLE_TTL` (48h)
+loses it at gc.
 
 ## Lanes
 
@@ -257,6 +277,8 @@ a seat works out its lane, first match wins:
 
 1. `AGENT_BUS_LANE` in the environment.
 2. `agent-bus lane <name>` run on this seat (`--clear` drops it again).
+   For a child seat, then its parent's lane, as the parent's seat file records
+   it, whatever branch the child sits on.
 3. A ticket key in the branch name: `feature/eng-142-skills` is lane `eng-142`.
 4. A ticket key in the worktree directory name.
 5. The branch name itself, minus prefixes like `feat/` or `claude/`:
@@ -282,11 +304,13 @@ with no lane is asked to pick one.
 a lane PM does what the repo PM does for the whole repo: it gets a copy of every
 work item posted by the lane's seats or sent to `@checkout`, owns the ones sent to
 `@checkout` or to `@pm` from a lane seat, and may close any of them. The repo PM
-still sees everything. `agent-bus triage --lane checkout` lists the lane's open
-work, and `triage --by lane` groups the whole repo's.
+no longer owns or is woken for that work, but still sees it. Lane seats reach
+the repo PM only through their lane PM, which may post `@repo-pm` itself.
+`agent-bus triage --lane checkout` lists the lane's open work, and
+`triage --by lane` groups the whole repo's.
 
-Lane names are `[a-z0-9-]`, up to 32 characters, and not `here`, `repo`, `all`
-or `pm`.
+Lane names are `[a-z0-9-]`, up to 32 characters, and not `here`, `repo`, `all`,
+`pm`, `repo-pm`, `lead` or `unfiled`.
 
 ## Lane lifecycle
 

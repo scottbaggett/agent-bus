@@ -2809,7 +2809,7 @@ HC_BIN="${AGENT_BUS_HC:-hc}"
 # Herdr terminals as {address: {agent, status, state}}, or {} without Herdr.
 hc_terminals() {
   command -v "$HC_BIN" >/dev/null 2>&1 || { printf '{}'; return 0; }
-  "$HC_BIN" ls --json 2>/dev/null | jq -c '[.terminals[]? | {(.address): {agent, status, state, cwd}}] | add // {}' 2>/dev/null \
+  "$HC_BIN" ls --json 2>/dev/null | jq -c '[.terminals[]? | {(.address): {agent, status, state, cwd, where}}] | add // {}' 2>/dev/null \
     || printf '{}'
 }
 
@@ -3313,6 +3313,23 @@ resume_hint() { # seat-row
   esac
 }
 
+# Seats the reaper never touches, as {addrs, sessions}: whoever holds any PM
+# role in any repo (repo or lane; a stale role file still names the PM's
+# session), the lead seat, and any seat whose Herdr terminal is titled as a
+# PM ("… / PM").
+retire_never() {
+  local f addrs
+  addrs=$( { for f in "$BUS"/state/roles/*.pm; do [ -f "$f" ] && head -1 "$f"; done; watch_conf lead @lead; echo; } \
+           | jq -Rsc 'split("\n") | map(select(length > 0)) | unique')
+  jq -c --argjson a "$addrs" --argjson terms "$terms" '
+    [.[] | . as $s | select(($a | index($s.addr)) != null) | (.session // "") | select(. != "" and . != "local")] as $sess
+    # A seat in a terminal titled "… / PM" (OpenCode seats are matched by cwd).
+    | [.[] | . as $s | select([$terms | to_entries[] | select(((.value.where // "") | test("/ *PM$"))
+                               and (.key == ($s.hc_terminal // "") or (($s.tool // "") == "opencode" and (.value.cwd // "") == ($s.cwd // "-"))))] | length > 0)
+       | .addr] as $where
+    | {addrs: ($a + $where | unique), sessions: ($sess | unique)}' <<<"$seats"
+}
+
 # One pass of the reaper over this repo's seats. Needs watch_repo's locals:
 # seats, items-independent ledger lookups, terms, lead, exempt, pms, now.
 watch_retire() { # mode
@@ -3375,9 +3392,13 @@ watch_retire() { # mode
     printf '  retired %s: %s; terminal %s ended%s%s\n' "$addr" "$done_why" "$t" "${stacks:+, stacks down: ${stacks% }}" "${left:+, left running: ${left% }}"
     cmd_post --to "$target" --state fyi --subject "watch: retired $addr" \
       -m "Retired $addr: $done_why, idle $(( (now - act_at) / 60 ))m, worktree clean and pushed. Ended terminal $t${stacks:+ and took down ${stacks% }}.${left:+ Left running (not in watch.retire_stacks; take them down yourself if they are done): ${left% }.} The session is kept; resume with: $hint" >/dev/null 2>&1 || true
-  done < <(jq -c --arg rid "$REPO_ID" --argjson pms "$pms" --argjson ex "$(printf '%s' "$exempt" | jq -Rc 'split(" ") | map(select(length > 0))')" '
+  done < <(jq -c --arg rid "$REPO_ID" --argjson pms "$(retire_never)" --argjson ex "$(printf '%s' "$exempt" | jq -Rc 'split(" ") | map(select(length > 0))')" '
     .[] | select(.repo_id == $rid and .live and ((.tool // "") | IN("claude", "opencode", "codex")))
-    | .addr as $a | select(($pms | index($a)) == null)
+    # Never a main checkout: builders work in ticket worktrees; PMs and the
+    # lead sit in main.
+    | select((.wt // "") != "main")
+    | .addr as $a | (.session // "") as $sn
+    | select(($pms.addrs | index($a)) == null and ($sn == "" or $sn == "local" or ($pms.sessions | index($sn)) == null))
     | select([.addr, ((.tool // "") + "/" + (.wt // "")), (.tool // "")] | any(. as $k | $ex | index($k)) | not)' <<<"$seats")
 }
 

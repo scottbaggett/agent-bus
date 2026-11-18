@@ -516,8 +516,10 @@ own channel, exactly as `post` does.
   `watch.exempt` (seat addresses, tool/worktree scopes or tool names). A seat
   is reported once per quiet spell and at most once an hour.
 - **Retiring finished builders** (`retire=on`; `retire=dry` or `agent-bus
-  watch --retire-dry-run` only lists). A builder seat (not a PM, not the
-  lead, not `watch.exempt`) is retired when its work is finished (its
+  watch --retire-dry-run` only lists). A builder seat (never a PM: not a
+  holder of any repo or lane PM role in any repo, by address or session, not a
+  seat in a Herdr terminal titled "… / PM", not a seat in a repo's main
+  checkout; never the lead or `watch.exempt`) is retired when its work is finished (its
   branch's MR or PR is merged or closed, asked of `glab`/`gh`, or every work
   item sent to it is closed), it has been idle `watch.retire_after` (1800s)
   and its worktree is clean with every commit on a remote. Its Herdr terminal

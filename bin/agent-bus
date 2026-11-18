@@ -882,11 +882,19 @@ pid_state() {
 # Restart a stopped OpenCode session so it picks up new work. `opencode run`
 # exits after each reply; people resumed these by hand dozens of times.
 resume_opencode() { # addr session cwd id
-  command -v opencode >/dev/null 2>&1 || return 1
+  command -v "$OPENCODE_BIN" >/dev/null 2>&1 || return 1
   [ -n "$2" ] && [ "$2" != local ] && [ -d "$3" ] || return 1
-  (cd "$3" && nohup opencode run --session "$2" ${AGENT_BUS_OPENCODE_MODEL:+-m "$AGENT_BUS_OPENCODE_MODEL"} \
-    "agent-bus: packet $4 waits for you. Run: agent-bus read" >/dev/null 2>&1 &) || return 1
+  # Fully detached and never awaited: the resumed run is a whole agent turn.
+  # Every fd is redirected at the outer level too; the old form backgrounded
+  # `cd && nohup …`, and that subshell kept the caller's stdout (a watch
+  # pass's command substitution) open until the turn ended.
+  mkdir -p "$BUS/state" 2>/dev/null || true
+  ( cd "$3" || exit 1
+    nohup "$OPENCODE_BIN" run --session "$2" ${AGENT_BUS_OPENCODE_MODEL:+-m "$AGENT_BUS_OPENCODE_MODEL"} \
+      "agent-bus: packet $4 waits for you. Run: agent-bus read" </dev/null >>"$BUS/state/opencode-resume.log" 2>&1 &
+  ) </dev/null >/dev/null 2>&1 || return 1
 }
+OPENCODE_BIN="${AGENT_BUS_OPENCODE_BIN:-opencode}"
 
 # Queue delivery defaults on for hook-managed Codex sessions when supported.
 # Resolve the helper through the installed CLI symlink, not the caller's cwd.
@@ -2826,13 +2834,30 @@ seat_terminal() { # seat-row terminals
 watch_wake() { # seat-row id state item-row terminals
   local row="$1" id="$2" st="$3" rec="$4" terms="$5" text t tool
   text="agent-bus: packet $id [$st] waits for you. Run: agent-bus read"
+  # A retired seat is never resumed out of sight. It stays retired until it
+  # works again (someone resumed it); meanwhile whoever sent the work hears,
+  # once, how to resume it or to send the work elsewhere.
+  local addr ret; addr=$(jq -r .addr <<<"$row")
+  ret=$(watch_get '.retired // {}' | jq -c --arg a "$addr" '.[$a] // empty')
+  if [ -n "$ret" ]; then
+    if jq -e --argjson r "$ret" '.activity == "working" or ((.activity_at // 0) > $r.at)' <<<"$row" >/dev/null; then
+      watch_update 'del(.retired[$a])' --arg a "$addr"
+    else
+      if [ -z "$(watch_get '.retired_notice // {}' | jq -r --arg id "$id" '.[$id] // empty')" ]; then
+        watch_update '.retired_notice[$id] = $now' --arg id "$id" --argjson now "$(now_epoch)"
+        cmd_post --to "$(jq -r .from <<<"$rec")" --re "$id" --state fyi --subject "watch: $addr was retired; $id did not reach it" \
+          -m "$addr was retired by the watch (its work was finished and it sat idle), so $id was not delivered to a running agent. Resume it to hand it this work: $(resume_hint "$row"). Or send the work to a live seat (agent-bus who)." >/dev/null 2>&1 || true
+      fi
+      printf retired; return 0
+    fi
+  fi
   [ "${AGENT_BUS_NO_PUSH:-0}" = 1 ] && { printf skipped; return 0; }
   t=$(seat_terminal "$row" "$terms"); tool=$(jq -r '.tool // ""' <<<"$row")
   # Never type into a terminal a person may be typing in: the lead's, and any
   # listed in watch.no_type (terminal ids or seat addresses). Those seats get
   # their host's own wake (the Claude socket) instead.
   if [ -n "$t" ] && in_list "$t" "$WATCH_NO_TYPE"; then t=''; fi
-  in_list "$(jq -r .addr <<<"$row")" "$WATCH_NO_TYPE" && t=''
+  in_list "$addr" "$WATCH_NO_TYPE" && t=''
   if [ -n "$t" ]; then
     local info; info=$(jq -c --arg t "$t" '.[$t] // {}' <<<"$terms")
     # Only type into a live agent. A terminal whose agent exited is a shell,

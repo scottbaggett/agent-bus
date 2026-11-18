@@ -540,6 +540,14 @@ def pm_owner($lp; $rpm; $reg): .from as $f | (.to // "") as $t
     elif ($t | startswith("@") | not) and ($f == $rpm or ([$reg[]] | index($f)) != null) then []
     else [(lanes_of[] | $lp[.] // empty), $rpm, (lanes_of[] | $reg[.] // empty)] end
   | map(select(. != "" and . != $f)) | first // "";
+# Who an open work item waits on, for triage and snapshot alike: the lead for
+# @lead (or work given to it), the holder of a named role, the PM (pm_owner), or
+# the seat it was sent to. $roles maps the repo roles to addresses.
+def item_owner($lp; $rpm; $reg; $roles):
+  if .to == "@lead" or .assign == "@lead" then "lead"
+  elif ((.to // "") | startswith("@")) then
+    first(($roles[.to[1:]] // empty), (pm_owner($lp; $rpm; $reg) | select(. != "")), "(no PM)")
+  else .to end;
 '
 
 # What closes a work item, for every reader (routing, triage, gc, snapshot):
@@ -750,11 +758,9 @@ open_items() {
       | .id as $id
       | with_item_lane($fm)
       | select($lane == "" or (lanes_of | index($lane)))
-      | (if ((.to // "") | startswith("@")) then
-           (pm_owner($livepms; $pm; $lanepms) | if . == "" then "(no PM)" else . end)
-         else .to end) as $o
+      | item_owner($livepms; $pm; $lanepms; $roles) as $o
       | . + {owner: $o, pm: pm_owner($livepms; $pm; $lanepms),
-             gone: ($live | any(.addr == $o or .scope == $o) | not),
+             gone: ($o != "lead" and ($live | any(.addr == $o or .scope == $o) | not)),
              unread: (($reads[$o] // null) != null and ($reads[$o] | index($id) | not)
                       and (.epoch // 0) <= $now - $pickup),
              stale: ((.epoch // 0) <= $now - $stale)}]
@@ -3000,12 +3006,7 @@ snapshot_json() {
     | [$L[] | select(.kind == "msg" and sup and ($c[.id] | not) and ((.probe // false) | not))
         | with_item_lane($fm)
         | (.repo_id // "") as $rid | ($lanepms[$rid] // {}) as $lp | .id as $id
-        | (if .to == "@lead" or .assign == "@lead" then "lead"
-           elif ((.to // "") | startswith("@")) then
-             ([(($roles[$rid] // {})[.to[1:]] // empty),
-               (pm_owner($lp | with_entries(select(live(.value))); $pms[$rid] // ""; $lp) | select(. != "")),
-               "(no PM)"] | first)
-           else .to end) as $o
+        | item_owner($lp | with_entries(select(live(.value))); $pms[$rid] // ""; $lp; $roles[$rid] // {}) as $o
         | {id, epoch: (.epoch // 0), from, to, state, subject: (.subject // ""), repo: (.repo // "-"),
            repo_id: $rid, lane, owner: $o, branch: (.branch // ""),
            review: (.review // null), review_of: (.review_of // null),

@@ -464,12 +464,18 @@ rid=$(b post --to @release --state needs-review -m '# release review' | idof)
 assert_has "@role reaches the holder" "release review" "$(lc read --peek)"
 assert_eq "the holder owns it" "block" "$(lc stop-hook </dev/null | jq -r .decision)"
 assert_has "role lists named roles" "@release: opencode/wlc" "$(lc role)"
+holder=$("$BIN" snapshot | jq -r --arg id "$rid" '.open[] | select(.id == $id) | .owner')
+assert_has "triage names the role holder for @role work, as snapshot does" "-> $holder " \
+  "$(lc triage --by lane | grep 'release review')"
 out=$(b post --to @nobody -m x 2>&1 || true)
 assert_has "an unknown role is refused" "unknown scope" "$out"
 # @lead: the human, through the app
 lid=$(lc post --to @lead --state question -m '# need a call on scope' | idof)
 out=$("$BIN" snapshot)
 assert_eq "@lead items are owned by lead" "lead" "$(jq -r --arg id "$lid" '.open[] | select(.id == $id) | .owner' <<<"$out")"
+tri=$(lc triage --by lane | grep 'need a call on scope')
+assert_has "triage names lead as the owner of @lead items, as snapshot does" "-> lead " "$tri"
+assert_lacks "and doesn't call them GONE" "GONE" "$tri"
 assert_has "@lead items lead attention" "needs-you" "$(jq -r '.attention[].kind' <<<"$out")"
 assert_has "the lead sees @lead items" "need a call on scope" "$(lead read --peek)"
 out=$(lc post --re "$rid" --close escalated --to @lead --state question -m '# escalating release review')
@@ -540,6 +546,9 @@ out=$(PO=lead pol p1 post --to @here --state blocked -m '# lead owns me' 2>&1)
 assert_has "owner=lead gives it to the lead" "the lead owns this" "$out"
 assert_eq "the lead owns it in snapshot" "lead" \
   "$("$BIN" snapshot | jq -r '.open[] | select(.subject == "lead owns me") | .owner')"
+out=$(pol p1 triage --by lane | grep 'lead owns me')
+assert_has "triage names lead as the owner of work given to the lead" "-> lead " "$out"
+assert_lacks "and doesn't call it GONE" "GONE" "$out"
 # review gate: whoever asked accepts the work
 hid=$(pol p1 post --to "$P2" --state handoff -m '# build the card' | idof)
 assert_eq "assigned work records its reviewer" "$P1" "$(tail -n 1 "$BUS_HOME/ledger.jsonl" | jq -r .review)"

@@ -197,7 +197,9 @@ seat and a crashed one look different.
 
 ### Seeing open work
 
-`agent-bus triage` lists open items in the repo by owner, oldest first:
+`agent-bus triage` lists open items in the repo by owner, oldest first. The
+owner is the one `snapshot` names: `lead` for `@lead` work, the holder of a
+named role, the item's PM, or the seat it was sent to.
 
 - **GONE** — no live seat answers for the owner. Hand the item on or close it.
 - **NOT PICKED UP** — the owner is live but has not read the item after

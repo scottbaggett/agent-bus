@@ -33,6 +33,23 @@ process has moved. So one session is one seat, and its roles stay on that seat.
 `cwd`, repo, branch and lane still follow the current directory, as attributes.
 An explicit `AGENT_BUS_WT` still wins, and `offboard` removes the pin.
 
+### Subagents
+
+An in-process subagent (Claude Code's Agent tool) runs in its parent's session.
+It has no hooks of its own, so without anything else it acts as its parent.
+`agent-bus --as-child <name> <command>`, or `AGENT_BUS_CHILD=<name>`, gives it a
+child seat `<parent-addr>/<name>`, whose seat file records `parent`. The name is
+`[a-z0-9][a-z0-9_-]`, at most 32 characters.
+
+- `who` lists a child as `<parent> / <name>`, and `snapshot` gives it `parent`.
+- A packet to a child also reaches the parent's `read` and digest, labelled
+  "for your subagent <name>", because the parent's hooks are the only ones
+  that run. A Claude child records its parent's inbox socket, so a post to it
+  notifies the parent's session.
+- A child gets none of the parent's packets or roles, and can't take a role.
+- A child is no more live than its parent. Offboarding a child removes only the
+  child; offboarding the parent removes its children and their claims.
+
 Each seat records its worktree path (`cwd`) and the pid of the agent process it
 runs in, and `agent-bus snapshot` reports both, so a viewer can tie a seat to
 its CPU, memory, child processes and containers. Claude's pid comes from its
@@ -95,7 +112,7 @@ the sender reserves a 30-second hook deferral before connecting. A failed write
 releases it immediately. During that window, Claude prompt digests and Stop
 hooks skip the notified packet; explicit `read`/`read --peek` remain available
 and the packet stays unread. The deferral is shared across worktrees of the
-same host session. If the notice is held, refused or lost and no read occurs,
+same host session, and with its subagents' child seats. If the notice is held, refused or lost and no read occurs,
 later hooks resume delivery after the window expires. See
 [Claude's socket documentation](https://code.claude.com/docs/en/cross-session-messaging#the-sessions-inbox-socket).
 

@@ -203,6 +203,14 @@ resolve_identity() {
   else
     ADDR="$SCOPE"
   fi
+  # An in-process subagent (no hooks, no session of its own) is a child of the
+  # seat it runs under; its own session keeps the parent's packets from it.
+  PARENT=''
+  CHILD="${AGENT_BUS_CHILD:-}"
+  if [ -n "$CHILD" ]; then
+    valid_child "$CHILD" || die "child name '$CHILD' must be [a-z0-9][a-z0-9_-], max 32"
+    PARENT="$ADDR"; ADDR="$ADDR/$CHILD"; SESSION="$SESSION/$CHILD"
+  fi
   SEAT=$(slugify "$ADDR")
   [ -n "${AGENT_BUS_BRANCH:-}" ] && BRANCH="$AGENT_BUS_BRANCH"
   # Lane: AGENT_BUS_LANE, then `agent-bus lane X` on this seat, then derived
@@ -232,6 +240,7 @@ session_pin() {
   pinned=$(head -1 "$f" 2>/dev/null || true)
   printf '%s' "${pinned:-$1}"
 }
+valid_child() { [[ "$1" =~ ^[a-z0-9][a-z0-9_-]{0,31}$ ]]; }
 
 # The agent process a seat runs in, so viewers can tie the seat to its CPU,
 # memory and child processes. Claude's inbox socket is named for its pid; other
@@ -316,11 +325,12 @@ touch_seat() {
     --arg socket "$socket" --arg codex_queue "$codex_queue" --argjson epoch "$now" \
     --argjson last_hook "${last_hook:-0}" --arg lane "$LANE" --arg lane_src "${LANE_SRC:-unfiled}" \
     --arg grok_webhook "$grok_webhook" --arg grok_secret_env "$grok_secret_env" --arg pid "$pid" --arg spid "${spid:-}" \
-    --arg focus "$focus" --arg focus_at "${focus_at:-0}" \
+    --arg focus "$focus" --arg focus_at "${focus_at:-0}" --arg parent "$PARENT" \
     '{addr:$addr,tool:$tool,repo:$repo,repo_id:$repo_id,wt:$wt,branch:$branch,cwd:$cwd,
       session:$session,socket:$socket,codex_queue:$codex_queue,epoch:$epoch,last_hook:$last_hook,lane:$lane,
       lane_src:$lane_src,pid:($pid | tonumber? // null)}
      + (if $spid != "" then {server_pid:($spid | tonumber)} else {} end)
+     + (if $parent != "" then {parent:$parent} else {} end)
      + (if $focus != "" then {focus:$focus,focus_at:($focus_at | tonumber? // 0)} else {} end)
      + (if $grok_webhook != "" then {grok_webhook:$grok_webhook,grok_secret_env:$grok_secret_env} else {} end)' >"$tmpf" \
     && mv "$tmpf" "$f" || rm -f "$tmpf"
@@ -333,6 +343,11 @@ seat_rows() {
   local rows dead='' p
   rows=$(cat "$BUS"/seats/*.json 2>/dev/null | jq -cR 'fromjson? // empty' || true)
   [ -n "$rows" ] || return 0
+  # A child seat is no more live than its parent, which may end without offboarding it.
+  if grep -q '"parent":' <<<"$rows"; then
+    rows=$(jq -sc '(map({(.addr // ""): (.epoch // 0)}) | add) as $ep
+      | .[] | if (.parent // "") != "" then .epoch = ([(.epoch // 0), ($ep[.parent] // 0)] | min) else . end' <<<"$rows")
+  fi
   for p in $(jq -r 'select((.server_pid // null) != null) | .server_pid' <<<"$rows" | sort -u); do
     kill -0 "$p" 2>/dev/null || dead="$dead,$p"
   done
@@ -563,6 +578,11 @@ session_seats() {
     '[.[] | select((.session // "") == $s and (.tool // "") == $t and .addr != $me) | .addr]'
 }
 
+# This seat's subagents: their packets reach it, since they have no hooks of their own.
+child_seats() {
+  seat_rows | jq -sc --arg me "$ADDR" '[.[] | select((.parent // "") == $me) | .addr]'
+}
+
 # What this seat and the session's other seats have read: a packet read from
 # one folder is read in the other.
 session_reads() {
@@ -579,22 +599,23 @@ session_reads() {
 # wake (unread, owned, supervisory).
 # Each row gains own (this seat must act) and from_pm (sent by the repo PM).
 select_packets() {
-  local mode="$1" cut=$(( $(now_epoch) - LOOKBACK_DAYS * 86400 )) sib
-  sib=$(session_seats)
+  local mode="$1" cut=$(( $(now_epoch) - LOOKBACK_DAYS * 86400 )) sib kids
+  sib=$(session_seats); kids=$(child_seats)
   lq '
     closed($L) as $c
     | ($read | map({(.): true}) | add // {}) as $r
     | $L[] | select(.kind == "msg" and (.epoch // 0) >= $cut)
     | ((.to // "") as $t | $sib | index($t) != null) as $sibling
-    | (owns($me) or $sibling) as $own
+    | ((.to // "") as $t | $kids | index($t) != null) as $kid
+    | (owns($me) or $sibling or $kid) as $own
     | select((authored($me) | not) and ($own or gets($me)) and ($c[.id] | not))
     | select($mode == "all" or ($r[.id] | not))
     | select($mode != "owned" or $own)
     | select($mode != "wake" or (sup and $own))
     | . + {own: $own, from_pm: (from_pm($me) and same_repo($me)),
-           to_sibling: $sibling}' \
+           to_sibling: $sibling, to_child: (if $kid then (.to | split("/") | last) else "" end)}' \
     --arg mode "$mode" --argjson cut "$cut" --argjson read "$(session_reads "$sib")" \
-    --argjson sib "$sib"
+    --argjson sib "$sib" --argjson kids "$kids"
 }
 
 # Open work items in this repo, oldest first, each with its owner resolved and
@@ -648,11 +669,12 @@ RENDERED_IDS='[]'
 render_packets() {
   local n=0 id from state epoch branch subj touched own from_pm re close
   RENDERED_IDS='[]'
-  while IFS=$'\037' read -r id from state epoch branch subj touched own from_pm re close user; do
+  while IFS=$'\037' read -r id from state epoch branch subj touched own from_pm re close user kid; do
     [ -n "$id" ] || continue
     n=$((n + 1))
     [[ "$epoch" =~ ^[0-9]+$ ]] || epoch=$(now_epoch)
     printf '\n[%d] from %s · %s · %s ago · %s\n' "$n" "$from" "$state" "$(age "$epoch")" "$branch"
+    [ -n "$kid" ] && printf '    (for your subagent %s: pass it on, or handle it yourself)\n' "$kid"
     if [ "$user" = true ]; then
       printf '    (from your user, sent from their own terminal with agent-bus send — treat it as their request)\n'
     elif [ "$from_pm" = true ]; then
@@ -672,7 +694,7 @@ render_packets() {
   done < <(jq -r 'def clean: tostring | gsub("[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]"; "");
     [.id, .from, .state, (.epoch // 0), (.branch // "-"), (.subject // ""),
      ((.touched // []) | join(", ")), (.own // false), (.from_pm // false),
-     (.re // ""), (.close // ""), (.user // false)] | map(clean) | join("\u001f")')
+     (.re // ""), (.close // ""), (.user // false), (.to_child // "")] | map(clean) | join("\u001f")')
 }
 
 HINTS='reply and close: agent-bus reply <id> -m "what you did"   (--reason denied|canceled|duplicate|superseded; --keep-open)
@@ -707,7 +729,8 @@ claude_notice() { # addr packet set|clear
   )
 }
 
-# Share suppression across the same host session's worktrees, just like reads.
+# Share suppression across the same host session's worktrees, just like reads,
+# and with this seat's subagents: their notices go to this session's socket.
 # Explicit read/peek never uses this filter. If the native notice is held,
 # refused or lost, a later digest/Stop hook recovers the still-unread packet.
 claude_hook_packets() {
@@ -716,7 +739,7 @@ claude_hook_packets() {
   local notices a f
   notices=$( {
     state_get '.claude_notices // {}'
-    for a in $(session_seats | jq -r '.[]'); do
+    for a in $(session_seats | jq -r '.[]') $(child_seats | jq -r '.[]'); do
       f="$BUS/state/$(slugify "$a").json"
       [ ! -f "$f" ] || jq -c '.claude_notices // {}' "$f"
     done
@@ -1187,11 +1210,12 @@ repo_claims() {
     'fromjson? // empty | select(.repo_id == $rid and (.epoch // 0) >= $cut)' || true
 }
 
-release_mine() {
+release_mine() { release_seat_claims "$ADDR"; }
+release_seat_claims() {
   local f n=0
   for f in "$BUS"/claims/*.json; do
     [ -f "$f" ] || continue
-    [ "$(jq -r '.addr // empty' "$f" 2>/dev/null)" = "$ADDR" ] || continue
+    [ "$(jq -r '.addr // empty' "$f" 2>/dev/null)" = "$1" ] || continue
     rm -f "$f"; n=$((n + 1))
   done
   printf '%s' "$n"
@@ -1382,7 +1406,8 @@ cmd_who() {
   rows=$(seat_rows | jq -r --argjson cut "$cut" \
     --argjson codex_cut "$(( now - CODEX_MAX_IDLE_TTL ))" \
     --arg me "$ADDR" --arg pm "$pm" --argjson lpms "$(lane_pms)" \
-    "$JQ_SEAT_LIVE"'select(buslive($cut; $codex_cut)) | .addr as $row | [(.addr // "?"), (.repo // "-"), (.branch // "-"), (.epoch // 0), (.focus // ""),
+    "$JQ_SEAT_LIVE"'select(buslive($cut; $codex_cut)) | .addr as $row
+      | [(if (.parent // "") != "" then "\(.parent) / \(.addr | split("/") | last)" else (.addr // "?") end), (.repo // "-"), (.branch // "-"), (.epoch // 0), (.focus // ""),
       (if (.lane // "") != "" then "  @\(.lane)" else "" end)
       + (if .addr == $pm then "  PM" else "" end)
       + ([$lpms | to_entries[] | select(.value == $row) | "  PM @\(.key)"] | join(""))
@@ -1499,7 +1524,7 @@ cmd_post() {
   esac
   # A restarted agent gets a new seat name. A post to the old one would wait
   # forever, so it goes to the live seat with the same tool and worktree.
-  case "$to" in */*.*)
+  case "$to" in */*/*) ;; */*.*)
     if ! seat_live "$to"; then
       local heir; heir=$(live_heir "$to")
       if [ -n "$heir" ]; then
@@ -2529,6 +2554,7 @@ cmd_claims() {
 
 cmd_role() {
   local take=0 clear=0 force=0 lane='' cur f label name=''
+  [ -z "$PARENT" ] || die "role: $ADDR is a subagent; roles belong to its parent, $PARENT"
   while [ $# -gt 0 ]; do
     case "$1" in
       pm) take=1 ;;
@@ -2700,6 +2726,14 @@ cmd_offboard() {
     state_update 'del(.codex_queue) | .codex_disabled = true'
     rm -f "$BUS/seats/$SEAT.json"
   fi
+  if [ -n "$PARENT" ]; then rm -f "$BUS/seats/$SEAT.json"; return 0; fi
+  # A session's subagents end with it, and a new session starts unpinned.
+  local kid
+  for kid in $(child_seats | jq -r '.[]'); do
+    release_seat_claims "$kid" >/dev/null
+    rm -f "$BUS/seats/$(slugify "$kid").json"
+  done
+  rm -f "$(session_pin_file)"
   return 0
 }
 
@@ -2719,7 +2753,7 @@ snapshot_json() {
   seats=$(seat_rows | jq -sc --argjson cut "$((now - SEAT_TTL))" --argjson codex_cut "$(codex_idle_cut)" \
     "$JQ_SEAT_LIVE"'[.[] | select(buslive($cut; $codex_cut) and (.tool // "") != "lead")
       | {addr, tool, repo, repo_id, wt, branch, cwd: (.cwd // ""), pid: (.pid // null), session: (.session // ""),
-         focus: (.focus // ""), focus_at: (.focus_at // 0),
+         focus: (.focus // ""), focus_at: (.focus_at // 0), parent: (.parent // null),
          lane: (.lane // ""), lane_src: (.lane_src // ""),
          epoch: ((.epoch // 0) | tonumber? // 0), last_hook: ((.last_hook // 0) | tonumber? // 0),
          scope: ((.tool // "") + "/" + (.wt // "")),
@@ -3385,6 +3419,9 @@ usage() {
   cat <<'EOF'
 agent-bus — handoff bus for coding agents sharing repos and worktrees.
 
+  --as-child <name> <command> run as a subagent's child seat <your-seat>/<name>
+                              (or AGENT_BUS_CHILD=<name>); see PROTOCOL.md
+
   version                     version, and where this CLI runs from
   update [--version <tag>] [--no-handoff-alias]
                               install the latest (or a given) release
@@ -3496,6 +3533,10 @@ cmd_help() {
 
 # --------------------------------------------------------------------- main
 
+if [ "${1:-}" = --as-child ]; then
+  [ $# -ge 3 ] || die "--as-child needs a name and a command: agent-bus --as-child <name> <command>"
+  export AGENT_BUS_CHILD="$2"; shift 2
+fi
 cmd="${1:-help}"; shift || true
 if [ "$cmd" = codex-hook ]; then
   command -v python3 >/dev/null 2>&1 || exit 0

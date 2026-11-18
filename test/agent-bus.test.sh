@@ -623,6 +623,17 @@ PY
   assert_eq "Stop hook does not duplicate a fresh socket notification" '{}' "$(seat o1 claude wp stop-hook </dev/null)"
   seat o1 claude wp-sibling who >/dev/null
   assert_lacks "same-session sibling digest also defers the notified packet" "$rid" "$(seat o1 claude wp-sibling digest)"
+  # An in-process subagent's child seat has no hooks or socket of its own: its
+  # notice goes to the parent's socket, and the parent's hooks defer it too.
+  CLAUDE_CODE_MESSAGING_SOCKET="$SOCKD/owner" seat o1 claude wp --as-child kid who >/dev/null
+  kid_frames=$(wc -l <"$SOCKD/owner.log" | tr -d ' ')
+  kid_id=$(AGENT_BUS_NO_PUSH=0 seat o3 claude wx post --to "$O1/kid" --state question -m '# for the subagent' | idof)
+  sleep 0.3
+  assert_eq "a post to a subagent's child seat notifies its parent's inbox socket" "$((kid_frames + 1))" \
+    "$(wc -l <"$SOCKD/owner.log" | tr -d ' ')"
+  assert_has "that notice names the child seat" "$O1/kid" "$(tail -1 "$SOCKD/owner.log" | jq -r '.message.content')"
+  assert_lacks "the parent's digest does not duplicate a fresh notice for its subagent" "$kid_id" "$(seat o1 claude wp digest)"
+  assert_has "the parent can still read it" "for the subagent" "$(seat o1 claude wp read --peek)"
   seat o1 claude wp read >/dev/null
   assert_eq "recipient read records pickup of the packet" true \
     "$(jq --arg id "$rid" '.read | index($id) != null' "$BUS_HOME/state/$(printf '%s' "$O1" | tr '/' '_').json")"
@@ -1294,6 +1305,38 @@ out=$(cd "$SB/plain" && AGENT_BUS_HOME="$SB/bus" AGENT_BUS_TOOL=claude AGENT_BUS
 assert_has "triage outside a repo with no scope still says why it can't" "not in a git repo" "$out"
 out=$(cd "$SB/plain" && AGENT_BUS_HOME="$SB/bus" AGENT_BUS_REPO_ID=acme AGENT_BUS_TOOL=claude AGENT_BUS_SESSION=t1 "$BIN" role pm --lane other-1 2>&1)
 assert_has "role works outside a git repo" "PM for lane @other-1" "$out"
+
+# --- child seats for in-process subagents ---
+cs() { (cd "$SB/plain" && AGENT_BUS_HOME="$SB/bus" AGENT_BUS_REPO_ID=acme AGENT_BUS_TOOL=claude AGENT_BUS_SESSION=par "$BIN" "$@"); }
+PAR=$(cs whoami | awk '/^seat/{print $2}')
+KID=$(cs --as-child reviewer whoami | awk '/^seat/{print $2}')
+assert_eq "--as-child names the seat <parent>/<child>" "$PAR/reviewer" "$KID"
+assert_eq "AGENT_BUS_CHILD does the same" "$KID" "$(AGENT_BUS_CHILD=reviewer cs whoami | awk '/^seat/{print $2}')"
+out=$(cs --as-child 'Bad Name!' whoami 2>&1 || true)
+assert_has "a child name is validated" "child name" "$out"
+cs who >/dev/null; cs --as-child reviewer who >/dev/null
+assert_eq "the child's seat records its parent" "$PAR" "$(jq -r .parent "$SB/bus/seats/$(printf '%s' "$KID" | tr '/:@ ' '____').json")"
+assert_has "who shows the child under its parent" "$PAR / reviewer" "$(cs who)"
+assert_eq "snapshot attributes the child to its parent" "$PAR" \
+  "$(AGENT_BUS_HOME="$SB/bus" "$BIN" snapshot | jq -r --arg k "$KID" '.seats[] | select(.addr == $k) | .parent')"
+(cd "$SB/plain" && AGENT_BUS_HOME="$SB/bus" AGENT_BUS_REPO_ID=acme AGENT_BUS_TOOL=codex AGENT_BUS_SESSION=w2 \
+  "$BIN" post --to "$KID" --state question -m "# question for the reviewer" >/dev/null)
+out=$(cs read --digest)
+assert_has "a packet to the child reaches the parent's digest" "question for the reviewer" "$out"
+assert_has "labelled as for the child" "for your subagent reviewer" "$out"
+assert_has "the child reads it too" "question for the reviewer" "$(cs --as-child reviewer read --peek)"
+(cd "$SB/plain" && AGENT_BUS_HOME="$SB/bus" AGENT_BUS_REPO_ID=acme AGENT_BUS_TOOL=codex AGENT_BUS_SESSION=w2 \
+  "$BIN" post --to "$PAR" --state question -m "# only for the parent" >/dev/null)
+assert_lacks "the child doesn't get the parent's packets" "only for the parent" "$(cs --as-child reviewer read --peek)"
+cs role pm --lane kid-lane >/dev/null
+out=$(cs --as-child reviewer role pm --lane kid-2 2>&1 || true)
+assert_has "a child can't hold a role" "subagent" "$out"
+assert_lacks "and doesn't inherit the parent's" "@kid-lane" "$(cs --as-child reviewer whoami)"
+cs --as-child reviewer offboard >/dev/null
+assert_has "a child offboarding leaves the parent's roles" "PM for lane @kid-lane: $PAR" "$(cs role --lane kid-lane)"
+cs --as-child reviewer who >/dev/null
+cs offboard >/dev/null
+assert_lacks "the parent offboarding ends its children" "$PAR / reviewer" "$(cs who)"
 
 rm -rf "$SB"
 

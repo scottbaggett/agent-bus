@@ -305,7 +305,8 @@ assert_lacks "two possible successors: nobody takes it" "taken back" "$out"
 # A lane whose PM is gone: listed in the lead's packet until parked.
 out=$(watch)
 lid=$(alerts_to @lead | jq -r 'select(.alert.kind == "lead") | .id' | tail -1)
-assert_has "a lane with no live PM is listed in the lead's packet" "@feat has no live PM" "$(cat "$AGENT_BUS_HOME/msg/$lid.md")"
+assert_has "a lane with no live PM is listed in the lead's packet, with its repo" "repo:@feat has no live PM" "$(cat "$AGENT_BUS_HOME/msg/$lid.md")"
+assert_has "and where to park it from" "cd $R && agent-bus lane park feat" "$(cat "$AGENT_BUS_HOME/msg/$lid.md")"
 LDS() { (cd "$R" && AGENT_BUS_SESSION=ldseat AGENT_BUS_TOOL=claude AGENT_BUS_WT=ldwt "$BIN" "$@"); }
 LDA=$(LDS whoami | awk '/^seat/{print $2}')
 assert_has "a plain seat may not park a lane" "may change its lifecycle" "$(LDS lane park feat 2>&1 || true)"

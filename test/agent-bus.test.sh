@@ -901,6 +901,16 @@ threading.Event().wait()
 PY
   SRV=$!
   for i in 1 2 3 4 5 6 7 8 9 10; do [ -S "$SOCKD/bystander" ] && break; sleep 0.1; done
+  # A throwaway home (no `wakeable` marker) records no socket and wakes nobody.
+  CLAUDE_CODE_MESSAGING_SOCKET="$SOCKD/owner" seat u1 claude wu who >/dev/null
+  U1=$(addr seat u1 claude wu)
+  assert_eq "a seat on an unmarked home records no inbox socket" "" \
+    "$(jq -r '.socket // ""' "$BUS_HOME/seats/$(printf '%s' "$U1" | tr '/' '_').json")"
+  out=$(AGENT_BUS_NO_PUSH=0 seat o3 claude wx post --to "$U1" --state needs-review -m '# no wake here' || true)
+  assert_has "a post on an unmarked home doesn't wake" "delivery: $U1 — inbox submission unavailable; packet retained" "$out"
+  assert_has "who says wakes are off on an unmarked home" "Claude socket wakes off: home not marked wakeable" "$(a who)"
+  touch "$BUS_HOME/wakeable"
+  assert_lacks "and not once the home is marked" "wakes off" "$(a who)"
   CLAUDE_CODE_MESSAGING_SOCKET="$SOCKD/owner" seat o1 claude wp who >/dev/null
   CLAUDE_CODE_MESSAGING_SOCKET="$SOCKD/bystander" seat o2 claude wp who >/dev/null
   O1=$(addr seat o1 claude wp)
@@ -971,9 +981,21 @@ PY_SOCKET
   mkdir "$SOCKD/bin"
   printf '#!/bin/sh\nexit 1\n' >"$SOCKD/bin/nc"
   chmod +x "$SOCKD/bin/nc"
-  transport_status=0
-  sed -n '/^poke_seat()/,/^}/p' "$BIN" >"$SOCKD/poke.sh"
-  ( source "$SOCKD/poke.sh"
+  # Extract the real poke_seat and the bus_wakeable gate it calls, so the status
+  # under test is the transport's. BUS is a wakeable home; the socket is the live
+  # owner socket. A stub nc that succeeds is the control: without it a poke_seat
+  # that always returned 1 would pass too.
+  transport_status=0 control_status=0
+  { sed -n '/^bus_wakeable()/p' "$BIN"; sed -n '/^poke_seat()/,/^}/p' "$BIN"; } >"$SOCKD/poke.sh"
+  mkdir "$SOCKD/wakehome" && touch "$SOCKD/wakehome/wakeable"
+  mkdir "$SOCKD/okbin"
+  printf '#!/bin/sh\ncat >/dev/null\nexit 0\n' >"$SOCKD/okbin/nc"
+  chmod +x "$SOCKD/okbin/nc"
+  ( source "$SOCKD/poke.sh"; BUS="$SOCKD/wakehome"
+    PATH="$SOCKD/okbin:$PATH" poke_seat "$SOCKD/owner" 'transport ok'
+  ) || control_status=$?
+  assert_eq "adapter reports success when the transport succeeds" 0 "$control_status"
+  ( source "$SOCKD/poke.sh"; BUS="$SOCKD/wakehome"
     PATH="$SOCKD/bin:$PATH" poke_seat "$SOCKD/owner" 'transport failure'
   ) || transport_status=$?
   assert_eq "adapter propagates failed transport status" 1 "$transport_status"
@@ -1009,6 +1031,13 @@ PY_SOCKET
   assert_has "a gone seat's claim is taken over" "has ended; taking it over" "$out"
   assert_has "and claimed" "claimed src/left.ts" "$out"
   assert_eq "bystander still got nothing" "" "$(cat "$SOCKD/bystander.log" 2>/dev/null)"
+  # A socket recorded while the home was marked is not used once it isn't.
+  rm -f "$BUS_HOME/wakeable"
+  before=$(wc -c <"$SOCKD/owner.log")
+  out=$(AGENT_BUS_NO_PUSH=0 seat o3 claude wx post --to "$O1" --state needs-review -m '# unmarked again' || true)
+  sleep 0.3
+  assert_has "an unmarked home never pokes a recorded socket" "delivery: $O1 — inbox submission unavailable; packet retained" "$out"
+  assert_eq "and the owner's socket got nothing more" "$before" "$(wc -c <"$SOCKD/owner.log")"
   kill "$SRV" 2>/dev/null || true; wait "$SRV" 2>/dev/null || true; SRV=; rm -rf "$SOCKD"
 else
   printf 'skip push tests (python3/nc missing)\n'
@@ -1830,6 +1859,18 @@ AGENT_BUS_BRANCH=fix/alpha pr par2 who >/dev/null
 assert_has "a parent's lane can come from its branch" "lane     alpha (branch name)" "$(AGENT_BUS_BRANCH=fix/alpha pr par2 whoami)"
 assert_has "a child on another branch still takes its parent's lane" "lane     alpha (parent)" \
   "$(AGENT_BUS_BRANCH=fix/zebra kid par2 k3 whoami)"
+
+# --- the default home wakes without a marker ---
+DH=$(mktemp -d)
+dh() { env -u AGENT_BUS_HOME HOME="$DH" CLAUDE_CODE_MESSAGING_SOCKET="$DH/inbox.sock" AGENT_BUS_SESSION=dh1 \
+  AGENT_BUS_TOOL=claude AGENT_BUS_WT=wdh "$BIN" "$@"; }
+out=$(dh who)
+assert_lacks "the default home needs no wakeable marker" "wakes off" "$out"
+assert_eq "a seat on the default home records its inbox socket" "$DH/inbox.sock" \
+  "$(cat "$DH"/.agents/bus/seats/*.json | jq -r '.socket // ""')"
+assert_lacks "so does the default home named outright" "wakes off" \
+  "$(HOME="$DH" AGENT_BUS_HOME="$DH/.agents/bus/" AGENT_BUS_SESSION=dh2 AGENT_BUS_TOOL=claude AGENT_BUS_WT=wdh "$BIN" who)"
+rm -rf "$DH"
 
 # --- PM routing edges: idle lane PMs, a PM's own direct work, unfiled sweeps, cost ---
 # Each case gets its own repo id on one throwaway bus; seats record no socket.

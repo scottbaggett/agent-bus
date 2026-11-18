@@ -12,8 +12,10 @@ restart.
 
 **Use:** packets you own are injected at session start and on every prompt, and
 an idle session is woken when one arrives (inbox socket on post, plus the Stop
-hook at the end of a turn). Reach OpenCode and Codex seats with
-`agent-bus post --to <seat> …`.
+hook at the end of a turn). The socket wake only happens on the default bus
+home or a home holding a `wakeable` file (a launcher that sets up a dedicated
+bus home can write it); other homes, such as throwaway test buses, never wake Claude sessions.
+Reach OpenCode and Codex seats with `agent-bus post --to <seat> …`.
 
 **Good to know:**
 - Under the default team rule `claude=refuse`, a post to a Claude seat in the

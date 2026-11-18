@@ -61,7 +61,8 @@ counts.
 Which path delivered it:
 
 - **Claude:** `post` reports submission to the Claude inbox; only a read/reply proves pickup.
-  If it doesn't, the target recorded no socket (`agent-bus doctor` says
+  If it doesn't, the target recorded no socket or the bus home isn't marked
+  wakeable (`agent-bus who` says Claude socket wakes off) (`agent-bus doctor` says
   "wakeable by socket" when it has one).
 - **OpenCode:** the target's `agent-bus whoami` shows `wake 1/3`; the plugin
   resumed the session from `stop-hook`.

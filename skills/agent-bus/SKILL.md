@@ -133,8 +133,8 @@ agent-bus reply <id> -m "what you did"
 ```
 
 If the work has a reviewer, this submits it for review instead; it closes when
-they approve. To a Claude seat that sent the packet to you, or to `@pm` when
-you're the PM it reaches (its lane PM, else the repo PM), and is still running,
+they approve. To a Claude seat that sent the packet to you, or to `@pm`,
+`@repo-pm` or a lane (as a work item) when you're the PM it reaches, and is still running,
 no `--allow-claude` is needed. Work you see only as a supervising PM needs it. A reply goes only to the sender: if it has ended, the reply waits, and
 the delivery line names any live session in its worktree for you to post to.
 Other reasons: `--reason denied|canceled|duplicate|superseded`.

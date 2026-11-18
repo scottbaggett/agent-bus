@@ -88,7 +88,7 @@ and `snapshot` gives each seat `avatar: {rows, color}` for viewers to draw.
 | `@here` | this repo and worktree |
 | `@repo` | this repo, every worktree |
 | `@checkout` | every seat in lane `checkout`, this repo |
-| `@pm` | the sender's lane PM, else the repo PM (refused if neither exists) |
+| `@pm` | the item's PM (see "The PM" under Messages and work items): a live lane PM, else the repo PM, never the sender; refused if there is none |
 | `@repo-pm` | the repo PM; refused from a seat whose lane has a live PM (it goes through `@pm`), allowed from that lane PM |
 | `@all` | every seat on the machine |
 
@@ -110,8 +110,10 @@ Under `claude=refuse`, `reply` needs no `--allow-claude` when the packet was
 sent to the replier (its seat, its scope, a role it holds or held when the
 packet was sent, or a broadcast it heard; a role's packet is never a broadcast
 to a lane of the same name, and a lane's packet never becomes a role's), or to
-`@pm` and the replier is the PM it reaches (the sender's lane PM, else the repo
-PM), and its sender is still live: that sender chose the bus. Supervising the
+`@pm` or `@repo-pm`, or it is a work item broadcast to a lane (not to a role of
+that name), and the replier is the item's PM, the one routing gives it (see
+"The PM" of an item under Messages and work items), and its sender is still
+live: that sender chose the bus. Supervising the
 packet as PM or lead doesn't count. Otherwise `reply` is refused like `post`
 unless it passes `--allow-claude`.
 
@@ -138,8 +140,9 @@ the sender reserves a 30-second hook deferral before connecting. A failed write
 releases it immediately. During that window, Claude prompt digests and Stop
 hooks skip the notified packet; explicit `read`/`read --peek` remain available
 and the packet stays unread. The deferral is shared across worktrees of the
-same host session, and with its subagents' child seats. If the notice is held, refused or lost and no read occurs,
-later hooks resume delivery after the window expires. See
+same host session, and with its subagents' child seats. If the notice is held,
+refused or lost and no read occurs, later hooks resume delivery after the
+window expires. See
 [Claude's socket documentation](https://code.claude.com/docs/en/cross-session-messaging#the-sessions-inbox-socket).
 
 ## Messages and work items
@@ -160,8 +163,9 @@ States `fyi` and `done` are messages. States `needs-review`, `blocked`,
   neither does gc.
 
 "The PM" of an item is the live PM of a lane it belongs to (the lane it was sent
-to, then its own lane, as `triage` groups it), else the repo PM. Only that PM owns
-it and is woken; the repo PM still sees a lane PM's items as context. A lane PM
+to, then its own lane: the lane it was last filed in with `agent-bus file`, else
+the one it was posted from, as `triage` groups it), else the repo PM. Only that
+PM owns it and is woken; the repo PM still sees a lane PM's items as context. A lane PM
 whose session has ended routes nothing, so its lane's work falls back to the repo
 PM; with no repo PM, it stays with that lane PM for when it comes back. For `@pm`
 and broadcasts the sender is skipped, so a lane PM's own `@pm` goes up to the repo
@@ -468,8 +472,9 @@ One host session that runs bus commands from two folders holds two seats.
   `done` by default). Gated work goes to its reviewer, as `resolve` does.
   It goes only to the packet's sender, never to a seat that took over the
   sender's worktree. To a Claude sender it needs no `--allow-claude` when the
-  packet was sent to you (or to `@pm`, and you are the PM it reaches), not only
-  supervised by you, and the sender is still live.
+  packet was sent to you (or to `@pm` or `@repo-pm`, or it is a work item
+  broadcast to a lane, and you are its PM), not only supervised by you, and the
+  sender is still live.
   `--keep-open` answers without closing. `resolve` defaults to `done` too.
 - `ask --to <seat> -m …` posts a `question` and waits (default 600 s) for a
   reply or a close; exit 2 on timeout, with the question left open.

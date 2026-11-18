@@ -664,6 +664,31 @@ assert_has "the lane PM replies to its lane's @pm question without the flag" "cl
 qid=$(rs r3 wr3 post --allow-claude --to @pm --state question -m '# question for the repo PM' | idof)
 out=$(rs rp wrp reply "$qid" -m 'the repo PM answers' 2>&1 || true)
 assert_has "the repo PM replies to an unlaned @pm question without the flag" "closed $qid (done)" "$out"
+# reply and routing agree on the PM (pm_owner). A lane PM's own @pm goes up to
+# the repo PM, so the repo PM is the one it addressed.
+rs lp wlp lane lx >/dev/null; LP=$(rs lp wlp whoami | awk '/^seat/{print $2}')
+qid=$(rs lp wlp post --allow-claude --to @pm --state question -m '# the lane PM asks up' | idof)
+out=$(rs rp wrp reply "$qid" -m 'the repo PM answers its lane PM' 2>&1 || true)
+assert_has "the repo PM replies to a lane PM's own @pm question without the flag" "closed $qid (done)" "$out"
+# @repo-pm is for the repo PM only.
+qid=$(rs r3 wr3 post --allow-claude --to @repo-pm --state question -m '# for the repo PM by name' | idof)
+out=$(rs lp wlp reply "$qid" --keep-open -m 'the lane PM answers' 2>&1 || true)
+assert_has "a lane PM can't reply to an @repo-pm question without the flag" "is a Claude session" "$out"
+out=$(rs rp wrp reply "$qid" -m 'the repo PM answers by name' 2>&1 || true)
+assert_has "the repo PM replies to an @repo-pm question without the flag" "closed $qid (done)" "$out"
+# Filing an item in a lane gives it that lane's PM, for reply as for routing.
+qid=$(rs r3 wr3 post --allow-claude --to @pm --state question -m '# filed in lane lx later' | idof)
+rs rp wrp file "$qid" lx >/dev/null
+out=$(rs rp wrp reply "$qid" --keep-open -m 'the repo PM answers a filed question' 2>&1 || true)
+assert_has "once filed in a lane, the repo PM needs the flag to reply to its @pm question" "is a Claude session" "$out"
+out=$(rs lp wlp reply "$qid" -m 'the lane PM answers a filed question' 2>&1 || true)
+assert_has "the lane PM replies to an @pm question filed in its lane without the flag" "closed $qid (done)" "$out"
+# A gone lane PM routes nothing, so its lane's @pm reaches the live repo PM.
+f="$BUS_HOME/seats/$(printf '%s' "$LP" | tr '/' '_').json"; jq '.epoch = 0' "$f" >"$f.t" && mv "$f.t" "$f"
+qid=$(rs lw wlw post --allow-claude --to @pm --state question -m '# lane question, lane PM gone' | idof)
+out=$(rs rp wrp reply "$qid" -m 'the repo PM answers for a gone lane PM' 2>&1 || true)
+assert_has "the repo PM replies to a lane's @pm question while its lane PM is gone without the flag" "closed $qid (done)" "$out"
+rs lp wlp lane --clear >/dev/null
 rs lp wlp role pm --lane lx --clear >/dev/null; rs rp wrp role pm --clear >/dev/null
 # A role and a lane can share a name. A packet to the role is for its holder,
 # not a broadcast to the lane.
@@ -724,6 +749,78 @@ out=$(rs lz wlz reply "$bid" -m 'the lane PM answers' 2>&1 || true)
 assert_has "the lane PM still replies to its lane's packet without the flag after the role is taken" "closed $bid (done)" "$out"
 rs lh wlh role lz --clear >/dev/null
 rs lz wlz role pm --lane lz --clear >/dev/null; rs lq wlq lane --clear >/dev/null
+# A work item broadcast to a lane is owned by its PM (pm_owner), and that PM
+# replies without the flag, as for @pm. Nobody else gains it.
+rs pr wpr role pm >/dev/null
+rs bp wbp role pm --lane lb >/dev/null; rs bp wbp lane lb >/dev/null; rs bw wbw lane lb >/dev/null
+rs op wop role pm --lane lo >/dev/null; rs op wop lane lo >/dev/null; rs ow wow lane lo >/dev/null
+rs nw wnw lane ln >/dev/null
+BP=$(rs bp wbp whoami | awk '/^seat/{print $2}')
+rs pr wpr --as-child helper who >/dev/null
+qid=$(rs bw wbw post --allow-claude --to @lb --state question -m '# lane lb question, its PM live' | idof)
+out=$(rs pr wpr reply "$qid" --keep-open -m 'the repo PM answers' 2>&1 || true)
+assert_has "while the lane PM is live, the repo PM needs the flag to reply to a lane's work item" "is a Claude session" "$out"
+out=$(rs bp wbp reply "$qid" -m 'the lane PM answers' 2>&1 || true)
+assert_has "the live lane PM replies to its lane's work item without the flag" "closed $qid (done)" "$out"
+f="$BUS_HOME/seats/$(printf '%s' "$BP" | tr '/' '_').json"; jq '.epoch = 0' "$f" >"$f.t" && mv "$f.t" "$f"
+qid=$(rs bw wbw post --allow-claude --to @lb --state question -m '# lane lb question, its PM gone' | idof)
+assert_has "with the lane PM gone, routing gives the lane's work item to the repo PM" "$qid" "$(rs pr wpr status)"
+out=$(rs op wop reply "$qid" --keep-open -m 'another lane PM answers' 2>&1 || true)
+assert_has "another lane's PM needs the flag to reply to a lane's work item" "is a Claude session" "$out"
+out=$(rs ow wow reply "$qid" --keep-open -m 'a worker in another lane answers' 2>&1 || true)
+assert_has "a worker outside the lane needs the flag to reply to a lane's work item" "is a Claude session" "$out"
+out=$(rs pr wpr --as-child helper reply "$qid" --keep-open -m 'the PM child answers' 2>&1 || true)
+assert_has "the repo PM's child seat needs the flag to reply to a lane's work item" "is a Claude session" "$out"
+assert_eq "and none of them posted" "" "$(jq -r --arg id "$qid" 'select(.kind == "msg" and .re == $id) | .id' "$BUS_HOME/ledger.jsonl")"
+out=$(rs pr wpr reply "$qid" -m 'the repo PM answers for a gone lane PM' 2>&1 || true)
+assert_has "the repo PM replies to a lane's work item while its lane PM is gone without the flag" "closed $qid (done)" "$out"
+fid=$(rs bw wbw post --allow-claude --to @lb -m '# lane lb fyi, its PM gone' | idof)
+out=$(rs pr wpr reply "$fid" -m 'the repo PM answers an fyi' 2>&1 || true)
+assert_has "the repo PM still needs the flag to reply to a lane broadcast that isn't work" "is a Claude session" "$out"
+qid=$(rs nw wnw post --allow-claude --to @ln --state question -m '# lane ln question, no lane PM' | idof)
+out=$(rs pr wpr reply "$qid" -m 'the repo PM answers a lane with no PM' 2>&1 || true)
+assert_has "the repo PM replies to a work item for a lane with no PM without the flag" "closed $qid (done)" "$out"
+rs rg wrg role rg >/dev/null
+qid=$(rs nw wnw post --allow-claude --to @rg --state question -m '# for the rg role holder' | idof)
+out=$(rs pr wpr reply "$qid" --keep-open -m 'the repo PM answers a role packet' 2>&1 || true)
+assert_has "the repo PM needs the flag to reply to a role's work item" "is a Claude session" "$out"
+qid=$(rs nw wnw post --allow-claude --to @here --state question -m '# here question' | idof)
+out=$(rs pr wpr reply "$qid" --keep-open -m 'the repo PM answers an @here question' 2>&1 || true)
+assert_has "the repo PM needs the flag to reply to an @here work item" "is a Claude session" "$out"
+# The rest of lane_work's guards. Each of these is a work item the repo PM
+# owns as routing has it (lane ln has no PM), yet isn't lane work. @lead is
+# the one a PM can't reach any other way.
+qid=$(rs nw wnw post --allow-claude --to @lead --state question -m '# @lead question' | idof)
+out=$(rs pr wpr reply "$qid" --keep-open -m 'the repo PM answers an @lead question' 2>&1 || true)
+assert_has "the repo PM needs the flag to reply to an @lead work item" "is a Claude session" "$out"
+assert_eq "and nothing is posted for @lead" "" "$(jq -r --arg id "$qid" 'select(.kind == "msg" and .re == $id) | .id' "$BUS_HOME/ledger.jsonl")"
+# @all and @repo reach every seat in the repo, the PM included, so it replies
+# as a hearer. The lane_work guard on them is redundant, and this pins the
+# outcome both ways.
+for t in @all @repo; do
+  qid=$(rs nw wnw post --allow-claude --to "$t" --state question -m "# $t question" | idof)
+  out=$(rs pr wpr reply "$qid" -m "the repo PM answers an $t question" 2>&1 || true)
+  assert_has "the repo PM replies to an $t work item it heard without the flag" "closed $qid (done)" "$out"
+done
+# A probe isn't work: stamp one by hand, as post never sets the field.
+qid=$(rs nw wnw post --allow-claude --to @ln --state question -m '# lane ln probe' | idof)
+f="$BUS_HOME/ledger.jsonl"; jq -c --arg id "$qid" 'if .id == $id then .probe = true else . end' "$f" >"$f.t" && mv "$f.t" "$f"
+out=$(rs pr wpr reply "$qid" --keep-open -m 'the repo PM answers a probe' 2>&1 || true)
+assert_has "the repo PM needs the flag to reply to a lane probe" "is a Claude session" "$out"
+# A packet from before to_role: the role map decides. A role named like the
+# lane holds it, so the packet is the role's; without one it is lane work.
+qid=$(rs nw wnw post --allow-claude --to @rg --state question -m '# old packet for the rg role holder' | idof)
+f="$BUS_HOME/ledger.jsonl"; jq -c --arg id "$qid" 'if .id == $id then del(.to_role) else . end' "$f" >"$f.t" && mv "$f.t" "$f"
+out=$(rs pr wpr reply "$qid" --keep-open -m 'the repo PM answers an old role packet' 2>&1 || true)
+assert_has "the repo PM needs the flag to reply to an old packet for a held role" "is a Claude session" "$out"
+rs rg wrg role rg --clear >/dev/null
+qid=$(rs nw wnw post --allow-claude --to @ln --state question -m '# old packet for lane ln' | idof)
+f="$BUS_HOME/ledger.jsonl"; jq -c --arg id "$qid" 'if .id == $id then del(.to_role) else . end' "$f" >"$f.t" && mv "$f.t" "$f"
+out=$(rs pr wpr reply "$qid" -m 'the repo PM answers an old lane packet' 2>&1 || true)
+assert_has "the repo PM replies to an old work item for a lane with no such role without the flag" "closed $qid (done)" "$out"
+rs rg wrg role rg --clear >/dev/null
+rs bp wbp role pm --lane lb --clear >/dev/null; rs op wop role pm --lane lo --clear >/dev/null; rs pr wpr role pm --clear >/dev/null
+for s in bp bw op ow nw; do rs $s w$s lane --clear >/dev/null; done
 qid=$(rs r1 wr1 post --allow-claude --to "$R2" --state question -m '# asked by a session that ends' | idof)
 f="$BUS_HOME/seats/$(printf '%s' "$R1" | tr '/' '_').json"; jq '.epoch = 0' "$f" >"$f.t" && mv "$f.t" "$f"
 rs r1b wr1 who >/dev/null; R1B=$(rs r1b wr1 whoami | awk '/^seat/{print $2}')
@@ -1794,6 +1891,23 @@ r2post back w1 --to @pm --state question -m '# idle lane PM wakes' >/dev/null
 assert_eq "a lane PM that was idle and is back is woken by its worker's @pm" "block" \
   "$(r2 back lpm stop-hook </dev/null | jq -r '.decision // "none"')"
 assert_eq "and the repo PM is not woken for it" "{}" "$(r2 back rpm stop-hook </dev/null)"
+
+# A lane PM's subagent works in its parent's lane: what it sends to the lane or
+# to @pm is the lane PM's, never the repo PM's. The lane comes from `lane`, not the branch.
+RPM=$(r2addr kidpm rpm); LPM=$(r2addr kidpm lpm)
+r2 kidpm rpm role pm >/dev/null; r2 kidpm lpm lane alpha >/dev/null; r2 kidpm lpm role pm --lane alpha >/dev/null
+for s in rpm lpm; do r2 kidpm "$s" read >/dev/null; done
+kidpost() { AGENT_BUS_NO_PUSH=0 AGENT_BUS_NO_PEERS=1 r2 kidpm lpm --as-child k1 post --allow-claude "$@"; }
+for to in @alpha @pm; do
+  out=$(kidpost --to "$to" --state question -m "# lane PM's subagent to $to" 2>&1 || true)
+  assert_has "a lane PM's subagent's question to $to goes to the lane PM" "delivery: $LPM" "$out"
+  assert_lacks "a lane PM's subagent's question to $to skips the repo PM" "delivery: $RPM" "$out"
+  assert_eq "the lane PM owns a lane PM's subagent's question to $to" "$LPM" \
+    "$(AGENT_BUS_HOME="$R2" "$BIN" snapshot | jq -r --arg s "lane PM's subagent to $to" '.open[] | select(.subject == $s) | .owner')"
+done
+assert_eq "the repo PM is not woken by a lane PM's subagent" "{}" "$(r2 kidpm rpm stop-hook </dev/null)"
+assert_eq "the lane PM is woken by its subagent's questions" "block" \
+  "$(r2 kidpm lpm stop-hook </dev/null | jq -r '.decision // "none"')"
 
 # A no-lane seat's @pm counts the ticket in its subject before it is refused.
 TPM=$(r2addr subj tpm); r2 subj tpm lane tix-42 >/dev/null; r2 subj tpm role pm --lane tix-42 >/dev/null

@@ -530,7 +530,7 @@ def lane_of: (.lane // "") as $l
 # A PM's own directly addressed item has no PM. @repo-pm always means the repo
 # PM. $lp holds the live lane PMs (LIVE_LANE_PMS), $reg every registered one
 # (LANE_PMS), both lane -> address; $rpm is the repo PM's address, or "".
-# Readers that have the ledger set .lane to item_lane first, so `file` rows
+# Readers that have the ledger call with_item_lane first, so `file` rows
 # count. Needs JQ_LANE.
 JQ_PM='
 def lanes_of: [((.to // "") | select(startswith("@")) | .[1:]), lane_of] | map(select(. != ""));
@@ -550,6 +550,9 @@ JQ_CLOSE='
 def sup: .state as $s | ["needs-review","blocked","handoff","question"] | index($s) != null;
 def file_map($L): reduce ($L[] | select(.kind == "file")) as $f ({}; .[$f.msg] = $f.lane);
 def item_lane($fm): $fm[.id] // lane_of;
+# What every routing reader does before pm_owner, lanes_of or addressed: give
+# the item its lane, so a `file` row counts.
+def with_item_lane($fm): . + {lane: item_lane($fm)};
 # Per "<repo_id>:<lane>": latest state, title and reason, and every sweep as
 # {before, pos}. A sweep closes items of that lane that sit earlier in the ledger
 # than its own row and are no newer than `before` (done: its own time). Ledger
@@ -616,9 +619,16 @@ def gets($me):
   owns($me) or heard($me)
   or (is_child($me) | not) and same_repo($me) and is_pm($me)
      and (.to == "@pm" or (sup and ((.probe // false) | not)));
-# The one PM a packet sent to @pm is for: the sender'"'"'s lane PM, else the repo PM.
-def pm_resolved: ($lanepms[.lane // ""] // "") as $l | if $l != "" then $l else $pm end;
-# Sent to this seat or heard by it, or an @pm packet this seat is that PM for.
+# A work item broadcast to a lane: not to a role of that name (to_role, else
+# the role map for older packets), nor to a broadcast scope.
+def lane_work:
+  (.to // "") as $t
+  | sup and ((.probe // false) | not) and ($t | startswith("@"))
+    and (["@here","@repo","@all","@lead","@pm","@repo-pm"] | index($t)) == null
+    and (if has("to_role") then .to_role == "" else role_holder == "" end);
+# Sent to this seat or heard by it, or an @pm or @repo-pm packet or a work
+# item sent to a lane whose PM (pm_owner, as routing has it; call
+# with_item_lane first) is this seat.
 # Leaves out what it only supervises as PM or lead. A role and a lane can share
 # a name, so post stamps every @ packet with to_role: the seat holding that role
 # then, or "" for a lane or broadcast. A role'"'"'s packet is for that seat or the
@@ -630,7 +640,8 @@ def addressed($me):
      or (.to_role != "" and direct($me))
      or (.to_role == "" and heard($me))
    else direct($me) or (role_holder == "" and heard($me)) end)
-  or (.to == "@pm" and same_repo($me) and pm_resolved != "" and pm_resolved == $me.addr);
+  or ((.to == "@pm" or .to == "@repo-pm" or lane_work) and same_repo($me)
+      and pm_owner($livepms; $pm; $lanepms) == $me.addr);
 def from_pm($me): .from == $pm or ($me.lane != "" and .from == ($lanepms[$me.lane] // ""));
 '
 
@@ -705,7 +716,7 @@ select_packets() {
     | ($read | map({(.): true}) | add // {}) as $r
     | file_map($L) as $fm
     | $L[] | select(.kind == "msg" and (.epoch // 0) >= $cut)
-    | . + {lane: item_lane($fm)}
+    | with_item_lane($fm)
     | ((.to // "") as $t | $sib | index($t) != null) as $sibling
     | ((.to // "") as $t | $kids | index($t) != null) as $kid
     | (owns($me) or $sibling or $kid) as $own
@@ -737,7 +748,7 @@ open_items() {
     | [$L[] | select(.kind == "msg" and sup and same_repo($me) and ($c[.id] | not)
                      and ((.probe // false) | not))
       | .id as $id
-      | . + {lane: item_lane($fm)}
+      | with_item_lane($fm)
       | select($lane == "" or (lanes_of | index($lane)))
       | (if ((.to // "") | startswith("@")) then
            (pm_owner($livepms; $pm; $lanepms) | if . == "" then "(no PM)" else . end)
@@ -1843,7 +1854,7 @@ check_closable() {
   local v
   v=$(lq '
     closed($L) as $c | file_map($L) as $fm
-    | ([$L[] | select(.kind == "msg" and .id == $id) | . + {lane: item_lane($fm)}] | first) as $m
+    | ([$L[] | select(.kind == "msg" and .id == $id) | with_item_lane($fm)] | first) as $m
     | if $m == null then "missing" elif $c[$id] then "closed"
       elif is_lead($me) or ($m | authored($me) or gets($me) or (same_repo($me) and pm_for($me))) then "ok"
       else "no" end' --arg id "$1")
@@ -2591,11 +2602,12 @@ cmd_send() {
 }
 
 # Whether a reply to packet $1 may skip the Claude-to-Claude refusal: the
-# sender addressed the replier, directly or as the PM its @pm resolves to (not a
-# PM or lead that only supervises it), and is still there to read the answer.
-# That sender chose the bus.
+# sender addressed the replier, directly or as the PM its @pm or @repo-pm
+# reaches (not a PM or lead that only supervises it), and is still there to
+# read the answer. That sender chose the bus.
 reply_implies_bus() { # id from
-  [ "$(lq 'first($L[] | select(.kind == "msg" and .id == $id)) | addressed($me)' --arg id "$1")" = true ] || return 1
+  [ "$(lq 'file_map($L) as $fm | first($L[] | select(.kind == "msg" and .id == $id))
+           | with_item_lane($fm) | addressed($me)' --arg id "$1")" = true ] || return 1
   seat_live "$2" || seat_on_peer "$2"
 }
 
@@ -2986,7 +2998,7 @@ snapshot_json() {
     | ($seats | map({(.addr): .}) | add // {}) as $by
     | (reduce ($L[] | select(.kind == "msg")) as $m ({}; .[$m.id] = ($m.subject // ""))) as $subj
     | [$L[] | select(.kind == "msg" and sup and ($c[.id] | not) and ((.probe // false) | not))
-        | . + {lane: item_lane($fm)}
+        | with_item_lane($fm)
         | (.repo_id // "") as $rid | ($lanepms[$rid] // {}) as $lp | .id as $id
         | (if .to == "@lead" or .assign == "@lead" then "lead"
            elif ((.to // "") | startswith("@")) then
@@ -3582,7 +3594,7 @@ cmd_status() {
   cmd_avatar; echo
   orient_seat
   mine=$(lq 'closed($L) as $c | file_map($L) as $fm
-    | [$L[] | select(.kind == "msg" and sup and ($c[.id] | not)) | . + {lane: item_lane($fm)}
+    | [$L[] | select(.kind == "msg" and sup and ($c[.id] | not)) | with_item_lane($fm)
        | select(owns($me) and (authored($me) | not))]
     | sort_by(-(.epoch // 0)) | .[] | "\(.id)\t\(.state)\t\(.from)\t\(.subject // "")"')
   sent=$(lq 'closed($L) as $c
@@ -3660,9 +3672,10 @@ agent-bus — handoff bus for coding agents sharing repos and worktrees.
                               reply waits for it and the delivery line names
                               any live session in its worktree. To a Claude
                               sender it needs no --allow-claude when the
-                              packet was sent to you, or to @pm and you are
-                              the PM it reaches (not only supervised by you
-                              as PM), and the sender is still live
+                              packet was sent to you, or to @pm or @repo-pm
+                              or as work to a lane, and you are its PM (not
+                              only supervised by you as PM), and the sender
+                              is still live
   resolve <id>... [--reason r]  close items (done by default; denied|canceled|
                               duplicate|superseded)
   triage [--lane <name>] [--by owner|lane]

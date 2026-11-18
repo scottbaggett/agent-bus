@@ -3177,17 +3177,18 @@ watch_repo() {
   [ "$rmode" = off ] || watch_retire "$rmode"
 
   # 3. Lanes whose PM is not live. `agent-bus lane park <lane>` silences one
-  # until a PM takes the role again (the role file is newer than the park).
+  # until the lane is reopened, or a PM has been live in it since the park.
+  # (Not the role file's time: an idle PM's hooks rewrite that file.)
   local l pmaddr parks
   parks=$(lq 'lane_rows($L) | with_entries(select(.key | startswith($me.repo_id + ":")) | .key |= ltrimstr($me.repo_id + ":"))
               | map_values({state, at: (.at // 0)})')
   while IFS=$'\t' read -r l pmaddr; do
     [ -n "$l" ] || continue
     if seat_live "$pmaddr"; then
-      watch_update 'del(.dark[$l])' --arg l "$l"; continue
+      watch_update 'del(.dark[$l]) | .pm_live[$l] = $now' --arg l "$l" --argjson now "$now"; continue
     fi
     if [ "$(jq -r --arg l "$l" '.[$l].state // ""' <<<"$parks")" = parked ] \
-       && (( $(jq -r --arg l "$l" '.[$l].at // 0' <<<"$parks") >= $(stat -c %Y "$(lane_pm_file "$l")" 2>/dev/null || stat -f %m "$(lane_pm_file "$l")" 2>/dev/null || echo 0) )); then
+       && (( $(jq -r --arg l "$l" '.[$l].at // 0' <<<"$parks") >= $(jq -r --arg l "$l" '.pm_live[$l] // 0' <<<"$st") )); then
       watch_update 'del(.dark[$l])' --arg l "$l"; continue
     fi
     [ -n "$(jq -r --arg l "$l" '.dark[$l] // empty' <<<"$st")" ] || watch_update '.dark[$l] = $now' --arg l "$l" --argjson now "$now"

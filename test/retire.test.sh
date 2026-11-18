@@ -117,5 +117,35 @@ out=$(R env AGENT_BUS_POLICY_SUPERVISE=on AGENT_BUS_WATCH_SINCE=1 AGENT_BUS_POLI
 assert_eq "a retired seat is not retired again" "" "$(cat "$T/hc.log")"
 assert_lacks "nor is the unsaved one reported twice" "holds unsaved" "$(R env AGENT_BUS_POLICY_SUPERVISE=on AGENT_BUS_WATCH_SINCE=1 AGENT_BUS_POLICY_RETIRE=on "$BIN" watch --here)"
 assert_has "retire takes off, dry or on" "not a valid retire" "$(cd "$T/repo" && "$BIN" init --set retire=maybe 2>&1 || true)"
+# --- work for a retired seat: never resumed out of sight; its sender hears ---
+SON=(env AGENT_BUS_POLICY_SUPERVISE=on AGENT_BUS_WATCH_SINCE=1 AGENT_BUS_NO_PUSH=0)
+B1=$(addr b1 w1)
+nw=$(pm post --to "$B1" --state handoff -m "# new work for a retired seat" | idof)
+jq -c --arg id "$nw" 'if .id == $id then .epoch -= 700 else . end' "$L" >"$L.t" && mv "$L.t" "$L"
+out=$(R "${SON[@]}" "$BIN" watch --here)
+assert_has "work for a retired seat is not delivered to it" "wake $B1 for $nw: retired" "$out"
+assert_has "its sender hears how to resume it" "resume it to hand it this work: cd $T/w1 && opencode -s b1" \
+  "$(cat "$AGENT_BUS_HOME/msg/$(jq -r --arg id "$nw" 'select(.kind == "msg" and .re == $id) | .id' "$L" | head -1).md" | tr 'R' 'r')"
+f="$AGENT_BUS_HOME/seats/$(printf '%s' "$B1" | tr '/' '_').json"
+jq -c '.activity = "working"' "$f" >"$f.t" && mv "$f.t" "$f"
+nw2=$(pm post --to "$B1" --state question -m "# after a resume" | idof)
+jq -c --arg id "$nw2" 'if .id == $id then .epoch -= 700 else . end' "$L" >"$L.t" && mv "$L.t" "$L"
+out=$(R "${SON[@]}" "$BIN" watch --here)
+assert_lacks "once it works again it is no longer retired" "for $nw2: retired" "$out"
+
+# --- the resume wake never holds a pass ---
+printf '#!/bin/sh\necho "$*" >>"%s/oc.log"\nsleep 30\n' "$T" >"$T/bin/opencode"; chmod +x "$T/bin/opencode"
+jq -c '.terminals |= map(select(.address != "t8"))' "$T/hc.json" >"$T/hc.t" && mv "$T/hc.t" "$T/hc.json"
+B8=$(addr b8 w8)
+nw3=$(pm post --to "$B8" --state question -m "# resume me" | idof)
+jq -c --arg id "$nw3" 'if .id == $id then .epoch -= 700 else . end' "$L" >"$L.t" && mv "$L.t" "$L"
+t0=$(date +%s)
+out=$(R "${SON[@]}" AGENT_BUS_OPENCODE_BIN="$T/bin/opencode" "$BIN" watch --here)
+t1=$(date +%s)
+assert_has "an OpenCode seat with no terminal is resumed" "wake $B8 for $nw3: resumed" "$out"
+assert_eq "and the pass does not wait for the resumed turn" yes "$( (( t1 - t0 < 15 )) && echo yes || echo "no ($((t1 - t0))s)")"
+sleep 1; assert_has "the resumed run got the packet" "$nw3" "$(cat "$T/oc.log" 2>/dev/null)"
+pkill -f "$T/bin/opencode" 2>/dev/null || true
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 ((fail == 0))

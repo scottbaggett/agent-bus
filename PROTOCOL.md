@@ -528,7 +528,10 @@ own channel, exactly as `post` does.
   left running and named in the PM's line; `salt-local` and
   `watch.keep_stacks` are never touched. Its PM gets one line with how to
   resume it (`opencode -s <session>`). The session,
-  the seat and the worktree are kept. A finished builder with uncommitted or
+  the seat and the worktree are kept. Work sent to a retired seat is never
+  delivered by resuming it out of sight: its sender hears once that it was
+  retired and how to resume it (or to send the work to a live seat). It stops
+  counting as retired once it works again. A finished builder with uncommitted or
   unpushed work is never retired; its PM hears once instead.
 - **Alerts close themselves** (`superseded`) once what they report is read,
   closed, active again or has a PM.

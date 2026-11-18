@@ -24,8 +24,273 @@ set -euo pipefail
 
 VERSION="0.6.0"
 
-BUS="${AGENT_BUS_HOME:-$HOME/.agents/bus}"
+# Empty when neither is set: the hook wrapper below must still run and say so.
+BUS="${AGENT_BUS_HOME:-${HOME:+$HOME/.agents/bus}}"
 LEDGER="$BUS/ledger.jsonl"
+
+# ------------------------------------------------------------ hook failures
+# (Placed before anything that can fail at load, such as the jq check: the hook
+# wrapper has to run, and report, when the rest of the script cannot start.)
+now_epoch() { date -u +%s; }
+in_list() { case " $2 " in *" $1 "*) return 0 ;; esac; return 1; }
+#
+# `agent-bus hook <digest|stop-hook|offboard>` is the one command a host's hook
+# line runs. It never fails the session (exit 0; the Stop hook still prints
+# exactly one JSON object), and it never swallows a failure: one line per
+# failure goes to $BUS/hook-failures.log (tab separated: epoch, time, hook, exit
+# code, error, session) and $BUS/state/hook-health.json is rewritten for a
+# status line. The error is never a value: the bus's own first stderr line with
+# every quoted string replaced, or "stderr withheld" for anything else (jq
+# quotes the data it choked on, which can be a packet). The bus home is the one
+# place a hooked session already writes (ledger, seats), so a sandbox that can
+# run the hook can log it. The failure path uses no jq: a missing jq is one of
+# the failures it must report.
+#
+# "Failing now" is kept per hook and per session, as a marker file
+# state/hooks-failing/<hook>.<session> holding the failure's epoch. Only that
+# session's next success removes it, so a healthy session never hides another's
+# failure; a marker older than the window is dropped. A run that never ends
+# (the host cancels it at its timeout) leaves state/hooks-running/<hook>.<session>
+# holding its pid and start time; every hook run sweeps stamps whose pid is gone
+# (up to 20, older than 60s) and logs each as a hang.
+HOOK_LOG="$BUS/hook-failures.log"
+HOOK_HEALTH="$BUS/state/hook-health.json"
+HOOK_FAIL_WINDOW="${AGENT_BUS_HOOK_FAIL_WINDOW:-86400}"
+[[ "$HOOK_FAIL_WINDOW" =~ ^[0-9]{1,9}$ ]] || HOOK_FAIL_WINDOW=86400
+HOOKS='digest stop-hook offboard'
+HOOK_LOCKED=0
+
+# One line of text safe for the log and for JSON: control characters gone, tabs
+# to spaces, quotes and backslashes escaped when $2 is json.
+hook_clean() { # text [json]
+  local t; t=$(printf '%s' "$1" | head -n 1 | LC_ALL=C tr '\t\000-\010\013-\037\177' ' ' | cut -c1-200)
+  if [ "${2:-}" = json ]; then printf '%s' "$t" | sed 's/\\/\\\\/g; s/"/\\"/g'; else printf '%s' "$t"; fi
+}
+
+# The first stderr line, reduced to what may be logged. The bus's own errors
+# (agent-bus: …) keep their wording but lose every quoted value, and a quote
+# left open after a space or = drops the rest of the line (an apostrophe in a word is not a quote); anything else is withheld whole.
+hook_stderr_safe() { # first stderr line
+  local l
+  l=$(printf '%s' "$1" | head -n 1 | LC_ALL=C tr '\t\000-\010\013-\037\177' ' ')
+  case "$l" in
+    '') printf '(no stderr)' ;;
+    'agent-bus:'*) printf '%s' "$l" | sed -E "s/\"[^\"]*\"/<str>/g; s/([ =])'[^']*'/\\1<str>/g; s/([ =])[\"'].*\$/\\1<str>/" | cut -c1-200 ;;
+    *) printf 'stderr withheld' ;;
+  esac
+}
+
+# The session this hook runs for: what names its seat, cut to a file-name-safe token.
+hook_session() {
+  local s="${AGENT_BUS_SESSION:-${CLAUDE_CODE_SESSION_ID:-local}}"
+  s=$(printf '%s' "$s" | LC_ALL=C tr -c 'A-Za-z0-9_-' '_' | cut -c1-48)
+  printf '%s' "${s:-local}"
+}
+
+# One writer at a time for markers and the health file, so the file always
+# matches the markers. Best effort (about 1s): a hook must not wait on a lock,
+# so it goes ahead without one. A lock older than a minute is a dead writer's.
+hook_lock() {
+  local d="$BUS/state/hook-health.lock" i
+  HOOK_LOCKED=0
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    if mkdir "$d" 2>/dev/null; then HOOK_LOCKED=1; return 0; fi
+    [ -z "$(find "$d" -maxdepth 0 -mmin +1 2>/dev/null)" ] || rmdir "$d" 2>/dev/null || :
+    sleep 0.1
+  done
+  return 0
+}
+hook_unlock() { ((HOOK_LOCKED)) && rmdir "$BUS/state/hook-health.lock" 2>/dev/null; HOOK_LOCKED=0; return 0; }
+
+# Failures inside the window: n, then the last one's epoch, hook, exit, error.
+hook_recent() { # prints: n<TAB>epoch<TAB>hook<TAB>exit<TAB>error
+  [ -f "$HOOK_LOG" ] || { printf '0\t0\t\t\t\n'; return 0; }
+  awk -F'\t' -v cut="$(( $(now_epoch) - HOOK_FAIL_WINDOW ))" \
+    '$1 + 0 >= cut { n++; t = $1; h = $3; c = $4; e = $5 } END { printf "%d\t%s\t%s\t%s\t%s\n", n, t, h, c, e }' "$HOOK_LOG"
+}
+
+# One stat for all the markers, not one or two forks each (a sweep of 20 hangs
+# rewrites the file 20 times). GNU or BSD stat is found once per process. A marker
+# that goes between the glob and the stat just drops out of the signature.
+HOOK_STAT_GNU=''
+hook_markers_sig() { # sets HOOK_SIG: each marker's path and mtime (not printed: a subshell would lose the stat probe)
+  HOOK_SIG=''
+  set -- "$BUS"/state/hooks-failing/*
+  [ -e "$1" ] || return 0
+  local gnu=$HOOK_STAT_GNU
+  if [ -z "$gnu" ]; then
+    # Probe $BUS, which always exists, never a marker. A probe that fails both ways
+    # is not cached: this call uses BSD, the next one probes again.
+    if stat -c %Y "$BUS" >/dev/null 2>&1; then HOOK_STAT_GNU=1; gnu=1
+    elif stat -f %m "$BUS" >/dev/null 2>&1; then HOOK_STAT_GNU=0; gnu=0
+    else gnu=0; fi
+  fi
+  if ((gnu)); then HOOK_SIG=$(stat -c '%n %Y' "$@" 2>/dev/null) || :; else HOOK_SIG=$(stat -f '%N %m' "$@" 2>/dev/null) || :; fi
+  return 0
+}
+# Rewrite the one-line health file (the lock is best effort; hook_health_write
+# below makes the result right without it).
+# Without the lock a stale snapshot can land last, so rewrite until the markers match
+# those the write saw (silently capped at 8 rounds).
+hook_health_write() {
+  local sig sig2 i
+  for i in 1 2 3 4 5 6 7 8; do
+    hook_markers_sig; sig=$HOOK_SIG
+    hook_health_write_once || return 0
+    hook_markers_sig; sig2=$HOOK_SIG
+    [ "$sig" = "$sig2" ] && return 0
+  done
+  return 0
+}
+#   {"ok":bool,"failing":[hooks],"recent":n,...,"expires":epoch,"window":s}
+# ok is false while any session has a failure marker inside the window; recent
+# counts the window's log lines, recovered or not. The file is a snapshot:
+# expires is when its counts go stale (the last failure leaves the window), and
+# the next successful hook run rewrites it after that.
+hook_health_write_once() {
+  local n t h c e failing='' seen=' ' f ts cut tmp expires=0
+  cut=$(( $(now_epoch) - HOOK_FAIL_WINDOW ))
+  for f in "$BUS"/state/hooks-failing/*; do
+    [ -e "$f" ] || continue
+    ts=$(head -n 1 "$f"); [[ "$ts" =~ ^[0-9]+$ ]] || ts=0
+    if ((ts < cut)); then rm -f "$f"; continue; fi
+    h=$(basename "$f"); h=${h%%.*}
+    in_list "$h" "$seen" && continue
+    seen="$seen$h "
+    failing="$failing${failing:+,}\"$(hook_clean "$h" json)\""
+  done
+  IFS=$'\t' read -r n t h c e <<<"$(hook_recent)"
+  [ "${n:-0}" -eq 0 ] || expires=$(( t + HOOK_FAIL_WINDOW ))
+  tmp="$HOOK_HEALTH.tmp.$$"
+  if printf '{"ok":%s,"failing":[%s],"recent":%s,"last_ts":%s,"last_hook":"%s","last_exit":"%s","last_error":"%s","expires":%s,"window":%s}\n' \
+    "$([ -z "$failing" ] && echo true || echo false)" "$failing" "${n:-0}" "${t:-0}" \
+    "$(hook_clean "${h:-}" json)" "$(hook_clean "${c:-}" json)" "$(hook_clean "${e:-}" json)" "$expires" "$HOOK_FAIL_WINDOW" >"$tmp" \
+    && mv "$tmp" "$HOOK_HEALTH"; then return 0; fi
+  rm -f "$tmp"
+  printf 'agent-bus: hook: cannot write %s\n' "$HOOK_HEALTH" >&2
+  return 1
+}
+
+# Log one failure (error already reduced by hook_stderr_safe or written here).
+hook_log_failure() { # hook exit error session
+  local hook rc="$2" err="$3" ses="$4" line
+  hook=$(printf '%s' "$1" | LC_ALL=C tr -c 'A-Za-z0-9_-' '?' | cut -c1-32)
+  if [ -z "$BUS" ]; then
+    printf 'agent-bus: hook %s failed (exit %s: %s) and there is no bus home to log it in (set AGENT_BUS_HOME or HOME)\n' "$hook" "$rc" "$err" >&2
+    return 0
+  fi
+  line=$(printf '%s\t%s\t%s\t%s\t%s\t%s' "$(now_epoch)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$hook" "$rc" "$err" "$ses")
+  if { mkdir -p "$BUS/state/hooks-failing" && printf '%s\n' "$line" >>"$HOOK_LOG"; }; then
+    hook_lock
+    # An unknown hook name gets a marker too: no success can clear it, so it
+    # stays failing until it leaves the window, which is true of a bad hook line.
+    printf '%s\n' "$(now_epoch)" >"$BUS/state/hooks-failing/$hook.$ses"
+    # Keep the log bounded: past 1000 lines, keep the newest 500.
+    if [ "$(wc -l <"$HOOK_LOG")" -gt 1000 ]; then
+      tail -n 500 "$HOOK_LOG" >"$HOOK_LOG.tmp.$$" && mv "$HOOK_LOG.tmp.$$" "$HOOK_LOG" || rm -f "$HOOK_LOG.tmp.$$"
+    fi
+    hook_health_write
+    hook_unlock
+  else
+    printf 'agent-bus: hook %s failed (exit %s: %s) and %s is not writable\n' "$hook" "$rc" "$err" "$HOOK_LOG" >&2
+  fi
+}
+
+# A success: this session's failure marker goes, and a health file whose counts
+# went stale is rewritten.
+hook_succeeded() { # hook session
+  local m="$BUS/state/hooks-failing/$1.$2" exp=''
+  [ -n "$BUS" ] || return 0
+  [ ! -f "$HOOK_HEALTH" ] || exp=$(sed -n 's/.*"expires":\([0-9][0-9]*\).*/\1/p' "$HOOK_HEALTH")
+  if [ -e "$m" ] || { [[ "$exp" =~ ^[0-9]+$ ]] && ((exp > 0 && exp < $(now_epoch))); }; then
+    hook_lock; rm -f "$m"; hook_health_write; hook_unlock
+  fi
+}
+
+# Run stamps: written before the run, removed after it. One still there, with
+# its process gone, is a run the host killed.
+hook_stamp_start() { # hook session
+  local d="$BUS/state/hooks-running" f pid=''
+  [ -n "$BUS" ] || return 0
+  f="$d/$1.$2"
+  if [ -f "$f" ]; then
+    read -r pid _ <"$f" || pid=''
+    if ! [[ "$pid" =~ ^[0-9]+$ ]] || ! kill -0 "$pid" 2>/dev/null; then
+      hook_log_failure "$1" 124 "agent-bus: hook did not finish (killed, most likely by the host's timeout)" "$2"
+    fi
+  fi
+  { mkdir -p "$d" && printf '%s %s\n' "$$" "$(now_epoch)" >"$f"; } || printf 'agent-bus: hook: cannot write the run stamp %s\n' "$f" >&2
+}
+# Sweep: runs the host killed leave a stamp nobody will come back for (a hung
+# SessionEnd, a session's last Stop). Each run looks at up to HOOK_SWEEP_MAX
+# stamps, and logs as a hang, for its own hook and session, any whose process is
+# gone and that is older than HOOK_SWEEP_AGE seconds (a younger one may be a run
+# just starting). Claiming a stamp is a rename, so two sweepers log it once.
+HOOK_SWEEP_MAX=20
+HOOK_SWEEP_AGE=60
+hook_sweep() {
+  local d="$BUS/state/hooks-running" f n=0 pid ts base hook ses claim
+  [ -n "$BUS" ] && [ -d "$d" ] || return 0
+  for f in "$d"/*; do
+    [ -f "$f" ] || continue
+    case "$f" in *.sweep.*) continue ;; esac
+    ((n++ < HOOK_SWEEP_MAX)) || break
+    pid=''; ts=''
+    read -r pid ts <"$f" || :
+    [[ "$ts" =~ ^[0-9]+$ ]] && ((ts + HOOK_SWEEP_AGE <= $(now_epoch))) || continue
+    ! [[ "$pid" =~ ^[0-9]+$ ]] || ! kill -0 "$pid" 2>/dev/null || continue
+    base=$(basename "$f"); hook=${base%%.*}; ses=${base#*.}
+    claim="$f.sweep.$$"
+    mv "$f" "$claim" 2>/dev/null || continue
+    rm -f "$claim"
+    hook_log_failure "$hook" 124 "agent-bus: hook did not finish (killed, most likely by the host's timeout)" "$ses"
+  done
+  return 0
+}
+hook_stamp_end() { [ -z "$BUS" ] || rm -f "$BUS/state/hooks-running/$1.$2"; }
+
+cmd_hook() {
+  local sub="${1:-}" out='' rc=0 errf err='' ses json
+  shift || true
+  ses=$(hook_session)
+  if ! in_list "$sub" "$HOOKS"; then
+    hook_log_failure "$sub" 2 "agent-bus: unknown hook (use: $HOOKS)" "$ses"
+    return 0
+  fi
+  hook_sweep
+  hook_stamp_start "$sub" "$ses"
+  errf=$(mktemp "${TMPDIR:-/tmp}/agent-bus-hook.XXXXXX") || errf=''
+  out=$("${BASH_SOURCE[0]}" "$sub" "$@" 2>"${errf:-/dev/null}") && rc=0 || rc=$?
+  hook_stamp_end "$sub" "$ses"
+  if [ -n "$errf" ]; then err=$(hook_stderr_safe "$(head -n 1 "$errf")"); rm -f "$errf"
+  else err='(stderr not captured: no temp file)'; fi
+  # The Stop hook's output is read by the host as JSON: exactly one object.
+  if [ "$sub" = stop-hook ] && ((rc == 0)); then
+    if json=$(printf '%s' "$out" | jq -sce 'if length == 1 and (.[0] | type == "object") then .[0] else empty end' 2>/dev/null); then
+      out="$json"
+    else
+      rc=65; err="agent-bus: stop-hook did not print exactly one JSON object"
+    fi
+  fi
+  if ((rc != 0)); then
+    hook_log_failure "$sub" "$rc" "$err" "$ses"
+    [ "$sub" != stop-hook ] || printf '{}\n'
+    return 0
+  fi
+  # A digest with nothing to say injects nothing, not an empty line.
+  [ "$sub" = offboard ] || [ -z "$out" ] || printf '%s\n' "$out"
+  hook_succeeded "$sub" "$ses"
+  return 0
+}
+
+if [ "${1:-}" = hook ]; then
+  shift
+  # Every step in cmd_hook is guarded; `||` keeps `set -e` from ending it early.
+  cmd_hook "$@" || printf 'agent-bus: hook wrapper failed unexpectedly\n' >&2
+  exit 0
+fi
+
+if [ -z "$BUS" ]; then printf 'agent-bus: set AGENT_BUS_HOME or HOME: there is nowhere to keep the bus\n' >&2; exit 1; fi
 LOOKBACK_DAYS="${AGENT_BUS_LOOKBACK_DAYS:-3}"
 SEAT_TTL="${AGENT_BUS_SEAT_TTL:-7200}"
 CLAIM_TTL="${AGENT_BUS_CLAIM_TTL:-14400}"
@@ -106,7 +371,6 @@ for c in jq shasum xxd; do command -v "$c" >/dev/null 2>&1 || die "$c is require
 mkdir -p "$BUS/msg" "$BUS/state/roles" "$BUS/seats" "$BUS/claims" "$BUS/secrets"
 : >>"$LEDGER"
 
-now_epoch() { date -u +%s; }
 slugify() { printf '%s' "$1" | tr '/:@ ' '____'; }
 # A seat's file name. Only a child address has two slashes (worktree names
 # can't hold one); its "@" can't come out of slugify, so no other seat shares it.
@@ -116,7 +380,6 @@ seat_slug() { case "$1" in */*/*) printf '%s@%s' "$(slugify "${1%/*}")" "${1##*/
 sanitize() { LC_ALL=C tr -d '\000-\010\013\014\016-\037\177'; }
 # Ids become paths ($BUS/msg/<id>.md); nothing else may reach one.
 valid_id() { [[ "$1" =~ ^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$ ]]; }
-in_list() { case " $2 " in *" $1 "*) return 0 ;; esac; return 1; }
 
 age() {
   local s=$(( $(now_epoch) - $1 ))
@@ -3499,6 +3762,43 @@ maybe_gc() {
   cmd_gc >/dev/null 2>&1 || true
 }
 
+# UTC time of an epoch, to the minute (BSD date takes -r, GNU date -d).
+epoch_utc() { date -u -r "$1" +%Y-%m-%dT%H:%MZ 2>/dev/null || date -u -d "@$1" +%Y-%m-%dT%H:%MZ; }
+
+# Doctor's view of the hook log: what is failing now (a session whose last
+# failure has no later success of its own) apart from what failed and has
+# recovered inside the window. Returns 1 only for failing now: a recovered
+# failure is a warning, and it leaves the window by itself.
+hook_doctor() {
+  local now cut n=0 h s t c e k m ts nf=0 nr=0 failing='' recovered='' line
+  now=$(now_epoch); cut=$((now - HOOK_FAIL_WINDOW))
+  printf '\nhook failures (window %sh):\n' "$((HOOK_FAIL_WINDOW / 3600))"
+  if [ -f "$HOOK_LOG" ]; then
+    # Latest failure per hook and session: hook, session, epoch, exit, error, count.
+    while IFS=$'\t' read -r h s t c e k; do
+      [ -n "$h" ] || continue
+      m="$BUS/state/hooks-failing/$h.$s"; ts=''
+      [ ! -f "$m" ] || ts=$(head -n 1 "$m")
+      line=$(printf '%s (session %s): exit %s, %s, %s ago: %s' "$h" "${s:0:8}" "$c" "$(epoch_utc "$t")" "$(ago "$t" | sed 's/ ago//')" "$e")
+      if [[ "$ts" =~ ^[0-9]+$ ]] && ((ts >= cut)); then
+        nf=$((nf + 1))
+        failing="$failing    $line"$'\n'"      clears when this session's next $h succeeds, or at $(epoch_utc $((ts + HOOK_FAIL_WINDOW))) when it leaves the window"$'\n'
+      else
+        nr=$((nr + 1))
+        recovered="$recovered    $line"$'\n'"      succeeded since; leaves the window at $(epoch_utc $((t + HOOK_FAIL_WINDOW)))"$'\n'
+      fi
+    done < <(awk -F'\t' -v cut="$cut" '$1 + 0 >= cut { key = $3 SUBSEP $6; last[key] = $0; cnt[key]++ }
+      END { for (key in last) { split(last[key], f, "\t"); print f[3] "\t" f[6] "\t" f[1] "\t" f[4] "\t" f[5] "\t" cnt[key] } }' "$HOOK_LOG" | sort -t$'\t' -k3,3n)
+  fi
+  if ((nf == 0)); then printf '  failing now: none\n'; else printf '  failing now: %d\n%s' "$nf" "$failing" | sanitize; fi
+  if ((nr == 0)); then printf '  recovered within window: none\n'; else printf '  recovered within window: %d\n%s' "$nr" "$recovered" | sanitize; fi
+  ((nf + nr == 0)) || printf '  log: %s\n' "$HOOK_LOG"
+  if ((nf == 0 && nr > 0)); then
+    printf '  warning: %d hook failure(s) in the window have recovered; doctor exits 0 and they drop off by themselves\n' "$nr"
+  fi
+  ((nf == 0))
+}
+
 cmd_doctor() {
   cmd_whoami
   printf 'version  %s\n' "$VERSION"
@@ -3521,6 +3821,10 @@ cmd_doctor() {
   if jq -e '[.hooks // {} | .. | .command? // empty | select(contains("agent-bus") and contains("stop-hook"))] | length > 0' \
     "$cs" >/dev/null 2>&1; then printf '  claude    ok (hooks in %s)\n' "$cs"
   else printf '  claude    not installed — agent-bus hooks --claude\n'; fi
+  if jq -e '[.hooks // {} | .. | .command? // empty | select(contains("agent-bus") and (contains("stop-hook") or contains(" digest ")) and (contains(" hook ") | not))] | length > 0' \
+    "$cs" >/dev/null 2>&1; then
+    printf '  claude    warning: hook lines in %s swallow errors; re-run agent-bus hooks --claude\n' "$cs"
+  fi
   local op="${AGENT_BUS_OPENCODE_PLUGIN:-$HOME/.config/opencode/plugins/agent-bus/index.ts}"
   local src; src="$(self_root)/plugins/agent-bus/index.ts"
   if [ ! -f "$op" ]; then printf '  opencode  not installed — agent-bus hooks --opencode\n'
@@ -3571,6 +3875,7 @@ cmd_doctor() {
          elif .tool == "codex" then ", pull-only (agent-bus codex enable)"
          elif .tool == "grok" then ", webhook delivery\(if (.grok_secret_env // "") != "" then " (secret: $\(.grok_secret_env))" else "" end)"
          else "" end)"' | sanitize
+  hook_doctor || return 1
   return 0
 }
 
@@ -3848,7 +4153,14 @@ agent-bus — handoff bus for coding agents sharing repos and worktrees.
                               open work, a live feed; reply and close from it
   snapshot                    machine-wide JSON: seats (with pid and worktree path), open work, lanes,
                               attention, recent activity (read-only; for viewers)
-  doctor                      identity, host install, live seats
+  doctor                      identity, host install, hook failures, live seats;
+                              exits 1 while hooks have failed recently
+  hook digest|stop-hook|offboard
+                              what a host's hook line runs: always exits 0 (the
+                              Stop hook still prints {}), logs a failure to
+                              $AGENT_BUS_HOME/hook-failures.log and keeps
+                              state/hook-health.json (one line of JSON) for a
+                              status line
   gc [--restore-open]         prune expired state (also runs daily from hooks); open
                               work is never archived. --restore-open brings back
                               open items an older gc archived

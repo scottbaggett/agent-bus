@@ -2119,6 +2119,254 @@ NC="$BUS_HOME/nocommits"; mkdir -p "$NC"; git -C "$NC" init -q -b firstbranch
 assert_eq "a repo with no commits records its unborn branch" '"firstbranch"' \
   "$(jq -c 'select(.wt == "wnc") | .branch' "$R2"/seats/*.json)"
 
+# --- hooks report their own failures ---
+# `agent-bus hook <digest|stop-hook|offboard>` is the one entry point for hook
+# lines: it never fails the session, and logs what went wrong where doctor and a
+# status line can see it. Failure is injected the way it happens for real: a
+# dependency that breaks (here jq, first on PATH).
+HK="$BUS_HOME/hookbus"; mkdir -p "$HK" "$BUS_HOME/fakebin"
+printf '#!/bin/sh\nprintf "jq: error (at <stdin>:1): string (\\"SECRETPACKET\\") cannot be parsed\\nsecond line SECRETBODY\\n" >&2\nexit 3\n' >"$BUS_HOME/fakebin/jq"; chmod +x "$BUS_HOME/fakebin/jq"
+hk() { AGENT_BUS_HOME="$HK" AGENT_BUS_SESSION="${HKS:-hk}" AGENT_BUS_TOOL=claude AGENT_BUS_WT=whk "$BIN" "$@"; }
+hkbad() { PATH="$BUS_HOME/fakebin:$PATH" hk "$@"; }
+# A stand-in for the subcommand, to make it misbehave in ways jq can't.
+stub() { printf '#!/bin/sh\n%s\n' "$1" >"$BUS_HOME/stub"; chmod +x "$BUS_HOME/stub"; }
+# The bin has no test switch: tests run a temp copy whose one subcommand call is
+# patched to run the stand-in instead.
+sed 's|"${BASH_SOURCE\[0\]}" "\$sub"|"$TEST_STUB" "$sub"|' "$BIN" >"$BUS_HOME/agent-bus-patched"; chmod +x "$BUS_HOME/agent-bus-patched"
+assert_has "the patched copy replaces the subcommand call" 'TEST_STUB' "$(cat "$BUS_HOME/agent-bus-patched")"
+# Unpatched, the copy would call itself without end: stop here rather than hang.
+grep -q TEST_STUB "$BUS_HOME/agent-bus-patched" || { printf '%d passed, %d failed\n' "$pass" "$((fail + 1))"; exit 1; }
+hkstub() { TEST_STUB="$BUS_HOME/stub" AGENT_BUS_HOME="$HK" AGENT_BUS_SESSION="${HKS:-hk}" AGENT_BUS_TOOL=claude AGENT_BUS_WT=whk "$BUS_HOME/agent-bus-patched" "$@"; }
+assert_eq "bin/agent-bus carries no test switch for the hook command" 0 "$(grep -c 'AGENT_BUS_HOOK_BIN' "$BIN" || true)"
+out=$(hk hook digest 2>&1) && rc=0 || rc=$?
+assert_eq "hook digest on a healthy bus exits 0" 0 "$rc"
+assert_eq "a healthy hook logs nothing" "" "$(cat "$HK/hook-failures.log" 2>/dev/null || true)"
+assert_eq "an empty digest injects nothing, not even a newline" 0 "$(hk hook digest 2>&1 | wc -c | tr -d ' ')"
+assert_eq "a healthy hook leaves no run stamp" "" "$(ls "$HK"/state/hooks-running 2>/dev/null || true)"
+out=$(hkbad hook digest 2>/dev/null) && rc=0 || rc=$?
+assert_eq "hook digest exits 0 when the digest fails" 0 "$rc"
+assert_eq "a failed digest puts nothing in the session" "" "$out"
+log=$(cat "$HK/hook-failures.log" 2>/dev/null || true)
+assert_eq "one failure, one log line" 1 "$(grep -c . <<<"$log")"
+assert_has "the log names the hook" "digest" "$log"
+assert_has "the log has the exit code" "3" "$log"
+assert_has "stderr that is not the bus's own is withheld" "stderr withheld" "$log"
+assert_lacks "jq's dump of a packet never reaches the log" "SECRETPACKET" "$log"
+assert_lacks "no stderr text of a foreign tool reaches the log" "jq: error" "$log"
+assert_lacks "no later stderr lines reach the log" "SECRETBODY" "$log"
+assert_eq "health carries no value either" "stderr withheld" "$(jq -r .last_error "$HK/state/hook-health.json")"
+stub 'printf "agent-bus: cannot read \"SECRETVALUE\" in '"'"'OTHERSECRET'"'"' now\n" >&2; exit 4'
+hkstub hook digest >/dev/null 2>&1
+last=$(tail -n 1 "$HK/hook-failures.log")
+assert_has "the bus's own error line is kept" "agent-bus: cannot read <str> in <str> now" "$last"
+assert_lacks "quoted values become placeholders (double)" "SECRETVALUE" "$last"
+assert_lacks "quoted values become placeholders (single)" "OTHERSECRET" "$last"
+stub 'printf "agent-bus: oops \"SECRETTAIL never closed\n" >&2; exit 4'
+hkstub hook digest >/dev/null 2>&1
+assert_lacks "an unbalanced quote does not leak what follows it" "SECRETTAIL" "$(tail -n 1 "$HK/hook-failures.log")"
+stub 'printf "agent-bus: cannot read the user'"'"'s file and don'"'"'t retry\n" >&2; exit 4'
+hkstub hook digest >/dev/null 2>&1
+assert_has "an apostrophe in a message keeps its tail" "the user's file and don't retry" "$(tail -n 1 "$HK/hook-failures.log")"
+stub 'printf "agent-bus: bad value='"'"'SECRETONE and more\n" >&2; exit 4'
+hkstub hook digest >/dev/null 2>&1
+assert_lacks "a quote opened after = and never closed still cuts" "SECRETONE" "$(tail -n 1 "$HK/hook-failures.log")"
+stub 'printf "agent-bus: cannot find '"'"'SECRETTWO'"'"' here\n" >&2; exit 4'
+hkstub hook digest >/dev/null 2>&1
+assert_has "a closed single-quoted value is a placeholder" "cannot find <str> here" "$(tail -n 1 "$HK/hook-failures.log")"
+stub 'exit 5'
+hkstub hook digest >/dev/null 2>&1
+assert_has "a silent failure says so" "(no stderr)" "$(tail -n 1 "$HK/hook-failures.log")"
+out=$(hkbad hook stop-hook 2>/dev/null) && rc=0 || rc=$?
+assert_eq "hook stop-hook exits 0 on failure" 0 "$rc"
+assert_eq "hook stop-hook still emits valid JSON on failure" "{}" "$(printf '%s' "$out" | jq -c .)"
+out=$(hkbad hook offboard 2>/dev/null) && rc=0 || rc=$?
+assert_eq "hook offboard exits 0 on failure" 0 "$rc"
+assert_eq "an unknown hook is refused without failing the session" 0 "$(hk hook bogus >/dev/null 2>&1; echo $?)"
+assert_has "an unknown hook is logged" "bogus" "$(cat "$HK/hook-failures.log")"
+health=$(cat "$HK/state/hook-health.json")
+assert_eq "health file is one line" 1 "$(grep -c . <<<"$health")"
+assert_eq "health says not ok" false "$(jq -r .ok <<<"$health")"
+assert_eq "health counts recent failures" "$(grep -c . "$HK/hook-failures.log")" "$(jq -r .recent <<<"$health")"
+assert_has "health names the last hook" "bogus" "$(jq -r .last_hook <<<"$health")"
+assert_eq "health says when its numbers go stale" true "$(jq -r '.expires > now' <<<"$health")"
+
+# The Stop hook's JSON is checked, not trusted: exactly one object.
+for body in 'printf "{}\n{}\n"' 'printf "[1]\n{}\n"' 'printf "[]\n"' 'printf "not json\n"' 'printf ""'; do
+  stub "$body"
+  out=$(hkstub hook stop-hook 2>/dev/null) && rc=0 || rc=$?
+  assert_eq "stop-hook output [$body] exits 0" 0 "$rc"
+  assert_eq "stop-hook output [$body] becomes {}" "{}" "$out"
+done
+assert_has "a bad Stop output is logged" "stop-hook did not print exactly one JSON object" "$(tail -n 1 "$HK/hook-failures.log")"
+stub 'printf "{\"decision\":\"block\",\"reason\":\"x\"}\n"'
+n0=$(grep -c . "$HK/hook-failures.log")
+assert_eq "a valid Stop object passes through" '{"decision":"block","reason":"x"}' "$(hkstub hook stop-hook)"
+assert_eq "and is not logged" "$n0" "$(grep -c . "$HK/hook-failures.log")"
+
+# Health is per hook and per session: one healthy session never clears another's failure.
+HK3="$BUS_HOME/hookbus3"; mkdir -p "$HK3"
+hk3() { AGENT_BUS_HOME="$HK3" AGENT_BUS_SESSION="$1" AGENT_BUS_TOOL=claude AGENT_BUS_WT=whk3 "$BIN" hook digest >/dev/null 2>&1; }
+hk3bad() { PATH="$BUS_HOME/fakebin:$PATH" hk3 "$@"; }
+hk3bad sa
+hk3 sb
+assert_eq "another session's success does not clear a failure" false "$(jq -r .ok "$HK3/state/hook-health.json")"
+assert_eq "the marker is keyed by hook and session" "digest.sa" "$(ls "$HK3/state/hooks-failing")"
+hk3 sa
+assert_eq "the same session's later success clears it" true "$(jq -r .ok "$HK3/state/hook-health.json")"
+assert_eq "and removes the marker" "" "$(ls "$HK3/state/hooks-failing")"
+# A marker older than the window is dropped rather than kept failing forever.
+mkdir -p "$HK3/state/hooks-failing"; echo 1 >"$HK3/state/hooks-failing/digest.old"
+hk3bad sc
+assert_eq "a marker past the window is pruned" "digest.sc" "$(ls "$HK3/state/hooks-failing")"
+# Concurrent sessions: health must agree with the markers, however they interleave.
+HK4="$BUS_HOME/hookbus4"; mkdir -p "$HK4"
+conc() { AGENT_BUS_HOME="$HK4" AGENT_BUS_SESSION="$1" AGENT_BUS_TOOL=claude AGENT_BUS_WT=whk4 "$BIN" hook digest >/dev/null 2>&1; }
+concbad() { PATH="$BUS_HOME/fakebin:$PATH" conc "$1"; }
+for i in 1 2 3 4 5 6 7 8 9 10 11 12; do concbad "s$i" & done; wait
+for i in 1 2 3 4 5 6; do conc "s$i" & concbad "t$i" & done; wait
+nm=$(ls "$HK4/state/hooks-failing" | wc -l | tr -d ' ')
+assert_eq "after racing sessions, ok matches the markers" "$([ "$nm" -eq 0 ] && echo true || echo false)" "$(jq -r .ok "$HK4/state/hook-health.json")"
+assert_eq "six failed and six recovered, six failed again" 12 "$nm"
+for i in 1 2 3 4 5 6; do conc "s$((i + 6))" & conc "t$i" & done; wait
+assert_eq "once every failing session succeeds, ok is true" true "$(jq -r .ok "$HK4/state/hook-health.json")"
+
+# Doctor: failing now and recovered are separate; only failing-now exits non-zero.
+out=$(hk doctor 2>&1) && rc=0 || rc=$?
+assert_eq "doctor exits non-zero while a hook is failing now" 1 "$rc"
+assert_has "doctor names what fails now" "failing now: 3" "$out"
+assert_has "and says when it clears" "clears when this session's next" "$out"
+assert_has "and the time it ages out" "leaves the window" "$out"
+assert_has "doctor reports the bus's own error" "unknown hook" "$out"
+assert_lacks "the last-failure time is not an epoch mistaken for a duration" "h ago" "$(grep -F 'exit' <<<"$out" | grep -F ' ago')"
+HKD="$BUS_HOME/hookbusd"; mkdir -p "$HKD"
+hkd() { AGENT_BUS_HOME="$HKD" AGENT_BUS_SESSION=hd AGENT_BUS_TOOL=claude AGENT_BUS_WT=whd "$BIN" "$@"; }
+PATH="$BUS_HOME/fakebin:$PATH" hkd hook digest >/dev/null 2>&1
+hkd hook digest >/dev/null 2>&1
+out=$(hkd doctor 2>&1) && rc=0 || rc=$?
+assert_eq "doctor exits 0 once the failure recovered" 0 "$rc"
+assert_has "doctor shows nothing failing now" "failing now: none" "$out"
+assert_has "doctor lists the recovered failure" "recovered within window: 1" "$out"
+assert_has "doctor warns about it" "warning" "$out"
+assert_has "and says when it drops off" "leaves the window at" "$out"
+assert_has "a fresh failure reads as seconds ago" "s ago" "$out"
+assert_eq "doctor is clean when nothing failed" 0 "$(AGENT_BUS_HOME="$BUS_HOME/hookbus2" AGENT_BUS_SESSION=hk AGENT_BUS_TOOL=claude AGENT_BUS_WT=whk "$BIN" doctor >/dev/null 2>&1; echo $?)"
+
+# A stale health file is refreshed by the next success.
+HK5="$BUS_HOME/hookbus5"; mkdir -p "$HK5/state"
+printf '1\t1970-01-01T00:00:01Z\tdigest\t1\tx\thk\n' >"$HK5/hook-failures.log"
+printf '{"ok":true,"failing":[],"recent":5,"last_ts":1,"last_hook":"digest","last_exit":"1","last_error":"x","expires":100,"window":86400}\n' >"$HK5/state/hook-health.json"
+AGENT_BUS_HOME="$HK5" AGENT_BUS_SESSION=hk AGENT_BUS_TOOL=claude AGENT_BUS_WT=whk5 "$BIN" hook digest >/dev/null 2>&1
+assert_eq "a success refreshes a health file that went stale" 0 "$(jq -r .recent "$HK5/state/hook-health.json")"
+
+# A hook the host killed (it hangs, the host cancels at its timeout) leaves a
+# stamp; the next run logs it as a hang. A run still going is not a hang.
+HK6="$BUS_HOME/hookbus6"; mkdir -p "$HK6/state/hooks-running"
+sh -c 'echo $$' >"$BUS_HOME/deadpid"; deadpid=$(cat "$BUS_HOME/deadpid")
+printf '%s 1\n' "$deadpid" >"$HK6/state/hooks-running/digest.hk"
+AGENT_BUS_HOME="$HK6" AGENT_BUS_SESSION=hk AGENT_BUS_TOOL=claude AGENT_BUS_WT=whk6 "$BIN" hook digest >/dev/null 2>&1
+assert_has "a left-behind run stamp is logged as a hang" "did not finish" "$(cat "$HK6/hook-failures.log" 2>/dev/null || true)"
+assert_eq "the hang is logged once" 1 "$(grep -c . "$HK6/hook-failures.log")"
+assert_eq "and the stamp is gone after the next run" "" "$(ls "$HK6/state/hooks-running")"
+printf '%s 1\n' "$$" >"$HK6/state/hooks-running/digest.hk"
+AGENT_BUS_HOME="$HK6" AGENT_BUS_SESSION=hk AGENT_BUS_TOOL=claude AGENT_BUS_WT=whk6 "$BIN" hook digest >/dev/null 2>&1
+assert_eq "a stamp whose run is still alive is not a hang" 1 "$(grep -c . "$HK6/hook-failures.log")"
+
+# Every run sweeps the stamps of runs that died, whichever hook and session they
+# were: a hung SessionEnd or a session's last Stop is logged by the next run of
+# anything. Young stamps and live pids are left; the sweep looks at a bounded number.
+HK8="$BUS_HOME/hookbus8"; mkdir -p "$HK8/state/hooks-running"
+hk8() { AGENT_BUS_HOME="$HK8" AGENT_BUS_SESSION=live AGENT_BUS_TOOL=claude AGENT_BUS_WT=whk8 "$BIN" hook digest >/dev/null 2>&1; }
+old=$(( $(date -u +%s) - 300 )); young=$(( $(date -u +%s) - 5 ))
+printf '%s %s\n' "$deadpid" "$old" >"$HK8/state/hooks-running/offboard.gone"
+printf '%s %s\n' "$deadpid" "$young" >"$HK8/state/hooks-running/stop-hook.fresh"
+printf '%s %s\n' "$$" "$old" >"$HK8/state/hooks-running/digest.alive"
+hk8
+log8=$(cat "$HK8/hook-failures.log" 2>/dev/null || true)
+assert_has "a dead run of another hook is logged as a hang" "offboard" "$log8"
+assert_has "for its own session" "gone" "$log8"
+assert_eq "exactly one hang logged" 1 "$(grep -c . <<<"$log8")"
+assert_eq "the swept stamp is removed, the young and live ones stay" "digest.alive stop-hook.fresh" "$(ls "$HK8/state/hooks-running" | tr '\n' ' ' | sed 's/ $//')"
+hk8
+assert_eq "a swept hang is not logged twice" 1 "$(grep -c . "$HK8/hook-failures.log")"
+rm -f "$HK8"/state/hooks-running/*
+for i in $(seq 1 30); do printf '%s %s\n' "$deadpid" "$old" >"$HK8/state/hooks-running/offboard.s$i"; done
+hk8
+assert_eq "one run sweeps at most 20 stamps" 10 "$(ls "$HK8/state/hooks-running" | wc -l | tr -d ' ')"
+assert_eq "the swept ones are logged" 20 "$(grep -Ec 'offboard.*s[0-9]+$' "$HK8/hook-failures.log")"
+hk8
+# The health file's marker check is one stat for all markers, not a fork or two per marker.
+real_stat=$(command -v stat); mkdir -p "$BUS_HOME/statbin"
+printf '#!/bin/sh\necho x >>"%s/stat.calls"\nexec %s "$@"\n' "$BUS_HOME" "$real_stat" >"$BUS_HOME/statbin/stat"; chmod +x "$BUS_HOME/statbin/stat"
+rm -f "$HK8"/state/hooks-failing/* "$BUS_HOME/stat.calls"
+for i in $(seq 1 30); do printf '%s %s\n' "$deadpid" "$old" >"$HK8/state/hooks-running/offboard.t$i"; done
+PATH="$BUS_HOME/statbin:$PATH" AGENT_BUS_HOME="$HK8" AGENT_BUS_SESSION=live AGENT_BUS_TOOL=claude AGENT_BUS_WT=whk8 "$BIN" hook digest >/dev/null 2>&1
+assert_eq "a sweep of 20 hangs makes few stat calls (one per marker check)" yes "$([ "$(wc -l <"$BUS_HOME/stat.calls" 2>/dev/null || echo 0)" -le 100 ] && echo yes || echo no)"
+assert_eq "and the health file still names the failing hook" offboard "$(sed -n 's/.*"failing":\["\([a-z-]*\)".*/\1/p' "$HK8/state/hook-health.json")"
+rm -f "$HK8"/state/hooks-running/*.t* "$HK8"/state/hooks-failing/*
+assert_eq "the next run takes the rest" 0 "$(ls "$HK8/state/hooks-running" | wc -l | tr -d ' ')"
+HK9="$BUS_HOME/hookbus9"; mkdir -p "$HK9/state"
+t0=$(date +%s%N)
+for i in 1 2 3 4 5; do AGENT_BUS_HOME="$HK9" AGENT_BUS_SESSION=q AGENT_BUS_TOOL=claude AGENT_BUS_WT=whk9 "$BIN" hook digest >/dev/null 2>&1; done
+t1=$(date +%s%N)
+assert_eq "with no stamps to sweep a run is not slowed (5 runs under 30s)" yes "$([ $(( (t1 - t0) / 1000000 )) -lt 30000 ] && echo yes || echo no)"
+
+# A crashed holder's lock (fresh, never released) must not make a failing run wait long;
+# the bound is loose so a loaded machine passes.
+HK10="$BUS_HOME/hookbus10"; mkdir -p "$HK10/state/hook-health.lock"
+t0=$(date +%s%N)
+PATH="$BUS_HOME/fakebin:$PATH" AGENT_BUS_HOME="$HK10" AGENT_BUS_SESSION=z AGENT_BUS_TOOL=claude AGENT_BUS_WT=whk10 "$BIN" hook digest >/dev/null 2>&1
+t1=$(date +%s%N)
+assert_eq "the lock wait is short" yes "$([ $(( (t1 - t0) / 1000000 )) -lt 5000 ] && echo yes || echo no)"
+assert_has "the failure is still logged without the lock" "digest" "$(cat "$HK10/hook-failures.log")"
+assert_has "PROTOCOL names the real failing-marker path" 'state/hooks-failing/<hook>.<session>  marks' "$(cat "$ROOT/PROTOCOL.md")"
+
+# A bus home that cannot be written: still exit 0, and say so on stderr.
+printf x >"$BUS_HOME/notadir"
+out=$(AGENT_BUS_HOME="$BUS_HOME/notadir" PATH="$BUS_HOME/fakebin:$PATH" "$BIN" hook stop-hook 2>"$BUS_HOME/hk.err") && rc=0 || rc=$?
+assert_eq "an unwritable bus home still exits 0" 0 "$rc"
+assert_eq "an unwritable bus home still emits {}" "{}" "$out"
+assert_has "an unwritable log says so on stderr" "hook-failures.log" "$(cat "$BUS_HOME/hk.err")"
+# No HOME and no AGENT_BUS_HOME: nowhere to log, still non-blocking.
+out=$(env -i PATH="$PATH" "$BIN" hook stop-hook </dev/null 2>"$BUS_HOME/hk.err") && rc=0 || rc=$?
+assert_eq "no HOME and no bus home: the wrapper exits 0" 0 "$rc"
+assert_eq "no HOME and no bus home: Stop still prints {}" "{}" "$out"
+assert_has "and says there is nowhere to log" "no bus home" "$(cat "$BUS_HOME/hk.err")"
+assert_lacks "not as a shell error" "unbound variable" "$(cat "$BUS_HOME/hk.err")"
+out=$(env -i PATH="$PATH" "$BIN" hook digest </dev/null 2>&1) && rc=0 || rc=$?
+assert_eq "no HOME and no bus home: digest exits 0" 0 "$rc"
+out=$(env -i PATH="$PATH" "$BIN" digest </dev/null 2>&1) && rc=0 || rc=$?
+assert_has "the bare command names the missing setting" "AGENT_BUS_HOME" "$out"
+assert_lacks "and is not a shell error" "unbound variable" "$out"
+# A health file that cannot be moved into place leaves no temp file behind.
+HK7="$BUS_HOME/hookbus7"; mkdir -p "$HK7" "$BUS_HOME/fakebin2"
+printf '#!/bin/sh\nexit 1\n' >"$BUS_HOME/fakebin2/mv"; chmod +x "$BUS_HOME/fakebin2/mv"
+PATH="$BUS_HOME/fakebin2:$BUS_HOME/fakebin:$PATH" AGENT_BUS_HOME="$HK7" AGENT_BUS_SESSION=hk AGENT_BUS_TOOL=claude AGENT_BUS_WT=whk7 "$BIN" hook digest >/dev/null 2>"$BUS_HOME/hk.err"
+assert_eq "a health write that fails leaves no temp file" "" "$(ls "$HK7"/state | grep 'tmp' || true)"
+assert_has "and says so" "cannot write" "$(cat "$BUS_HOME/hk.err")"
+assert_eq "a failing health write says so once, however many rounds" 1 "$(grep -c 'cannot write' "$BUS_HOME/hk.err")"
+# A marker that changes while the health file is being written: the file must end up agreeing
+# with the markers. The mv stub changes a marker on its first health-file move, then runs the real mv.
+REAL_MV=$(command -v mv)
+mvstub() { # <marker action: add|del> <home>
+  printf '#!/bin/sh\nd=%s/state/hooks-failing\ncase "$*" in *hook-health.json.tmp*) [ -e %s/mvstub.ran ] || { : >%s/mvstub.ran\n' "$2" "$2" "$2" >"$BUS_HOME/fakebin3/mv"
+  if [ "$1" = add ]; then printf 'date +%%s >"$d/digest.zz"\n' >>"$BUS_HOME/fakebin3/mv"; else printf 'rm -f "$d/digest.zz"\n' >>"$BUS_HOME/fakebin3/mv"; fi
+  printf '}; esac\nexec %s "$@"\n' "$REAL_MV" >>"$BUS_HOME/fakebin3/mv"; chmod +x "$BUS_HOME/fakebin3/mv"
+}
+mkdir -p "$BUS_HOME/fakebin3"
+hkmv() { PATH="$BUS_HOME/fakebin3:$PATH" AGENT_BUS_HOME="$1" AGENT_BUS_SESSION=sa AGENT_BUS_TOOL=claude AGENT_BUS_WT=whk8 "$BIN" hook digest >/dev/null 2>&1; }
+# (1) a marker appears mid-write: a first write that saw none must be redone
+HKM1="$BUS_HOME/hookmv1"; mkdir -p "$HKM1/state/hooks-failing"; date +%s >"$HKM1/state/hooks-failing/digest.sa"
+mvstub add "$HKM1"; hkmv "$HKM1"
+assert_eq "a marker added mid-write: it is still there" "digest.zz" "$(ls "$HKM1/state/hooks-failing")"
+assert_eq "a marker added mid-write: health says failing" false "$(jq -r .ok "$HKM1/state/hook-health.json")"
+assert_eq "a marker added mid-write: health names it" '["digest"]' "$(jq -c .failing "$HKM1/state/hook-health.json")"
+# (2) a marker disappears mid-write: a first write that still listed it must be redone
+HKM2="$BUS_HOME/hookmv2"; mkdir -p "$HKM2/state/hooks-failing"
+date +%s >"$HKM2/state/hooks-failing/digest.sa"; date +%s >"$HKM2/state/hooks-failing/digest.zz"
+mvstub del "$HKM2"; hkmv "$HKM2"
+assert_eq "a marker removed mid-write: none left" "" "$(ls "$HKM2/state/hooks-failing")"
+assert_eq "a marker removed mid-write: health says ok" true "$(jq -r .ok "$HKM2/state/hook-health.json")"
+
 # --- isolation: nothing from the host session reached the fixtures ---
 assert_eq "no host session, socket or pane variable is set" "" "$(env | grep -E "$HOST_ENV" | grep -v '^AGENT_BUS_' | cut -d= -f1)"
 assert_eq "no Codex variable reaches the fixtures" "" "$(env | grep -E '^CODEX_' | cut -d= -f1)"

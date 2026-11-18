@@ -475,6 +475,47 @@ unmatched lanes fall under their repo:
 Only the first three bodies render inline, each capped at 2KB and 40 lines;
 `agent-bus show <id>` has the full body, its replies and its closes.
 
+## Hook failures
+
+Hook lines run `agent-bus hook <digest|stop-hook|offboard>`, never the bare
+subcommand behind `2>/dev/null || true`. `hook` runs the subcommand and always
+exits 0, so it never blocks or breaks the session. A Stop hook that fails, or
+prints anything but exactly one JSON object, still prints `{}`; a digest with
+nothing to say prints nothing. On any failure it appends one tab-separated line
+to `$AGENT_BUS_HOME/hook-failures.log` (epoch, UTC time, hook, exit code, error,
+session) and rewrites `state/hook-health.json`, one line a status line can read:
+
+    {"ok":false,"failing":["digest"],"recent":3,"last_ts":1760000000,"last_hook":"digest","last_exit":"3","last_error":"stderr withheld","expires":1760086400,"window":86400}
+
+The error is never a value. It is the bus's own first stderr line (`agent-bus: ...`)
+with every quoted string replaced by `<str>`, or `stderr withheld` for anything
+else, because tools such as `jq` quote the data they choked on, which can be a
+packet.
+
+Failing is tracked per hook and per session (`state/hooks-failing/<hook>.<session>`).
+`ok` is false while any session has a failure inside the window
+(`AGENT_BUS_HOOK_FAIL_WINDOW`, default 24h) that its own later success has not
+cleared; one healthy session never clears another's. `recent` counts log lines in
+the window, recovered or not. The file is a snapshot: after `expires` its counts
+are stale, and the next successful hook run rewrites it.
+
+A hook the host cancels at its timeout cannot log itself. Each run leaves a stamp
+(`state/hooks-running/<hook>.<session>`, holding its pid) until it ends; every
+`hook` run first sweeps up to 20 stamps, any hook and session, and logs a hang
+(exit 124, for the stamp's own hook and session) for each whose process is gone and
+that is older than 60s, then removes it; the next run of the same hook and session
+does the same for its own stamp. `install-hooks.sh` sets a `timeout` on every Claude hook entry (digest
+on each prompt 5s, SessionStart 10s, Stop 10s, SessionEnd 3s) so a hang is bounded.
+
+`agent-bus doctor` prints failing now and recovered within the window separately,
+each with when it clears, and exits 1 only for failing now; a recovered failure is
+a warning line. The failure path needs no `jq`, so a missing `jq` is reported too.
+The log lives in the bus home because a hooked session already writes there. If
+even that is unwritable, or there is no `HOME` and no `AGENT_BUS_HOME`, the failure
+goes to stderr and the exit is still 0; the host does not show stderr of a hook
+that exits 0, so that case is visible only when the hook is run by hand. The log is
+trimmed to its newest 500 lines past 1000.
+
 ## Delivery report
 
 `post` prints one `delivery:` line per owner it reached: submitted to the Claude
@@ -647,6 +688,9 @@ timeout.  The Python Codex adapter (`lib/codex_queue.py`) uses the same
   state/roles/<r>.pm    repo PM
   state/roles/<r>.lane.<l>.pm  lane PM
   claims/<hash>.json    claims
+  hook-failures.log     one line per failed hook run (see Hook failures)
+  state/hook-health.json  one-line health for a status line
+  state/hooks-failing/<hook>.<session>  marks a hook failing now, per session
   wakeable              empty marker: a home other than ~/.agents/bus may wake sessions (Claude sockets, Codex queue, OpenCode --resume, Grok webhooks)
 ```
 

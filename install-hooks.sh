@@ -36,6 +36,7 @@ else BIN="$(command -v agent-bus || echo "$HOME/.local/bin/agent-bus")"; fi
 CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 CLAUDE_SETTINGS="$CLAUDE_DIR/settings.json"
 OPENCODE_DIR="$HOME/.config/opencode"
+HOOK_FORM=hook  # the form of the hook lines this installer writes; tools that write their own hook lines can read it; keep in step with the lines below
 PLUGIN_SRC="$ROOT/plugins/agent-bus"
 CODEX_SETTINGS="${AGENT_BUS_CODEX_SETTINGS:-${CODEX_HOME:-$HOME/.codex}/hooks.json}"
 
@@ -58,10 +59,11 @@ real() { [ -L "$1" ] && python3 -c 'import os,sys;print(os.path.realpath(sys.arg
 backup() { [ -f "$1.agent-bus.bak" ] || cp "$1" "$1.agent-bus.bak"; }
 write_json() { jq . >"$1.tmp" && mv "$1.tmp" "$1"; }
 
-# Wrapped so a bus failure can never break the host turn. VIA=hook lets
+# `agent-bus hook` wraps each one so a bus failure can never break the host
+# turn, and logs it (hook-failures.log, doctor) instead of swallowing it. VIA=hook lets
 # `doctor` see that hooks fire; the tool pin keeps hooks and shell on one seat.
-# The marker goes last: anywhere earlier it would comment out the fallback.
-hook() { printf 'AGENT_BUS_VIA=hook AGENT_BUS_TOOL=claude %s %s %s' "$BIN" "$1" "$MARKER"; }
+# The marker goes last: anywhere earlier it would comment out the rest of the line.
+hook() { printf 'AGENT_BUS_VIA=hook AGENT_BUS_TOOL=claude %s %s %s %s' "$BIN" "$HOOK_FORM" "$1" "$MARKER"; }
 
 strip_marked() { jq --arg m "$MARKER" '
   if .hooks then .hooks |= with_entries(
@@ -70,8 +72,11 @@ strip_marked() { jq --arg m "$MARKER" '
     | .hooks |= with_entries(select(.value | length > 0))
   else . end'; }
 
-add_group() { # <event> <command>
-  jq --arg e "$1" --arg c "$2" '.hooks //= {} | .hooks[$e] = ((.hooks[$e] // []) + [{hooks: [{type: "command", command: $c}]}])'
+# Each entry carries a timeout (seconds, the host's documented per-hook field),
+# so a hung hook is cancelled and the next run logs it. The digest runs on every
+# prompt and holds it, so it is short; SessionEnd's own budget is 1.5s unless raised.
+add_group() { # <event> <command> <timeout>
+  jq --arg e "$1" --arg c "$2" --argjson t "$3" '.hooks //= {} | .hooks[$e] = ((.hooks[$e] // []) + [{hooks: [{type: "command", command: $c, timeout: $t}]}])'
 }
 
 install_claude() {
@@ -81,10 +86,10 @@ install_claude() {
   if ((!uninstall)); then
     # SessionStart and UserPromptSubmit stdout is injected into the model, so
     # the digest delivers; Stop continues the seat on work it owns.
-    out=$(add_group SessionStart "$(hook "digest 2>/dev/null || true")" <<<"$out")
-    out=$(add_group UserPromptSubmit "$(hook "digest 2>/dev/null || true")" <<<"$out")
-    out=$(add_group Stop "$(hook "stop-hook 2>/dev/null || echo '{}'")" <<<"$out")
-    out=$(add_group SessionEnd "$(hook "offboard >/dev/null 2>&1 || true")" <<<"$out")
+    out=$(add_group SessionStart "$(hook digest)" 10 <<<"$out")
+    out=$(add_group UserPromptSubmit "$(hook digest)" 5 <<<"$out")
+    out=$(add_group Stop "$(hook stop-hook)" 10 <<<"$out")
+    out=$(add_group SessionEnd "$(hook offboard)" 3 <<<"$out")
   fi
   write_json "$f" <<<"$out"
   echo "claude:   $( ((uninstall)) && echo removed || echo installed ) ($f)"

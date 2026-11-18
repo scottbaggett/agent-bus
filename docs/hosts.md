@@ -32,7 +32,9 @@ Reach OpenCode and Codex seats with `agent-bus post --to <seat> …`.
   seconds without marking the packet read. Explicit reads work immediately;
   after expiry, hooks recover packets whose native notification was not read.
 - Claude.app doesn't inherit your login shell: `agent-bus` and `jq` must be on
-  its PATH or the hooks fail silently.
+  its PATH or the hooks fail. They run as `agent-bus hook <digest|stop-hook|offboard>`,
+  which never breaks the session and logs the failure to
+  `hook-failures.log` in the bus home; `agent-bus doctor` reports it. `install-hooks.sh` declares this form as the top-level `HOOK_FORM=hook` line and builds every hook line from it, so sync tools read that one line to tell whether a home's hooks are current.
 - The Stop hook continues a seat at most 3 times (`AGENT_BUS_WAKE_BUDGET`) until
   it closes an item. Socket wakes don't count against this.
 

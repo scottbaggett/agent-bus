@@ -41,8 +41,15 @@ assert_eq "cli link points at current" "$SHARE/current/bin/agent-bus" "$(readlin
 assert_eq "current points at the version" "$SHARE/versions/v9.9.1" "$(readlink "$SHARE/current")"
 assert_has "version names the release" "(v9.9.1)" "$("$BINDIR/agent-bus" version)"
 hooks=$(jq -r '[.hooks[][].hooks[].command] | join("\n")' "$HOME/.claude/settings.json")
-assert_has "claude hooks use the stable path" "$SHARE/current/bin/agent-bus digest" "$hooks"
+assert_has "claude hooks use the stable path" "$SHARE/current/bin/agent-bus hook digest" "$hooks"
 assert_lacks "claude hooks never pin a version" "versions/" "$hooks"
+assert_eq "installer declares HOOK_FORM at top level" "1" "$(grep -c '^HOOK_FORM=hook' "$ROOT/install-hooks.sh")"
+for ev in digest stop-hook offboard; do
+  assert_has "a hook line runs agent-bus hook $ev" "agent-bus hook $ev" "$(jq -r '[.hooks[][].hooks[].command] | join("\n")' "$HOME/.claude/settings.json")"
+done
+assert_eq "every claude hook entry carries a timeout" "4" "$(jq '[.hooks[][].hooks[] | select((.timeout | type) == "number")] | length' "$HOME/.claude/settings.json")"
+assert_eq "the per-prompt digest has a short timeout" "true" "$(jq '.hooks.UserPromptSubmit[0].hooks[0].timeout <= 5' "$HOME/.claude/settings.json")"
+assert_eq "no hook timeout is longer than 30s" "true" "$(jq '[.hooks[][].hooks[].timeout] | max <= 30' "$HOME/.claude/settings.json")"
 assert_eq "skill links through current" "$SHARE/current/skills/agent-bus" "$(readlink "$HOME/.claude/skills/agent-bus")"
 assert_lacks "opencode not wired when absent" "opencode:" "$out"
 assert_has "PATH hint when bin dir is missing from PATH" "fish_add_path" "$out"
@@ -123,7 +130,7 @@ rsync -a --exclude .git "$ROOT/" "$B/Cellar/agent-bus/1.0/libexec/"
 ln -s ../Cellar/agent-bus/1.0 "$B/opt/agent-bus"
 ln -s ../Cellar/agent-bus/1.0/libexec/bin/agent-bus "$B/bin/agent-bus"
 "$B/bin/agent-bus" hooks --claude >/dev/null
-assert_has "brew hooks use the opt path" "$B/opt/agent-bus/libexec/bin/agent-bus digest" \
+assert_has "brew hooks use the opt path" "$B/opt/agent-bus/libexec/bin/agent-bus hook digest" \
   "$(jq -r '[.hooks[][].hooks[].command] | join("\n")' "$HOME/.claude/settings.json")"
 assert_eq "brew skill uses the opt path" "$B/opt/agent-bus/libexec/skills/agent-bus" "$(readlink "$HOME/.claude/skills/agent-bus")"
 assert_has "brew refuses update" "brew upgrade agent-bus" "$("$B/bin/agent-bus" update 2>&1 || true)"

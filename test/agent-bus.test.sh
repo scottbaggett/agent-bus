@@ -2383,6 +2383,12 @@ assert_has "lane refuses a verb as a lane name" "lane [<name>" "$out"
 assert_eq "no lane called drop was set" "no" "$(a lane | grep -q '^drop' && echo yes || echo no)"
 out=$(a lane done 2>&1 || true)
 assert_has "lane refuses a lifecycle verb given alone" "lane <name> done" "$out"
+out=$(AGENT_BUS_POLICY_CLAUDE= raw_seat cc claude wcc post --to "$C" -m x 2>&1 || true)
+assert_has "the Claude refusal says when to pass the flag" "--allow-claude only when" "$out"
+assert_has "and says to use SendMessage otherwise" "SendMessage" "$out"
+out=$(AGENT_BUS_NO_PUSH=0 l1 post --to @spaces -m "lane broadcast" 2>&1 || true)
+assert_has "a post to an unowned lane says why nobody woke" "broadcast" "$out"
+assert_has "and what wakes people" "role pm --lane" "$out"
 
 out=$(pm lane drop done --reason merged 2>&1 || true)
 assert_has "a lifecycle verb is not accepted after a verb-named lane" "is a verb, not a name" "$out"
@@ -2393,6 +2399,11 @@ assert_lacks "and is not reported as a permission problem" "only the lead" "$out
 assert_has "a drop-like verb is pointed at --clear" "--clear" "$(a role drop 2>&1 || true)"
 assert_lacks "another verb is not told to use --clear" "to drop it use --clear" "$(a role start 2>&1 || true)"
 assert_has "the drop hint is shown for a drop verb" "to drop it use --clear" "$(a role drop 2>&1 || true)"
+out=$(AGENT_BUS_NO_PUSH=0 l1 post --to @spaces -m "lane broadcast" 2>&1 || true)
+assert_has "the lane delivery line says who owns a work item" "lane PM, else the repo PM" "$out"
+assert_has "and where the rest goes" "owner rule" "$out"
+assert_has "PROTOCOL says the same" "lane PM, else the repo PM, else" "$(cat "$ROOT/PROTOCOL.md")"
+assert_has "the skill says the same" "lane PM, else the repo PM, else" "$(cat "$ROOT/skills/agent-bus/SKILL.md")"
 
 # --- isolation: nothing from the host session reached the fixtures ---
 assert_eq "no host session, socket or pane variable is set" "" "$(env | grep -E "$HOST_ENV" | grep -v '^AGENT_BUS_' | cut -d= -f1)"

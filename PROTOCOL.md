@@ -96,6 +96,13 @@ and `snapshot` gives each seat `avatar: {rows, color}` for viewers to draw.
 refused, so nothing is silently undelivered. A lane name is
 accepted once a live seat is in that lane or the lane has a PM.
 
+`@<lane>` is a broadcast, by design: it reaches the seats in the lane only when
+they run `agent-bus read`, and wakes nobody. The one exception is a work item
+(`needs-review`, `blocked`, `handoff`, `question`) sent to it, which gets an
+owner and wakes that owner: the lane PM, else the repo PM, else the team's owner
+rule (refused, or assigned to `@lead`). A lane PM is set with
+`role pm --lane <lane>`. To wake a particular seat, address the seat.
+
 ### Claude to Claude
 
 By default (team rule `claude=refuse`), Claude sessions that share a Claude
@@ -103,8 +110,11 @@ config dir talk to each other through Claude session messaging (`SendMessage`),
 not the bus. A Claude seat posting directly to such a seat (`--to claude/...`)
 is refused unless it passes `--allow-claude`. A seat under a different config
 dir is never refused (each Claude seat records its `claude_dir`), because
-`SendMessage` can't reach it. `@pm`, lanes and broadcasts are unaffected: a
-Claude lane PM supervising OpenCode seats is what the bus is for.
+`SendMessage` can't reach it. The flag is a deliberate guard against using the
+bus where native messaging would do, so pass it only when the bus itself is
+wanted: a ledger record, or a packet its PM or a lane must see. The refusal
+message says the same. `@pm`, lanes and broadcasts are unaffected: a Claude
+lane PM supervising OpenCode seats is what the bus is for.
 
 Under `claude=refuse`, `reply` needs no `--allow-claude` when the packet was
 sent to the replier (its seat, its scope, a role it holds or held when the
@@ -113,9 +123,9 @@ to a lane of the same name, and a lane's packet never becomes a role's), or to
 `@pm` or `@repo-pm`, or it is a work item broadcast to a lane (not to a role of
 that name), and the replier is the item's PM, the one routing gives it (see
 "The PM" of an item under Messages and work items), and its sender is still
-live: that sender chose the bus. Supervising the
-packet as PM or lead doesn't count. Otherwise `reply` is refused like `post`
-unless it passes `--allow-claude`.
+live: that sender chose the bus. Supervising the packet as PM or lead doesn't
+count. Otherwise `reply` is refused like `post` unless it passes
+`--allow-claude`.
 
 With `claude=allow`, Claude seats can post directly to each other, including
 tracked handoffs, questions and review requests, and `--allow-claude` is

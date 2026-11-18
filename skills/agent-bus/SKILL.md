@@ -95,7 +95,10 @@ Write the handoff (what you did, what's left, what will trip the next agent):
 
 Pick a **recipient** with the user — a seat from `agent-bus who`, a role like
 `@release`, or `@lead`. `--to` is required and broadcasts (`@here`) can't carry
-work, so never post work to `@here`.
+work, so never post work to `@here`. `@<lane>` is a broadcast too: it wakes
+nobody, except that a work item sent to it goes to the
+lane PM, else the repo PM, else the team's owner rule (refused, or `@lead`), and
+that owner is woken. To wake someone, address the seat.
 
 ```sh
 agent-bus post --to <seat|@role|@lead> --state handoff --touched auto --file handoff.md
@@ -244,8 +247,8 @@ wherever it runs: changing folders doesn't change who you are.
 4. Other Claude sessions under your own config dir (the ones ListAgents
    shows): use `SendMessage`. Under the default rule (`claude=refuse`),
    `post --to claude/...` to them is refused unless you pass `--allow-claude`;
-   pass it only when the bus itself is wanted (a ledger record a PM or lane must
-   see). Claude sessions under another config dir (another account or context)
+   pass it only when the bus itself is wanted (a ledger record, or a packet its
+   PM or a lane must see), never to get past the refusal. Claude sessions under another config dir (another account or context)
    are reached only through the bus, as are OpenCode, Codex, Cursor and Grok
    seats. A post to a Claude seat submits through its native inbox socket;
    submission alone does not prove acceptance or reading.

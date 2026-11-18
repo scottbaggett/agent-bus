@@ -2037,7 +2037,7 @@ cmd_post() {
   # dir talk through SendMessage; the bus is for everything else.
   case "$to" in claude/*)
     if [ "$TOOL" = claude ] && ((!allow_claude)) && [ "$(policy_get claude)" != allow ] && ! other_claude_dir "$to"; then
-      die "post: $to is a Claude session — use Claude session messaging (SendMessage) instead, or --allow-claude if the bus is intended"
+      die "post: $to is a Claude session — use Claude session messaging (SendMessage) instead; it works because that seat shares your Claude config dir. Pass --allow-claude only when the bus itself is wanted (a ledger record, a packet its PM or a lane must see), never to get past this check"
     fi ;;
   esac
   case "$to" in
@@ -2194,7 +2194,8 @@ deliver() { # rec src resume
   owners=$(owner_rows "$rec")
   if [ -z "$owners" ]; then
     case "$to" in
-      @*) printf 'delivery: nobody owns this, so nobody is woken. Agents see it only if they run agent-bus read. To get it acted on, send it --to a seat (agent-bus who).\n' ;;
+      @*) if [ -z "$(role_seat "${to#@}")" ] && valid_lane "${to#@}"; then printf 'delivery: %s is a broadcast to the seats in that lane: it wakes nobody and shows only to a seat that runs agent-bus read. Only a work item (needs-review|blocked|handoff|question) gets an owner, and it wakes that owner: the lane PM, else the repo PM, else the owner rule of the team (it is refused, or goes to @lead); a lane PM is set with agent-bus role pm --lane %s. To wake a particular seat, send it --to that seat (agent-bus who).\n' "$to" "${to#@}"
+         else printf 'delivery: nobody owns this, so nobody is woken. Agents see it only if they run agent-bus read. To get it acted on, send it --to a seat (agent-bus who).\n'; fi ;;
       *) if [ -n "$(peer_list)" ] && [ "${AGENT_BUS_NO_PEERS:-0}" != 1 ]; then local on_; on_=$(peer_of_seat "$to" || :); printf 'delivery: %s is %s; sending it there\n' "$to" "$(if [ -n "$on_" ]; then echo "on ${on_%.local}"; else echo "not on this Mac"; fi)"
          else
            # A reply skipped the redirect to the sender's heir: name it instead.

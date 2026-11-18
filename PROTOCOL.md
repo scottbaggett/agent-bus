@@ -385,14 +385,18 @@ unmatched lanes fall under their repo:
   context and marked read. Both hosts inject hook output, so a digest is a
   delivery. Broadcasts never enter the digest: they are context, read with
   `agent-bus read`.
-- **Wake.** Only a packet's owners are woken; a broadcast wakes nobody.
+- **Wake.** Only a packet's owners are woken; a broadcast wakes nobody. Only
+  a wakeable home wakes anyone from `post`: the default `~/.agents/bus`, or a
+  home holding an empty `wakeable` file (a launcher that sets up a dedicated bus
+  home can write it). Elsewhere no Claude socket is recorded or poked, no Codex notice is
+  queued, no Grok webhook is sent, and `--resume` restarts no OpenCode session.
+  The packet still lands: Claude owners see it at their next prompt, a running
+  OpenCode plugin still picks it up, and the Codex, Grok and `--resume` delivery
+  lines say `wakes off on this home`. `who` says `wakes off`. A throwaway home
+  made from inside a live session can't wake that session.
   - Claude: `post` writes a short frame to the owner's inbox socket, which
     starts a turn even while it sits idle. The Stop hook also continues a turn
-    that ends with owned items unread. Only a wakeable home records sockets or
-    wakes through them: the default `~/.agents/bus`, or a home holding an empty
-    `wakeable` file (a launcher can write it for each client bus). A throwaway
-    home made from inside a live session can't wake that session; `who` says
-    `wakes off` there.
+    that ends with owned items unread.
   - OpenCode: the plugin polls `agent-bus stop-hook` while the session is idle
     and resumes it with the result.
   - Codex (Desktop and CLI): install `agent-bus hooks --codex` and review/trust
@@ -467,7 +471,8 @@ that worktree, the delivery line names it (`A live session in that worktree:
 A Codex chat gets one "check your inbox" notice until it reads; later posts
 don't queue more (a notice older than 30 minutes is assumed lost). An OpenCode
 seat whose process has stopped is reported as not running, and `post --resume`
-(or `AGENT_BUS_RESUME=1`) restarts it with `opencode run --session`.
+(or `AGENT_BUS_RESUME=1`) restarts it with `opencode run --session` (on a
+wakeable home only).
 
 One host session that runs bus commands from two folders holds two seats.
 `read`, the digest and wakes count packets sent to either.
@@ -622,7 +627,7 @@ timeout.  The Python Codex adapter (`lib/codex_queue.py`) uses the same
   state/roles/<r>.pm    repo PM
   state/roles/<r>.lane.<l>.pm  lane PM
   claims/<hash>.json    claims
-  wakeable              empty marker: a home other than ~/.agents/bus may record sockets and wake
+  wakeable              empty marker: a home other than ~/.agents/bus may wake sessions (Claude sockets, Codex queue, OpenCode --resume, Grok webhooks)
 ```
 
 A `msg` row carries `re` (the packet it replies to) and, when it closes that

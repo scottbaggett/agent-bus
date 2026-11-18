@@ -45,6 +45,9 @@ sys.exit(int(os.environ.get('FAKE_QUEUE_EXIT', '0')))
                         AGENT_BUS_REPO_ID='testrepo', AGENT_BUS_WT='testwt',
                         # Pre-policy rules: broadcast work items stay legal, done means done.
                         AGENT_BUS_POLICY_OWNER='pm', AGENT_BUS_POLICY_REVIEW='none')
+        # A home other than ~/.agents/bus wakes sessions only once it is marked.
+        (self.home / 'bus').mkdir()
+        (self.home / 'bus/wakeable').touch()
 
     def cmd(self, *args, tool='codex', session=None, extra=None, check=True, input=None):
         env = self.env | {'AGENT_BUS_TOOL': tool, 'AGENT_BUS_SESSION': session or self.thread}
@@ -102,6 +105,35 @@ sys.exit(int(os.environ.get('FAKE_QUEUE_EXIT', '0')))
         self.assertEqual(state['wakes'], 1)
         self.assertEqual(self.rows('delivery')[-1]['msg'], self.rows('msg')[-1]['id'])
         self.assertFalse((self.home/'should-not-exist').exists())
+
+    def test_an_unmarked_home_queues_no_notice_but_keeps_the_post(self):
+        (self.home / 'bus/wakeable').unlink()
+        target = self.enable()
+        out = self.post(target, 'for an unmarked home')
+        self.assertEqual(self.requests(), [])
+        self.assertIn(f'delivery: {target} — wakes off on this home, so no notice is queued', out.stdout)
+        self.assertEqual([r for r in self.rows('delivery') if r.get('transport') == 'codex-queue'], [])
+        self.assertEqual(self.rows('msg')[-1]['subject'], 'for an unmarked home')
+        self.assertIn('wakes off', self.cmd('who').stdout)
+
+    def test_a_marked_home_queues_a_notice(self):
+        target = self.enable()
+        out = self.post(target)
+        self.assertEqual(len(self.requests()), 1)
+        self.assertIn(f'delivery: {target} — queued', out.stdout)
+        self.assertNotIn('wakes off', self.cmd('who').stdout)
+
+    def test_the_default_home_queues_a_notice_without_a_marker(self):
+        home = self.home / 'h'
+        home.mkdir()
+        self.env.pop('AGENT_BUS_HOME')
+        self.env['HOME'] = str(home)
+        self.cmd('codex', 'enable')
+        self.assertFalse((home / '.agents/bus/wakeable').exists())
+        seat = json.loads(next((home / '.agents/bus/seats').glob('codex_*.json')).read_text())
+        out = self.post(seat['addr'])
+        self.assertEqual(len(self.requests()), 1)
+        self.assertIn(f"delivery: {seat['addr']} — queued", out.stdout)
 
     def test_routing_broadcast_self_stale_disable_and_no_push(self):
         target = self.enable()

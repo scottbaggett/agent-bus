@@ -908,7 +908,8 @@ PY
     "$(jq -r '.socket // ""' "$BUS_HOME/seats/$(printf '%s' "$U1" | tr '/' '_').json")"
   out=$(AGENT_BUS_NO_PUSH=0 seat o3 claude wx post --to "$U1" --state needs-review -m '# no wake here' || true)
   assert_has "a post on an unmarked home doesn't wake" "delivery: $U1 — inbox submission unavailable; packet retained" "$out"
-  assert_has "who says wakes are off on an unmarked home" "Claude socket wakes off: home not marked wakeable" "$(a who)"
+  assert_has "who says wakes are off on an unmarked home, for every tool it wakes" \
+    "wakes off: home not marked wakeable ($BUS_HOME/wakeable); post sends no Claude inbox wake, Codex notice, OpenCode --resume or Grok webhook" "$(a who)"
   touch "$BUS_HOME/wakeable"
   assert_lacks "and not once the home is marked" "wakes off" "$(a who)"
   CLAUDE_CODE_MESSAGING_SOCKET="$SOCKD/owner" seat o1 claude wp who >/dev/null
@@ -1102,6 +1103,17 @@ PY
   # Re-register with a real webhook URL (replaces the placeholder from above)
   greg grok register --name bot1 --webhook "$GROK_URL" >/dev/null
 
+  # An unmarked home sends no webhook; the post still lands.
+  rm -f "$BUS_HOME/wakeable"
+  out=$(AGENT_BUS_NO_PUSH=0 a post --to "$GADDR" --state question -m '# grok on unmarked' 2>&1 || true)
+  sleep 0.3
+  assert_has "a post to a Grok seat on an unmarked home still lands" "posted" "$out"
+  assert_has "and says no webhook notice is sent" "delivery: $GADDR — wakes off on this home, so no webhook notice is sent" "$out"
+  assert_eq "and the webhook gets no POST" "0" "$(cat "$GROOKD/requests.jsonl" 2>/dev/null | grep -c . || true)"
+  gbot read >/dev/null
+  # The rest of this block expects delivery: mark the home.
+  touch "$BUS_HOME/wakeable"
+
   # Delivery: post to grok seat triggers webhook
   out=$(AGENT_BUS_NO_PUSH=0 a post --to "$GADDR" --state needs-review \
     -m $'# needs-review for grok\n\nplease check' 2>&1 || true)
@@ -1193,6 +1205,7 @@ PY
   out=$(greg grok unregister --name bot1 2>&1 || true)
   assert_has "double unregister is an error" "not registered" "$out"
 
+  rm -f "$BUS_HOME/wakeable"
   kill "$GROK_SRV" 2>/dev/null || true
   wait "$GROK_SRV" 2>/dev/null || true
   GROK_SRV=; rm -rf "$GROOKD"
@@ -1350,6 +1363,7 @@ s = http.server.HTTPServer(('127.0.0.1', 0), H)
 s.serve_forever()
 PY
   _GSRV=$!
+  touch "$BUS_HOME/wakeable"
   for _i in $(seq 10); do [ -f "$_GSD/port" ] && break; sleep 0.1; done
   _GSD_URL="http://127.0.0.1:$(cat "$_GSD/port")/hook"
 
@@ -1391,6 +1405,7 @@ PY
   raw_seat gsreg shell tester grok unregister --name gstest2 2>/dev/null || true
 
   kill "$_GSRV" 2>/dev/null; wait "$_GSRV" 2>/dev/null || true
+  rm -f "$BUS_HOME/wakeable"
   rm -rf "$_GSD"
 else
   printf 'skip grok secrets tests (python3/curl missing)\n'
@@ -1859,6 +1874,42 @@ AGENT_BUS_BRANCH=fix/alpha pr par2 who >/dev/null
 assert_has "a parent's lane can come from its branch" "lane     alpha (branch name)" "$(AGENT_BUS_BRANCH=fix/alpha pr par2 whoami)"
 assert_has "a child on another branch still takes its parent's lane" "lane     alpha (parent)" \
   "$(AGENT_BUS_BRANCH=fix/zebra kid par2 k3 whoami)"
+
+# --- post --resume restarts a stopped OpenCode session only from a wakeable home ---
+RS=$(mktemp -d); mkdir -p "$RS/bin" "$RS/wt"
+cat >"$RS/bin/opencode" <<'SH'
+#!/bin/sh
+printf '%s\n' "$*" >>"$RESUME_CALLS"
+SH
+chmod +x "$RS/bin/opencode"
+rs() { (cd "$RS/wt" && AGENT_BUS_PID=999999 seat rs1 opencode wres "$@"); }
+rs who >/dev/null
+RA=$(addr rs)
+resume_post() { AGENT_BUS_NO_PUSH=0 AGENT_BUS_NO_PEERS=1 RESUME_CALLS="$RS/calls" PATH="$RS/bin:$PATH" \
+  a post --to "$RA" --resume -m "$1" 2>&1 || true; }
+rm -f "$BUS_HOME/wakeable"
+out=$(resume_post '# resume from unmarked')
+sleep 0.5
+assert_has "post --resume on an unmarked home still posts" "posted" "$out"
+assert_has "and says it didn't restart the session" "delivery: $RA — not restarted: wakes off on this home" "$out"
+assert_eq "and never runs opencode" "no" "$([ -e "$RS/calls" ] && echo yes || echo no)"
+assert_has "the stopped seat still gets the packet" "resume from unmarked" "$(rs read --peek)"
+out=$(AGENT_BUS_NO_PUSH=0 AGENT_BUS_NO_PEERS=1 a post --to "$RA" -m '# plain on unmarked' 2>&1 || true)
+assert_has "a stopped OpenCode seat on an unmarked home isn't promised a resume" \
+  "not running; it sees this when restarted (wakes off on this home, so post --resume cannot restart it)" "$out"
+# A seat whose process state is unknown (an `opencode serve` session) may still be open.
+(cd "$RS/wt" && AGENT_BUS_PID=x seat rs2 opencode wres2 who >/dev/null)
+RU=$(cd "$RS/wt" && AGENT_BUS_PID=x addr seat rs2 opencode wres2)
+out=$(AGENT_BUS_NO_PUSH=0 AGENT_BUS_NO_PEERS=1 RESUME_CALLS="$RS/calls" PATH="$RS/bin:$PATH" \
+  a post --to "$RU" --resume -m '# unknown on unmarked' 2>&1 || true)
+assert_has "post --resume to a session that may be open says its plugin may still pick it up" \
+  "delivery: $RU — not restarted: wakes off on this home; its plugin picks this up if the session is open" "$out"
+touch "$BUS_HOME/wakeable"
+out=$(resume_post '# resume from marked')
+for i in 1 2 3 4 5 6 7 8 9 10; do [ -s "$RS/calls" ] && break; sleep 0.2; done
+assert_has "post --resume on a marked home restarts the session" "delivery: $RA — restarted its session" "$out"
+assert_has "by running opencode on the seat's session" "run --session rs1" "$(cat "$RS/calls" 2>/dev/null)"
+rm -f "$BUS_HOME/wakeable"; rm -rf "$RS"
 
 # --- the default home wakes without a marker ---
 DH=$(mktemp -d)

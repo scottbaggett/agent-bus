@@ -312,8 +312,9 @@ server_pid() {
 }
 
 # Only the default home, or one holding a `wakeable` marker (a launcher that sets up a
-# dedicated bus home can write it), records inbox sockets or wakes through them. A throwaway
-# bus made from inside a live session can then never wake that session.
+# dedicated bus home can write it), wakes sessions from `post`: Claude inbox sockets, Codex
+# queue notices, OpenCode `post --resume` and Grok webhooks. A throwaway bus made
+# from inside a live session can then never wake that session, or any other.
 bus_wakeable() { [ "${BUS%/}" = "$HOME/.agents/bus" ] || [ -e "$BUS/wakeable" ]; }
 
 touch_seat() {
@@ -909,6 +910,7 @@ pid_state() {
 # Restart a stopped OpenCode session so it picks up new work. `opencode run`
 # exits after each reply; people resumed these by hand dozens of times.
 resume_opencode() { # addr session cwd id
+  bus_wakeable || return 1
   command -v opencode >/dev/null 2>&1 || return 1
   [ -n "$2" ] && [ "$2" != local ] && [ -d "$3" ] || return 1
   (cd "$3" && nohup opencode run --session "$2" ${AGENT_BUS_OPENCODE_MODEL:+-m "$AGENT_BUS_OPENCODE_MODEL"} \
@@ -1065,6 +1067,10 @@ deliver_grok_targets() {
     secret_env=$(jq -r '.grok_secret_env // ""' <<<"$row")
     name=$(jq    -r '.wt           // ""' <<<"$row")
     [ -n "$webhook" ] || continue
+    if ! bus_wakeable; then
+      printf 'delivery: %s — wakes off on this home, so no webhook notice is sent; it sees this when it reads\n' "$addr"
+      continue
+    fi
     http_code=''; detail=''
 
     if ! command -v "$GROK_CURL" >/dev/null 2>&1; then
@@ -1281,6 +1287,10 @@ queue_codex_targets() {
   while IFS= read -r row; do
     [ -n "$row" ] || continue
     addr=$(jq -r .addr <<<"$row"); session=$(jq -r .session <<<"$row")
+    if ! bus_wakeable; then
+      printf 'delivery: %s — wakes off on this home, so no notice is queued; it sees this when it reads\n' "$addr"
+      continue
+    fi
     binary=$(jq -r .codex_queue <<<"$row")
     if command -v python3 >/dev/null 2>&1; then
       result=$(python3 "$(codex_helper)" "$binary" "$session" \
@@ -1529,7 +1539,7 @@ cmd_who() {
   local now; now=$(now_epoch)
   local cut=$(( now - SEAT_TTL )) pm rows
   pm=$(pm_seat)
-  bus_wakeable || printf 'Claude socket wakes off: home not marked wakeable (%s/wakeable)\n' "$BUS"
+  bus_wakeable || printf 'wakes off: home not marked wakeable (%s/wakeable); post sends no Claude inbox wake, Codex notice, OpenCode --resume or Grok webhook\n' "$BUS"
   printf 'seats active in the last %dm, plus registered Codex chats and Grok Bot seats:\n' "$((SEAT_TTL / 60))"
   rows=$(seat_rows | jq -r --argjson cut "$cut" \
     --argjson codex_cut "$(( now - CODEX_MAX_IDLE_TTL ))" \
@@ -1844,15 +1854,22 @@ deliver() { # rec src resume
           printf 'delivery: %s — inbox submission unavailable; packet retained for its next prompt or bus read\n' "$addr"
         fi ;;
       opencode)
-        local ps_; ps_=$(pid_state "$(jq -r '.pid // ""' <<<"$row")")
+        local ps_ hint_=', post --resume restarts it'; ps_=$(pid_state "$(jq -r '.pid // ""' <<<"$row")")
+        bus_wakeable || hint_='; wakes off on this home, so post --resume cannot restart it'
         if [ "$ps_" = yes ]; then
           printf 'delivery: %s — its plugin picks this up within seconds\n' "$addr"
+        elif [ "$resume" = 1 ] && ! bus_wakeable; then
+          if [ "$ps_" = no ]; then
+            printf 'delivery: %s — not restarted: wakes off on this home; it sees this when restarted\n' "$addr"
+          else
+            printf 'delivery: %s — not restarted: wakes off on this home; its plugin picks this up if the session is open, otherwise when it is restarted\n' "$addr"
+          fi
         elif [ "$resume" = 1 ] && resume_opencode "$addr" "$(jq -r '.session // ""' <<<"$row")" "$(jq -r '.cwd // ""' <<<"$row")" "$id"; then
           printf 'delivery: %s — restarted its session to pick this up\n' "$addr"
         elif [ "$ps_" = no ]; then
-          printf 'delivery: %s — not running; it sees this when restarted (post --resume restarts it)\n' "$addr"
+          printf 'delivery: %s — not running; it sees this when restarted (%s)\n' "$addr" "${hint_#[,;] }"
         else
-          printf 'delivery: %s — its plugin picks this up if the session is open; if it has exited, post --resume restarts it\n' "$addr"
+          printf 'delivery: %s — its plugin picks this up if the session is open; if it has exited%s\n' "$addr" "$hint_"
         fi ;;
       codex|grok) ;;  # reported by their own transports below
       *) printf 'delivery: %s — has no hooks; it sees this only when it runs agent-bus read\n' "$addr" ;;

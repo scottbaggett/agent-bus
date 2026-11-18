@@ -117,8 +117,10 @@ If `post` prints a `tip:` line, pass it on to your user in one sentence.
 its next prompt, queued, not running, or nobody. If it says nobody owns it, nobody will
 act on it: send it to a seat instead. An OpenCode seat that isn't running can
 be restarted with `post --resume`. If `who` says `wakes off`, this bus home
-isn't marked wakeable (a throwaway or test bus), so idle Claude sessions on it
-see posts only at their next prompt.
+isn't marked wakeable (a throwaway or test bus): `post` sends no Claude inbox
+wake, Codex notice or Grok webhook, and `--resume` restarts nothing. Those
+seats see the packet at their next prompt or read; a running OpenCode session's
+plugin still picks it up.
 
 Need an answer before you can go on (a review, a decision)? Ask and wait:
 

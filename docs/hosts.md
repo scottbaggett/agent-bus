@@ -55,7 +55,8 @@ every prompt, and resumes the session when it's idle and owns new work.
   environment OpenCode starts from.
 - `opencode run` is one-shot: it exits when the turn ends and the plugin can't
   wake it. `agent-bus post --resume` (or `AGENT_BUS_RESUME=1`) restarts it with
-  `opencode run --session`; set `AGENT_BUS_OPENCODE_MODEL` if the default model
+  `opencode run --session` (only from a home that may wake sessions: see
+  Claude Code above); set `AGENT_BUS_OPENCODE_MODEL` if the default model
   can't use tools. OpenCode serves every session from one `opencode serve`
   process, so agent-bus can't tell a stopped session from an idle one; `post`
   says so and points at `--resume`.
@@ -78,7 +79,8 @@ events; `enable` resumes it. If discovery fails, the session remains pull-only
 and later hooks retry. Packets are **not** injected:
 the chat is told at session start to run `agent-bus read`, and when it owns new
 work while idle, Codex's queue delivers a fixed "check your inbox" notice
-(Codex picks it up within about 10s). Reply with the normal
+(Codex picks it up within about 10s). As with Claude, only the default bus
+home or one holding a `wakeable` file queues that notice. Reply with the normal
 `agent-bus post --re <id> --close done --to <seat> --state done …`.
 
 ```sh
@@ -137,7 +139,9 @@ should be re-run (with the var set) to store the value; until then, every
 posting session needs the var exported.
 
 The webhook receives a small JSON notice (routing info only, no packet body)
-and the bot then reads and replies with normal bus commands on the user's Mac:
+and the bot then reads and replies with normal bus commands on the user's Mac.
+As with Claude, only the default bus home or one holding a `wakeable` file sends
+that POST:
 
 ```sh
 # On the Mac, run by Grok Bot via remote shell:

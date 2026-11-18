@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 import uuid
 
@@ -244,6 +245,242 @@ sys.exit(int(os.environ.get('FAKE_QUEUE_EXIT', '0')))
         self.assertEqual(outcomes.count('budget_exhausted'), 5)
         self.assertEqual(json.loads(self.state().read_text())['wakes'], 3)
 
+
+    # --- unconfirmed seats (a notice nobody answers) ---
+    def seatfile(self, session=None, wt=None):
+        for path in (self.home/'bus/seats').glob('codex_*.json'):
+            row = json.loads(path.read_text())
+            if row['session'] == (session or self.thread) and row['wt'] == (wt or self.env['AGENT_BUS_WT']):
+                return path
+
+    def quiet(self, secs=1000, session=None):
+        """The seat last did anything secs ago (its TTL still holds)."""
+        path = self.seatfile(session)
+        row = json.loads(path.read_text()); row['epoch'] = int(time.time()) - secs
+        if row.get('last_hook'): row['last_hook'] = int(time.time()) - secs
+        path.write_text(json.dumps(row) + '\n')
+
+    def wakes(self):
+        return next((self.home/'bus/seats').glob('codex_*.wakes'), None)
+
+    def age_notices(self, secs=601):
+        """Every notice logged so far went out secs ago."""
+        log = self.wakes()
+        log.write_text(''.join(f'{int(e) - secs}\n' for e in log.read_text().split()))
+
+    def notice_lapsed(self):
+        """The outstanding notice is past NOTICE_FRESH_SECS, so the next post sends another."""
+        path = self.state(); st = json.loads(path.read_text())
+        st['notified_at'] = int(time.time()) - adapter.NOTICE_FRESH_SECS - 1
+        path.write_text(json.dumps(st))
+
+    def demote(self, target, **kw):
+        """One notice, unanswered for over ten minutes."""
+        self.post(target, '# a notice nobody answers', **kw)
+        self.age_notices()
+        self.assertTrue(self.unconfirmed())
+
+    def unconfirmed(self):
+        return 'UNCONFIRMED' in self.cmd('who', tool='claude', session='observer').stdout
+
+    def snapshot(self):
+        return json.loads(self.cmd('snapshot', tool='claude', session='observer').stdout)
+
+    def owners(self):
+        return {o['subject']: o['owner'] for o in self.snapshot()['open']}
+
+    def boss(self, *args):
+        self.cmd('role', 'pm', *args, tool='claude', session='boss', extra={'AGENT_BUS_WT': 'bosswt'})
+        return self.cmd('whoami', tool='claude', session='boss', extra={'AGENT_BUS_WT': 'bosswt'}).stdout.split('seat')[1].split()[0]
+
+    def test_an_unanswered_notice_demotes_a_lane_pm_and_its_work_falls_to_the_repo_pm(self):
+        target = self.enable()
+        self.cmd('role', 'pm', '--lane', 'lanex')
+        boss = self.boss()
+        self.cmd('lane', 'lanex', tool='claude', session='sender')
+        self.quiet()
+        for n in range(3):
+            self.post('@pm', f'# ask {n}')
+        self.assertEqual([r['status'] for r in self.rows('delivery')], ['queued', 'already_notified', 'already_notified'])
+        self.assertFalse(self.unconfirmed())
+        self.age_notices()
+        self.assertTrue(self.unconfirmed())
+        snap = self.snapshot()
+        self.assertIsNotNone(next(s for s in snap['seats'] if s['addr'] == target)['unconfirmed'])
+        self.assertIn(target, [a.get('seat') for a in snap['attention'] if a['kind'] == 'unconfirmed'])
+        self.assertEqual(set(self.owners().values()), {boss})
+        out = self.post('@pm', '# ask 3')
+        self.assertNotIn(f'delivery: {target}', out.stdout)
+        self.assertEqual(len(self.rows('delivery')), 3)
+        # Any command from the chat confirms it again, and its lane's work comes back.
+        self.cmd('read', '--peek')
+        self.assertFalse(self.unconfirmed())
+        self.assertEqual(set(self.owners().values()), {target})
+
+    def test_posts_that_find_a_notice_outstanding_never_demote_a_busy_chat(self):
+        target = self.enable()
+        self.quiet()
+        for n in range(5):
+            self.post(target, f'# mid-turn {n}')
+        self.assertEqual([r['status'] for r in self.rows('delivery')].count('already_notified'), 4)
+        self.assertEqual(len(self.wakes().read_text().split()), 1)
+        self.assertFalse(self.unconfirmed())
+
+    def test_three_notices_sent_and_unanswered_demote_the_seat(self):
+        target = self.enable()
+        self.quiet()
+        for n in range(3):
+            self.assertFalse(self.unconfirmed())
+            self.post(target, f'# sent {n}')
+            self.notice_lapsed()
+        self.assertEqual([r['status'] for r in self.rows('delivery')], ['queued'] * 3)
+        self.assertTrue(self.unconfirmed())
+
+    def test_a_hook_from_the_chat_confirms_it_again(self):
+        self.hook('SessionStart')
+        target = self.seat()['addr']
+        self.quiet()
+        self.demote(target)
+        self.hook('UserPromptSubmit')
+        self.assertFalse(self.unconfirmed())
+
+    def test_one_notice_unanswered_for_ten_minutes_demotes_the_seat(self):
+        target = self.enable()
+        self.quiet(1000)
+        self.post(target)
+        self.assertFalse(self.unconfirmed())
+        self.age_notices(590)
+        self.assertFalse(self.unconfirmed())
+        self.age_notices(11)
+        self.assertTrue(self.unconfirmed())
+
+    def test_the_triggers_are_configurable_and_zero_turns_them_off(self):
+        target = self.enable()
+        self.quiet(1000)
+        self.env.update(AGENT_BUS_CODEX_UNCONFIRMED_AFTER='0', AGENT_BUS_CODEX_UNCONFIRMED_SECS='0')
+        self.post(target)
+        self.age_notices()
+        self.assertFalse(self.unconfirmed())
+        self.env.update(AGENT_BUS_CODEX_UNCONFIRMED_SECS='600')
+        self.assertTrue(self.unconfirmed())
+        self.env.update(AGENT_BUS_CODEX_UNCONFIRMED_SECS='0', AGENT_BUS_CODEX_UNCONFIRMED_AFTER='1')
+        self.assertTrue(self.unconfirmed())
+
+    def test_a_malformed_trigger_warns_and_keeps_the_default(self):
+        target = self.enable()
+        self.quiet()
+        self.demote(target)
+        for bad in ({'AGENT_BUS_CODEX_UNCONFIRMED_AFTER': '3x'}, {'AGENT_BUS_CODEX_UNCONFIRMED_SECS': 'ten'}):
+            who = self.cmd('who', tool='claude', session='observer', extra=bad)
+            self.assertIn('is not a whole number', who.stderr)
+            self.assertIn(target, who.stdout)
+            self.assertIn('UNCONFIRMED', who.stdout)
+
+    def test_a_broken_notice_log_leaves_every_seat_listed(self):
+        target = self.enable()
+        self.post(target)
+        (self.home/'bus/seats/unreadable.wakes').mkdir()
+        who = self.cmd('who', tool='claude', session='observer')
+        self.assertIn(target, who.stdout)
+        out = self.post(target, '# still routed')
+        self.assertIn(f'delivery: {target}', out.stdout)
+
+    def test_an_unconfirmed_seat_passes_direct_work_to_its_heir(self):
+        target = self.enable()
+        heir_thread = str(uuid.uuid4())
+        self.cmd('heartbeat', session=heir_thread)
+        heir_addr = json.loads(self.seatfile(heir_thread).read_text())['addr']
+        self.quiet()
+        self.demote(target)
+        out = self.post(target, '# after the demotion')
+        self.assertIn(f'{target} is gone; sending to {heir_addr}', out.stderr)
+        self.assertEqual(self.rows('msg')[-1]['to'], heir_addr)
+
+    def test_a_lane_whose_only_member_is_unconfirmed_refuses_posts_and_names_it(self):
+        target = self.enable()
+        self.cmd('lane', 'solo')
+        self.quiet()
+        self.demote(target)
+        refused = self.post('@solo', check=False)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn(f'lane @solo has no live seat: {target} has not answered its notices', refused.stderr)
+        self.assertIn('unknown scope @nolane', self.post('@nolane', check=False).stderr)
+
+    def test_with_its_lane_pm_unconfirmed_a_lane_seat_may_ask_the_repo_pm(self):
+        target = self.enable()
+        self.cmd('role', 'pm', '--lane', 'lanex')
+        self.boss()
+        self.cmd('lane', 'lanex', tool='claude', session='sender')
+        refused = self.post('@repo-pm', check=False)
+        self.assertIn('@repo-pm is not yours to use', refused.stderr)
+        self.quiet()
+        self.demote('@pm')
+        self.assertIn('posted', self.post('@repo-pm', '# up a level').stdout)
+
+    def test_unconfirmed_work_with_nobody_above_waits_and_shows_gone(self):
+        target = self.enable()
+        self.cmd('role', 'pm', '--lane', 'lanex')
+        self.cmd('lane', 'lanex', tool='claude', session='sender')
+        self.quiet()
+        self.demote('@pm')
+        self.assertEqual(set(self.owners().values()), {target})
+        self.assertIn('GONE', self.cmd('triage', tool='claude', session='observer').stdout)
+
+    def test_a_review_owed_by_an_unconfirmed_seat_goes_to_the_lead(self):
+        target = self.enable()
+        self.quiet()
+        self.demote(target)
+        worker = {'AGENT_BUS_WT': 'workerwt'}
+        waddr = self.cmd('whoami', tool='claude', session='worker', extra=worker).stdout.split('seat')[1].split()[0]
+        self.cmd('post', '--allow-claude', '--to', waddr, '--state', 'handoff', '--review', target,
+                 '-m', '# build it', tool='claude', session='sender')
+        item = self.rows('msg')[-1]['id']
+        self.cmd('resolve', item, '--reason', 'done', tool='claude', session='worker', extra=worker)
+        review = self.rows('msg')[-1]
+        self.assertEqual((review['to'], review['review_of']), ('@lead', item))
+
+    def test_pausing_every_codex_seat_writes_no_unconfirmed_mark_into_its_file(self):
+        target = self.enable()
+        self.quiet()
+        self.demote(target)
+        self.cmd('codex', 'disable-all')
+        self.assertNotIn('unconfirmed', json.loads(self.seatfile().read_text()))
+
+    def test_the_notice_log_stays_short(self):
+        target = self.enable()
+        self.post(target)
+        log = self.wakes()
+        log.write_text(''.join(f'{1000 + n}\n' for n in range(40)))
+        self.notice_lapsed()
+        self.post(target, '# the forty-first')
+        lines = log.read_text().split()
+        self.assertEqual(len(lines), 20)
+        self.assertEqual(lines[:-1], [str(1000 + n) for n in range(21, 40)])
+
+    def test_session_end_removes_the_notice_log(self):
+        self.hook('SessionStart')
+        self.post(self.seat()['addr'])
+        self.assertIsNotNone(self.wakes())
+        self.hook('SessionEnd')
+        self.assertIsNone(self.wakes())
+
+    def test_an_unconfirmed_seat_keeps_its_role_and_claims_by_ttl(self):
+        target = self.enable()
+        self.cmd('role', 'pm')
+        self.cmd('claim', str(self.home/'held.txt'))
+        self.quiet()
+        self.demote(target)
+        taken = self.cmd('role', 'pm', tool='claude', session='boss', extra={'AGENT_BUS_WT': 'bosswt'}, check=False)
+        self.assertIn('--force', taken.stderr)
+        contested = self.cmd('claim', str(self.home/'held.txt'), tool='claude', session='boss',
+                             extra={'AGENT_BUS_WT': 'bosswt'}, check=False)
+        self.assertIn('CONTESTED', contested.stderr)
+        self.cmd('gc', tool='shell', session='gc-observer')
+        self.assertTrue(list((self.home/'bus/state/roles').glob('*.pm')))
+        self.assertTrue(self.seatfile().exists())
+        self.assertIsNotNone(self.wakes())
+        self.cmd('offboard')
+        self.assertIsNone(self.wakes())
 
     def hook(self, name, *, cwd=None, session=None, extra=None):
         self.env['AGENT_BUS_WT'] = self.home.name

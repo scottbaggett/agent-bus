@@ -2054,6 +2054,64 @@ for cmd in stop-hook digest; do
   assert_eq "$cmd runs jq as often with six lane PMs as with one" "$(jq_calls cost1 pl1 "$cmd")" "$(jq_calls cost6 pl1 "$cmd")"
 done
 
+# --- routing contracts: pm_owner resolves an item's lane itself ---
+# The jq routing library, as the CLI builds it. pm_owner and lanes_of take the
+# ledger's file map, so a caller can't route on a stale lane.
+JQLIB=$(awk '/^JQ_LANE=/{p=1} /^JQ_LIB=/{p=0} p' "$BIN")
+eval "$JQLIB"
+pmof() { jq -nr --argjson fm "$1" "$JQ_LANE$JQ_PM$JQ_CLOSE"'
+  {id: "p1", from: "w", to: "@here", lane: "alpha", state: "question"}
+  | pm_owner({alpha: "pm-a", beta: "pm-b"}; "pm-r"; {alpha: "pm-a", beta: "pm-b"}; $fm)' 2>&1; }
+assert_eq "pm_owner routes a filed item to its filed lane's PM without a caller's help" "pm-b" "$(pmof '{"p1": "beta"}')"
+assert_eq "pm_owner routes an unfiled item to its own lane's PM" "pm-a" "$(pmof '{}')"
+assert_eq "lanes_of counts a file row on its own" '["beta"]' "$(jq -nc "$JQ_LANE$JQ_PM"'
+  {id: "p1", from: "w", to: "x/y", lane: "alpha"} | lanes_of({p1: "beta"})' 2>&1)"
+r2owner() { AGENT_BUS_HOME="$R2" "$BIN" snapshot | jq -r --arg s "$1" '.open[] | select(.subject == $s) | .owner'; }
+# A filed item routes the same way in every reader: snapshot, triage, the PM's wake.
+r2 filed rpm role pm >/dev/null; r2 filed lpm lane beta >/dev/null; r2 filed lpm role pm --lane beta >/dev/null
+FLPM=$(r2addr filed lpm); r2 filed w0 who >/dev/null
+fid=$(r2post filed w0 --to @here --state question -m '# filed into beta' | idof)
+r2 filed rpm file "$fid" beta >/dev/null
+assert_eq "snapshot gives a filed item to its new lane's PM" "$FLPM" "$(r2owner 'filed into beta')"
+assert_has "triage agrees" "owner $FLPM" "$(r2 filed rpm triage)"
+assert_eq "and that PM is woken for it" "block" "$(r2 filed lpm stop-hook </dev/null | jq -r '.decision // "none"')"
+
+# --- a lane's packet never becomes a role's taken later ---
+PRPM=$(r2addr pin rpm); r2 pin rpm role pm >/dev/null; r2 pin w1 lane alpha >/dev/null; r2 pin w0 who >/dev/null
+r2 pin rpm read >/dev/null
+r2post pin w0 --to @alpha --state question -m '# lane work before the role' >/dev/null
+assert_eq "a lane's work item records no role holder" '""' \
+  "$(jq -c 'select(.kind == "msg" and .subject == "lane work before the role") | .to_role' "$R2/ledger.jsonl")"
+r2 pin rh role alpha >/dev/null
+assert_eq "a role taken after the post doesn't take the lane's item in snapshot" "$PRPM" "$(r2owner 'lane work before the role')"
+assert_has "nor in triage" "owner $PRPM" "$(r2 pin rpm triage)"
+assert_lacks "the new role holder isn't shown it" "lane work before the role" "$(r2 pin rh read --peek)"
+assert_eq "nor woken for it" "{}" "$(r2 pin rh stop-hook </dev/null)"
+assert_eq "the lane's PM still owns it" "block" "$(r2 pin rpm stop-hook </dev/null | jq -r '.decision // "none"')"
+r2post pin w0 --to @alpha --state question -m '# role work after the role' >/dev/null
+assert_eq "a packet sent once the role is held goes to the holder" "$(r2addr pin rh)" "$(r2owner 'role work after the role')"
+
+# --- an unconfirmed Codex seat routes nothing until it shows life ---
+cx() { env -u CLAUDE_CODE_MESSAGING_SOCKET AGENT_BUS_HOME="$R2" AGENT_BUS_REPO_ID=unconf AGENT_BUS_TOOL=codex \
+  AGENT_BUS_SESSION=cx1 AGENT_BUS_WT=wcx "$BIN" "$@"; }
+URPM=$(r2addr unconf rpm); r2 unconf rpm role pm >/dev/null
+cx lane ux >/dev/null; cx role pm --lane ux >/dev/null; CX=$(cx whoami | awk '/^seat/{print $2}')
+r2 unconf w1 lane ux >/dev/null
+r2post unconf w1 --to @pm --state question -m '# for the ux lane PM' >/dev/null
+assert_eq "a live Codex lane PM owns its lane's work" "$CX" "$(r2owner 'for the ux lane PM')"
+cxf=$(grep -l "\"addr\":\"$CX\"" "$R2"/seats/*.json | head -1)
+now=$(date -u +%s)
+jq -c --argjson e "$((now - 100))" '.epoch = $e' "$cxf" >"$cxf.t" && mv "$cxf.t" "$cxf"
+printf '%s\n' "$now" "$now" "$now" >"${cxf%.json}.wakes"
+assert_has "who marks a seat whose notices go unanswered" "UNCONFIRMED" "$(r2 unconf rpm who)"
+assert_eq "snapshot lists it as unconfirmed" "$now" \
+  "$(AGENT_BUS_HOME="$R2" "$BIN" snapshot | jq -r --arg a "$CX" '.seats[] | select(.addr == $a) | .unconfirmed')"
+assert_eq "its lane's work falls through to the repo PM" "$URPM" "$(r2owner 'for the ux lane PM')"
+assert_has "triage agrees" "owner $URPM" "$(r2 unconf rpm triage)"
+cx read --peek >/dev/null
+assert_lacks "a command from the seat confirms it again" "UNCONFIRMED" "$(r2 unconf rpm who)"
+assert_eq "and its lane's work comes back to it" "$CX" "$(r2owner 'for the ux lane PM')"
+
 # --- a repo with no commits records its branch by name ---
 NC="$BUS_HOME/nocommits"; mkdir -p "$NC"; git -C "$NC" init -q -b firstbranch
 (cd "$NC" && env -u AGENT_BUS_BRANCH -u AGENT_BUS_REPO_ID AGENT_BUS_HOME="$R2" AGENT_BUS_TOOL=opencode AGENT_BUS_SESSION=nc1 \

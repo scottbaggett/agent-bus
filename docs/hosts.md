@@ -102,7 +102,13 @@ agent-bus codex enable       # resume, or connect manually without hooks
 - Queue wakes count against the 3-wake budget, are never retried, and leave the
   packet unread if they fail; `post` reports the result.
 - Ending the session removes that chat's seats, roles and claims, but not its
-  open work. A crash can leave a stale registration until `offboard`.
+  open work. A crash can leave a stale registration until `offboard`, but once
+  its notices go unanswered (3 notices sent, or one left 10 minutes, with
+  nothing from the chat since) `who` marks it `UNCONFIRMED`. Routing then skips
+  it: a lane PM's work goes to the repo PM, a post to the seat goes to a live
+  heir in its worktree, and work with nobody above it waits on it (GONE in
+  triage). Posts that arrive while a notice is outstanding don't count, so a
+  busy turn isn't demoted for them; the chat's next hook or command confirms it.
 - Use the same bus directory and Codex home on both sides. With a custom
   `AGENT_BUS_HOME`, give it to the Codex chat and its hooks too.
   `AGENT_BUS_CODEX_SETTINGS` installs into a different hooks file.

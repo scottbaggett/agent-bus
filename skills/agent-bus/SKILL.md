@@ -120,7 +120,10 @@ be restarted with `post --resume`. If `who` says `wakes off`, this bus home
 isn't marked wakeable (a throwaway or test bus): `post` sends no Claude inbox
 wake, Codex notice or Grok webhook, and `--resume` restarts nothing. Those
 seats see the packet at their next prompt or read; a running OpenCode session's
-plugin still picks it up.
+plugin still picks it up. A Codex seat `who` marks `UNCONFIRMED` hasn't answered
+its notices: routing skips it, so its lane's work goes to the PM above it, and
+with nobody above it the work waits on it (GONE in triage). Don't hand it work
+directly; ask your user if nobody else can take it.
 
 Need an answer before you can go on (a review, a decision)? Ask and wait:
 

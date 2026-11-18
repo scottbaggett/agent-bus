@@ -199,9 +199,11 @@ seat and a crashed one look different.
 
 `agent-bus triage` lists open items in the repo by owner, oldest first. The
 owner is the one `snapshot` names: `lead` for `@lead` work, the holder of a
-named role, the item's PM, or the seat it was sent to.
+named role, the item's PM, or the seat it was sent to. A packet sent to a lane
+never becomes the packet of a role of that name taken later.
 
-- **GONE** — no live seat answers for the owner. Hand the item on or close it.
+- **GONE** — no live seat answers for the owner (an unconfirmed Codex seat
+  doesn't). Hand the item on or close it.
 - **NOT PICKED UP** — the owner is live but has not read the item after
   `AGENT_BUS_PICKUP_SECS` (600).
 - **STALE** — open past `AGENT_BUS_STALE_HOURS` (24).
@@ -415,7 +417,24 @@ unmatched lanes fall under their repo:
     long-idle chat needs no heartbeat polling. Manual registrations retain the
     usual TTL. A host crash may leave a registration live for up to
     `AGENT_BUS_CODEX_MAX_IDLE_TTL` (default 86400 s = 24 h, measured from the
-    last hook fire); after that the seat expires at gc.
+    last hook fire); after that the seat expires at gc. Before then, a seat
+    whose notices go unanswered is **unconfirmed**: 3 notices sent
+    (`AGENT_BUS_CODEX_UNCONFIRMED_AFTER`), or one left 10 minutes
+    (`AGENT_BUS_CODEX_UNCONFIRMED_SECS`, 600), with no command or hook from the
+    seat since. A post that finds a notice still outstanding sends none and
+    doesn't count, so a chat busy in a long turn isn't demoted for the posts
+    that pile up meanwhile. Routing, heirs and the live-lane check skip an
+    unconfirmed seat, and it gets no further notices. A lane PM's work goes to
+    the repo PM; a post addressed to the seat goes to the live heir in its
+    worktree if there is one; a review handed to it goes to `@lead`. Otherwise,
+    as for any seat that has gone, its work waits on it and `triage` shows it
+    GONE; nothing else moves to `@lead`. A post to a lane whose only members are
+    unconfirmed is refused and names them. `who` marks it `UNCONFIRMED`, and
+    `snapshot` gives it `unconfirmed` (when its first unanswered notice went out)
+    and an `unconfirmed` attention item. It keeps its roles, claims and
+    registration until the TTL, and any command or hook from it confirms it
+    again. 0 turns either trigger off; a value that isn't a whole number is
+    ignored with a warning.
     `codex status` reports registration mode and last queue attempt; it does not
     assert the host is running. Loaded idle chats are qualified; archived/unloaded chats and restart
     recovery are not. The adapter has no polling loop; the tested host checks
@@ -621,6 +640,7 @@ timeout.  The Python Codex adapter (`lib/codex_queue.py`) uses the same
                         replacing (deleting) the older .1; retention is the last two archives, about 10-20 MB
   msg/<id>.md           packet bodies
   seats/<seat>.json     seat registry (grok seats include grok_webhook, grok_secret_env)
+  seats/<seat>.wakes    epochs of Codex notices sent (queued or uncertain), read to mark unconfirmed seats
   secrets/grok_<n>.secret  0600 webhook bearer token (written at grok register)
   state/<seat>.json     read cursor, wake count, grok_attempts list
   state/sessions/<tool>.<hash>  a session's pinned worktree name (AGENT_BUS_SEAT_KEY=session)
@@ -634,7 +654,8 @@ A `msg` row carries `re` (the packet it replies to) and, when it closes that
 packet, `close` (the reason). A `msg` sent to an `@` target carries `to_role`:
 the seat that held a role of that name when it was posted (`--to @release`), or
 `""` for a lane or broadcast. `reply` reads it, so a role taken or let go later
-never changes who the packet was sent to. A `resolve` row carries `msg`, `by`
+never changes who the packet was sent to, and routing reads it, so a lane's
+packet never becomes a role's. A `resolve` row carries `msg`, `by`
 and `reason`.
 Rows written before v2 have no reason and still close their packet.
 

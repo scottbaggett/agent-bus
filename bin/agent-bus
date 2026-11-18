@@ -3192,7 +3192,9 @@ watch_repo() {
       watch_update 'del(.dark[$l])' --arg l "$l"; continue
     fi
     [ -n "$(jq -r --arg l "$l" '.dark[$l] // empty' <<<"$st")" ] || watch_update '.dark[$l] = $now' --arg l "$l" --argjson now "$now"
-    lead_line "$(printf 'dark\t- @%s has no live PM (last %s): agent-bus role pm --lane %s, or agent-bus lane park %s if it is stopped on purpose' "$l" "$pmaddr" "$l" "$l")"
+    # Lane names repeat across repos (@team in two of them): say which, and
+    # where to run the park from.
+    lead_line "$(printf 'dark\t- %s:@%s has no live PM (last %s): agent-bus role pm --lane %s, or cd %s && agent-bus lane park %s if it is stopped on purpose' "$REPO" "$l" "$pmaddr" "$l" "$TOP" "$l")"
   done < <(jq -r 'to_entries[] | "\(.key)\t\(.value)"' <<<"$lpms")
   watch_update '.lead_lines[$rid] = {at: $now, lines: $lines}' --arg rid "$REPO_ID" --argjson now "$now" \
     --argjson lines "$(printf '%s' "$leadlines" | jq -Rsc 'split("\n") | map(select(length > 0))')"

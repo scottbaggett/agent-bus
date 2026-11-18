@@ -314,6 +314,9 @@ assert_lacks "the lead seat (watch.lead) may, verb first" "may change its lifecy
 assert_lacks "and the verb is not read as a lane" "@park" "$out"
 out=$(watch)
 assert_has "lane park silences it (the packet closes: nothing left)" "closed the lead packet $lid" "$out"
+touch "$AGENT_BUS_HOME"/state/roles/*.lane.feat.pm; sleep 1; touch "$AGENT_BUS_HOME"/state/roles/*.lane.feat.pm
+out=$(watch)
+assert_lacks "a park holds when the role file is touched (an idle PM's hooks)" "@feat has no live PM" "$(jq -c '.lead_lines' "$WF")"
 
 # --- fyi_wake and thread_reports ---
 lp2 role pm --lane feat --force >/dev/null

@@ -1,95 +1,111 @@
 # Agent Bus
 
-Run several coding agents at once, in different windows and worktrees, and let
-them work together: hand off work, ask each other for review, stay out of each
-other's files, and come to you when a call is yours to make.
-
-Works natively with Claude Code, OpenCode, Codex and GrokBot. 
-
-
 <p align="center">
-  <img src="assets/agent-bus.svg" width="900" alt="agent-bus as a terminal dashboard. A Claude Code agent hands the client work to a Codex agent; Codex claims src/client.ts, does it and sends it back; Claude checks and approves it. An OpenCode agent keeps out of the claimed file and asks you before dropping a table. A live bus log lists each step.">
+  <img src="assets/agent-bus.svg" width="900" alt="agent-bus as a terminal dashboard. A Claude Code agent hands the client work to a Codex agent; Codex claims src/client.ts, does it and sends it back; Claude checks and approves it. An OpenCode agent stays out of the claimed file and asks you before dropping a table. A live bus log lists each step.">
 </p>
+
+**A file-backed handoff bus that lets your coding agents coordinate—without you typing a single bus command.**
+
+Run Claude Code, OpenCode, Codex Desktop, and Grok Bot in parallel on the same repo. Tell them what to do in plain English. They wake each other, hand work back and forth, claim files, and come to you only when a decision is genuinely yours to make.
+
+No daemon, no server. A `jq`-powered CLI and an append-only ledger under `~/.agents/bus/`.
+
+---
 
 ## Get started
 
-**1. Install**
+### 1. Install
 
 ```sh
 brew install scottbaggett/tap/agent-bus
 agent-bus hooks
 ```
 
-Or without Homebrew (needs `jq`):
+No Homebrew? (`jq` required):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/scottbaggett/agent-bus/main/install.sh | bash
 ```
 
-`agent-bus hooks` connects every agent it finds on your machine and adds the
-`/agent-bus` skill to each. Restart OpenCode after installing; in Codex, trust
-the four agent-bus hooks under `/hooks`.
+`agent-bus hooks` wires every agent it finds and drops the `/agent-bus` skill into each one. Restart OpenCode after installing; in Codex, review and trust the four agent-bus hooks under `/hooks`.
 
-**2. Open two agents** in the same repo: say Claude Code in one window and Codex
-or OpenCode in another.
+### 2. Open two agents
 
-**3. Type `/agent-bus`** in one of them. It tells you what agent-bus does and
-which other agents it can see.
+Open Claude Code, OpenCode, or Codex Desktop in two windows on the same repo.
 
-**4. Hand something over.** Tell it, in plain words:
+### 3. Type `/agent-bus` in one of them
 
-> "Hand this to the Codex window: the endpoint is done, it needs tests."
+It shows your seat, what it can see, and walks you through a first handoff.
 
-The other agent picks it up on its own, does it, and sends it back to yours to
-check.
+### 4. Tell your agent to hand something over
 
-That's it. There's nothing to configure: you talk to your agents, they run the
-commands. When you want to change how they work together, see
-[Make it yours](#make-it-yours).
+> "Hand this to the Codex window—the endpoint is done, it needs tests."
 
-## The idea in one minute
+The other agent picks it up, does the work, and sends it back. You didn't type a single bus command.
 
-- **Each agent session is a seat**, named for its tool and worktree, like
-  `opencode/checkout-api.3f1a`. `agent-bus who` lists the live ones.
-- **Agents send each other packets.** Some just inform. Others are **work
-  items** (a handoff, a review request, a question, a blocker): each has one
-  owner and stays open until someone closes it with a reason. Nothing gets
-  dropped between windows.
-- **The owner is told.** Work you own appears in your agent's context on its
-  next prompt, and an idle agent is woken to pick it up.
-- **You are `@lead`.** Anything an agent can't settle comes to you, and
-  `agent-bus attention` shows what's waiting.
-- **Lanes group a feature.** A branch named after a ticket (`feature/eng-142-…`)
-  puts its agent in lane `eng-142`, so agents on the same feature in different
-  worktrees find each other.
+---
+
+## How it works
+
+The CLI is for agents, not humans. When you say *"hand this to the other window,"* your agent runs the bus command. The recipient wakes up, reads the packet on its next prompt, does the work, and replies—handing it back to your agent automatically.
+
+```mermaid
+sequenceDiagram
+    participant You
+    participant A as Agent A (Claude Code)
+    participant Bus as ~/.agents/bus/
+    participant B as Agent B (Codex)
+
+    You->>A: "Hand the client tests to the Codex window"
+    A->>Bus: agent-bus post --to codex/main.5f21 --state handoff …
+    Bus-->>B: wake (queue notice)
+    B->>Bus: agent-bus read → picks up work
+    B->>Bus: agent-bus reply <id> -m "Done: tests in src/client.test.ts"
+    Bus-->>A: wake (inbox socket)
+    A->>You: "Codex finished—tests are green."
+```
+
+**Seats** Each agent session is a seat: `tool/worktree.inst`, e.g. `claude/main.b41c`. `agent-bus who` lists live ones.
+
+**Packets** Agents send packets—notifications, handoffs, review requests, questions, blockers. Work items have a single owner and stay open until closed with a reason. Nothing drops between windows.
+
+**Roles** `@lead` is you. Anything agents can't settle on their own comes to you; `agent-bus attention` shows what's waiting. For bigger features, one agent can take the `pm` role for a lane—it picks up unowned work and keeps things moving.
+
+**Lanes** A branch named after a ticket (`feature/eng-142-…`) puts its agent in lane `eng-142`. Agents on the same feature across worktrees find each other automatically.
+
+**Claims** `agent-bus claim src/billing/invoice.ts` advisory-locks a file. Other agents check before editing instead of overwriting.
+
+---
+
+## Supported hosts
+
+| Host | Packets injected | Idle wake | Setup after `agent-bus hooks` |
+|---|---|---|---|
+| Claude Code | yes, every prompt | yes (inbox socket) | nothing—hooks do it |
+| OpenCode | yes, after first message | yes (session resume) | restart OpenCode |
+| Codex Desktop / CLI | reads on startup prompt | yes (queue, ~10 s) | trust the 4 hooks in `/hooks` |
+| Grok Bot | webhook delivery | yes (HTTP POST) | `agent-bus grok register` |
+| Plain shell | no (pull only) | no | none |
+
+Full caveats per host: [docs/hosts.md](docs/hosts.md).
+
+---
 
 ## Patterns
 
-Each pattern starts with what you'd tell your agent. The command underneath is
-what it runs.
+Each pattern starts with what you'd tell your agent. The command underneath is what it runs.
 
 ### Hand work to another agent
 
-You're done with your part and another window should pick it up.
-
-> "Hand this to the OpenCode agent in checkout-api: the endpoint is done, it
-> needs the client wired up."
+> "Hand this to the OpenCode agent in checkout-api: the endpoint is done, it needs the client wired up."
 
 ```sh
-agent-bus post --to opencode/checkout-api.3f1a --state handoff --touched auto -m "# Wire up the client ..."
+agent-bus post --to opencode/checkout-api.3f1a --state handoff --touched auto -m "# Wire up the client …"
 ```
 
-The other agent sees it on its next prompt, or is woken if idle. `post` tells
-you which, one line per agent it reached. Address one seat, never everyone: a
-broadcast (`@here`) has no owner, so nobody acts on it, and `post` says so.
+Address one seat, not everyone. A broadcast (`@here`) has no owner, so nobody acts on it, and `post` says so.
 
-Claude Code seats can use the same command to reach each other. The bus keeps
-ownership, review history and explicit closure and submits a notification through Claude's native
-inbox socket. Submission does not prove acceptance or reading; Claude's inbound
-controls may hold or refuse it. Direct `SendMessage` remains available for
-quick conversations that do not need an owner or close reason.
-
-### Ask for a review before it's done
+### Ask for review before it's done
 
 > "Send this to the Codex agent for review."
 
@@ -104,55 +120,39 @@ agent-bus review <id> --approve
 agent-bus review <id> --changes -m "Handle the burst case"
 ```
 
-Handoffs come back the same way. When an agent finishes work it was handed, it
-answers and closes it in one step, and that sends it to whoever handed it over
-to accept (unless your rules say done means done). No agent can approve its
-own work.
+When finished, the agent closes it and returns it to whoever handed it over. No agent approves its own work.
 
 ```sh
 agent-bus reply <id> -m "Done: limiter in src/rate.ts, tests green"
 ```
 
-When an agent can't go on without the answer, it asks and waits:
+For a question that blocks further work:
 
 ```sh
-agent-bus ask --to codex/main.5f21 -m "# Does this migration look safe?"
+agent-bus ask --to codex/main.5f21 -m "Does this migration look safe?"
 ```
 
 ### Make "tests pass" mean this commit
 
-Have agents run their checks through the bus and attach them. The reviewer
-sees whether they ran at the exact commit under review and passed, or what is
-stale or failing, instead of taking "all suites pass" on trust:
+Agents attach proof—test results at the exact commit under review:
 
 ```sh
 agent-bus proof run -- npm test
 agent-bus post --to <seat> --state needs-review --proof auto -m "Ready for review"
 ```
 
-`agent-bus init --set proof=warn` attaches proof to every review request;
-`proof=require` refuses one without passing checks at that commit.
+`agent-bus init --set proof=warn` attaches proof to every review request; `proof=require` refuses reviews without passing checks at that commit.
 
 ### Split a feature across worktrees
 
-Start each agent in its own worktree on a branch with the ticket key. They land
-in the same lane automatically:
+Start each agent in its own worktree on a branch with the ticket key. They land in the same lane automatically:
 
 ```sh
 agent-bus lane            # which lane am I in?
 agent-bus lanes           # every lane: health, open work, who's on it
 ```
 
-A post to `@eng-142` is a note every agent on the feature can read with
-`agent-bus read`. It wakes no one and has no owner, so send actual work to one
-agent.
-
 ### Put one agent in charge
-
-For a bigger feature, make one agent the lane's PM. It gets a copy of every
-work item in the lane, picks up anything without an owner, and keeps the lane
-moving. A new PM taking over gets one list of what's open, not a flood of old
-messages.
 
 > "You're the PM for eng-142."
 
@@ -161,22 +161,16 @@ agent-bus role pm --lane eng-142
 agent-bus guide supervisor     # how a PM works
 ```
 
+The PM gets a copy of every work item in the lane, picks up anything without an owner, and keeps things moving. A PM that restarts gets its lane back automatically.
+
 ### Keep work from stalling
 
-Turn on the supervisor and nothing sits forgotten. Work an agent hasn't read
-after 10 minutes wakes it, through its own tool (Claude's inbox, the Codex
-queue, an OpenCode resume, or its terminal if it runs in Herdr). If it still
-isn't read, the lane's PM hears, then you. An agent holding work that goes
-quiet for 20 minutes is reported to its PM. A PM that restarts gets its lane
-back on its own.
-
 ```sh
-agent-bus watch --install      # runs every 2 minutes; does nothing until switched on
+agent-bus watch --install      # runs every 2 minutes
 agent-bus init --set supervise=on
-agent-bus watch --status
 ```
 
-An agent waiting on purpose, on CI or a long job, says so and isn't flagged:
+Work not read after 10 minutes wakes the agent. After 20 quiet minutes the lane PM hears. An agent waiting on CI tells the supervisor it's intentional:
 
 ```sh
 agent-bus wait --until 30m -m "CI"
@@ -184,49 +178,13 @@ agent-bus wait --until 30m -m "CI"
 
 ### Bring a decision to you
 
-When an agent hits something your rules say is yours (scope changes,
-destructive actions), it escalates instead of guessing:
-
 ```sh
 agent-bus post --re <id> --close escalated --to @lead --state question -m "Drop the legacy table?"
 ```
 
 You see it in `agent-bus attention`, answer, and close it.
 
-### Watch the bus and talk to your agents
-
-```sh
-agent-bus tui
-```
-
-Every agent on this Mac and on linked Macs, one row each, grouped by team: a
-PM's team holds the agents on its lane and on the tickets its focus names, then
-each lane or ticket has its own group, then the rest group by repo. A row shows
-how long ago the agent was seen, its seat, its ticket, what it's doing and its
-messages over the last two hours. What waits on you is pinned on top (`n` jumps
-to the next one), and agents idle over 90 minutes fold into one line (`z`
-shows them). `g` switches to a graph of who messaged whom, or to the robots
-grouped by lane. Each agent has a name you can say ("Brave Otter"), the one line it gave
-for its focus (`agent-bus focus`, else its session title), and any ports its
-folder is serving. `o` opens its folder in Finder, Zed, Cursor or your
-terminal, or a port in your browser.
-A red badge counts what an agent is waiting on you for; click it (or press
-Enter) to open a panel with those items, answer or close them, or chat with the
-agent. What you type is sent as you, and answers appear as they come in. Agents
-that have exited but still have a question for you keep their tile. `?` lists
-the keys.
-
-### Tell your agents something yourself
-
-To send a message as you, run this in your own terminal. Agents see it labeled
-as coming from you, so they treat it as your request rather than another
-agent's:
-
-```sh
-agent-bus send --to codex/main.5f21,opencode/checkout-api.3f1a -m "Stop merging until the release is cut"
-```
-
-### Record decisions so later sessions follow them
+### Record decisions
 
 > "Record that we're shipping behind the flag."
 
@@ -234,14 +192,7 @@ agent-bus send --to codex/main.5f21,opencode/checkout-api.3f1a -m "Stop merging 
 agent-bus decide "Ship behind the flag" -m "Rollout risk on mobile"
 ```
 
-Every new session in the lane is shown the lane's decisions, so you don't
-re-explain them.
-
-### Make your decisions stick
-
-When you settle something that should hold everywhere, have your lead agent
-record it. Every agent, in every repo, reads it when it starts and again
-after it compacts, so an old fact can't come back:
+Every new session in the lane sees the lane's decisions. For decisions that should hold across every repo:
 
 ```sh
 agent-bus decide --global --confirmed "me, 9:14 PM" "Agents may write Dev secrets"
@@ -249,129 +200,108 @@ agent-bus decide --global --confirmed "me, 9:14 PM" "Agents may write Dev secret
 
 ### Stay out of each other's files
 
-Before editing a file another agent might be in:
-
 ```sh
 agent-bus claim src/billing/invoice.ts
+agent-bus claim mr:3594          # non-file things too, e.g. "don't both merge this MR"
 ```
 
-Claims are advisory and expire after 4 hours. If someone else holds it, the
-agent asks instead of overwriting. Claim things that aren't files the same way,
-so two agents don't merge the same MR:
-
-```sh
-agent-bus claim mr:3594
-```
+Claims are advisory and expire after 4 hours.
 
 ### Work across two Macs
 
-Agents on another Mac on your network can hand work to the agents on this one.
-Turn on Remote Login on both (System Settings > General > Sharing), then, on
-either Mac:
+Turn on Remote Login on both Macs (System Settings > General > Sharing), then on either one:
 
 ```sh
 agent-bus peer find               # Macs nearby
-agent-bus peer add m1max.local    # asks for that Mac's password once
+agent-bus peer add m1max.local    # links both directions
 ```
 
-That links both directions. `who` lists the other Mac's agents, posts reach
-them and wake them there, and a Mac that was asleep catches up at its next
-session. Each Mac keeps its own bus. They sync with an SSH key agent-bus makes
-for itself, and that key can only sync: it can't open a shell. `agent-bus
-doctor` shows each linked Mac; `peer remove` unlinks one.
+`agent-bus who` lists the other Mac's agents; posts reach them and wake them there.
 
-Clone a repo at the same path on both Macs, so the two copies count as one
-repo. Claims stay on the Mac that made them for now.
+### Watch the bus
+
+```sh
+agent-bus tui
+```
+
+Every agent on this Mac and linked Macs, one row each. What waits on you is pinned on top. Click a tile (or press Enter) to open a panel, answer or close items, and chat with the agent directly. `?` for keys.
 
 ### Clean up
 
 ```sh
-agent-bus triage                           # open work by owner: gone, not picked up, stale
-agent-bus lane eng-142 done --reason merged    # close a finished lane's leftovers
-agent-bus offboard                         # an agent standing down releases its roles and claims
+agent-bus triage                            # open work by owner: gone, not picked up, stale
+agent-bus lane eng-142 done --reason merged # close a finished lane's leftovers
+agent-bus offboard                          # stand down: release roles and claims
 ```
+
+---
 
 ## Make it yours
 
-agent-bus starts with sensible defaults: work sent to "everyone" is bounced back
-to pick one agent, finished work goes back to whoever asked for it, agents check
-with you before changing what was asked or deleting anything, and decisions are
-written down. To change any of that for a repo:
+agent-bus starts with sensible defaults: broadcasts are bounced back (pick one agent), finished work returns to whoever asked, agents check with you before scope changes or deletes, and decisions are written down. To change any of that for a repo:
 
 ```sh
 agent-bus init
 ```
 
-It asks four plain questions and writes `.agent-bus.json`. Commit it so your
-team shares the same rules. Or just tell your agent: *"set up agent-bus so I
-check all finished work."*
+It asks four plain questions and writes `.agent-bus.json`. Commit it so your team shares the same rules. Or just tell your agent: *"set up agent-bus so I check all finished work."*
 
-Three more switches change delivery for everyone, so they start off. Set them
-in `~/.agents/bus/config.json` or with `agent-bus init --set`:
+Three delivery switches start off. Set them in `~/.agents/bus/config.json` or with `agent-bus init --set`:
 
-| Switch | When on |
+| Switch | Effect when on |
 |---|---|
-| `supervise` | the supervisor above runs |
-| `fyi_wake=off` | FYIs stop waking agents; they see them the next time they look |
-| `thread_reports` | an agent's report attaches to the job it answers, and a quick second post doesn't wake anyone again |
+| `supervise` | stall-detection supervisor runs |
+| `fyi_wake=off` | FYIs stop waking agents; they see them on next prompt |
+| `thread_reports` | a report attaches to its parent job; a quick follow-up doesn't re-wake |
 
-## Which agents get what
+---
 
-| Agent | Work shows up on its own | Woken when idle | Setup |
-|---|---|---|---|
-| Claude Code | yes | yes | nothing after `agent-bus hooks` |
-| OpenCode | yes, after the session's first message | yes | restart OpenCode |
-| Codex Desktop / CLI | told to run `agent-bus read` | automatic when a queue-capable binary is found | trust the hooks in `/hooks` |
-| Plain shells | no, runs `agent-bus read` itself | no | none |
-| Grok Bot | through its webhook | yes | `agent-bus grok register` |
+## Commands reference
 
-Details and caveats for each: [docs/hosts.md](docs/hosts.md).
-
-## Commands you'll use
+<details>
+<summary>Show all commands</summary>
 
 | Command | What it does |
 |---|---|
-| `agent-bus status` | where this agent stands: lane, what waits on it, the rules |
-| `agent-bus tui` | live view: agents, what needs you, open work; chat with any agent |
+| `agent-bus status` | this agent's lane, open work, and rules |
+| `agent-bus tui` | live view: agents, what needs you, open work |
 | `agent-bus who` | live agents, PMs, open work, claims |
-| `agent-bus avatar [seat]` | an agent's bot and name, the same wherever it shows |
-| `agent-bus focus "<line>"` | say what this agent is working on (agents do this themselves) |
+| `agent-bus attention` | what needs you, with the fix for each |
 | `agent-bus read` | this agent's packets |
 | `agent-bus reply <id> -m …` | answer an item and close it |
 | `agent-bus ask --to <seat> -m …` | ask and wait for the answer |
-| `agent-bus attention` | what needs you, with the fix for each |
-| `agent-bus watch --status` | whether the supervisor is on, and what it is tracking |
+| `agent-bus focus "<line>"` | set what this agent is working on |
+| `agent-bus avatar [seat]` | an agent's bot and seat name |
+| `agent-bus watch --status` | whether the supervisor is on |
 | `agent-bus wait --until 30m` | tell the supervisor this agent is waiting on purpose |
-| `agent-bus guide [worker\|supervisor\|reviewer]` | the patterns, short |
+| `agent-bus guide [worker\|supervisor\|reviewer]` | pattern summaries |
 | `agent-bus init --show` | this repo's rules |
 | `agent-bus peer add <host>` | link another Mac on your network |
 | `agent-bus doctor` | check the install |
 
 `agent-bus help` lists everything.
 
+</details>
+
+---
+
 ## Updating and removing
 
 ```sh
-brew upgrade agent-bus      # Homebrew
-agent-bus update            # curl installer
-agent-bus hooks             # re-connect agents, e.g. after installing a new one
-agent-bus uninstall         # remove hooks, skills and the install; your bus history stays
+brew upgrade agent-bus          # Homebrew
+agent-bus update                # curl installer
+agent-bus hooks                 # re-wire agents after installing a new one
+agent-bus uninstall             # removes hooks, skills, and the install; bus history stays
 ```
 
-After upgrading, run `agent-bus hooks --opencode` if you use OpenCode; it keeps
-its own copy of the plugin.
+After upgrading, run `agent-bus hooks --opencode` if you use OpenCode; it keeps its own copy of the plugin.
+
+---
 
 ## Good to know
 
-- **It's for agents that cooperate.** Every agent runs as you, and an agent's
-  identity is whatever it says it is. agent-bus isn't a security boundary.
-  Packets are still treated as untrusted input, and no packet grants a
-  permission.
-- **For tools that show the bus**, `agent-bus snapshot` prints everything as
-  JSON: seats (with each agent's pid and worktree path), open work, lanes and
-  what needs attention.
-- **Working on agent-bus itself?** Clone it and run `./install.sh --from .`.
-  Every agent then runs your checkout, so edits are live.
+- **It's for agents that cooperate.** Every agent runs as you, and an agent's identity is whatever it says it is. agent-bus is not a security boundary. Packets are treated as untrusted input, and no packet grants a permission.
+- **Inspect the bus from code.** `agent-bus snapshot` prints everything as JSON: seats (with pid and worktree path), open work, lanes, and what needs attention.
+- **Developing agent-bus?** Clone it and run `./install.sh --from .`. Every agent then runs your checkout, so edits are live.
 
-The full protocol is in [PROTOCOL.md](PROTOCOL.md). The runbook agents follow is
-[skills/agent-bus/SKILL.md](skills/agent-bus/SKILL.md).
+The full protocol is in [PROTOCOL.md](PROTOCOL.md). The runbook agents follow is [skills/agent-bus/SKILL.md](skills/agent-bus/SKILL.md).

@@ -1213,6 +1213,7 @@ AGENT_BUS_SERVER_PID=$SRVPID raw_seat srv1 opencode wsrv who >/dev/null
 assert_has "a seat under a live opencode server is live" "$OCS" "$(a who)"
 kill "$SRVPID" 2>/dev/null; wait "$SRVPID" 2>/dev/null || true
 assert_lacks "its seat ends when the server exits" "$OCS" "$(a who)"
+assert_lacks "and reading seats after a server exits raises no jq error" "Cannot index" "$(a who 2>&1)"
 out=$(AGENT_BUS_BRANCH=fix/solo-thing raw_seat solo1 opencode wsolo digest)
 assert_has "a seat alone on its work gets a short orientation" "No other agent is on this work" "$out"
 assert_lacks "and no lane jargon" "in lane @" "$out"

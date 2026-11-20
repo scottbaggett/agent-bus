@@ -378,7 +378,7 @@ seat_rows() {
     kill -0 "$p" 2>/dev/null || dead="$dead,$p"
   done
   if [ -n "$dead" ]; then
-    jq -c --argjson d "[${dead#,}]" 'if ((.server_pid // null) != null and ($d | index(.server_pid)) != null)
+    jq -c --argjson d "[${dead#,}]" 'if ((.server_pid // null) != null and (.server_pid as $p | $d | index($p)) != null)
       then .epoch = 0 | .ended = "server exited" else . end' <<<"$rows"
   else printf '%s\n' "$rows"; fi
 }

@@ -851,11 +851,24 @@ claude_hook_packets() {
 # The live seat that took over from a gone seat: same tool and worktree in
 # this repo, most recently active.
 live_heir() {
-  local scope="${1%.*}" now; now=$(now_epoch)
-  seat_rows | jq -rs --arg sc "$scope" --arg rid "$REPO_ID" --arg gone "$1" \
+  local scope="${1%.*}" now rid; now=$(now_epoch)
+  # A main checkout is shared by many agents (every PM sits in claude/main):
+  # the same tool and worktree there says nothing about who took over.
+  [ "${scope#*/}" = main ] && return 0
+  # The gone seat's own repo (its seat file, else its newest packet), never
+  # the sender's: the lead posting from dotfiles to a seat in salt-monorepo
+  # found itself as the "heir" and sent replies to itself.
+  rid=$(jq -r '.repo_id // empty' "$BUS/seats/$(slugify "$1").json" 2>/dev/null || true)
+  [ -n "$rid" ] || rid=$(lq '[$L[] | select(.kind == "msg" and .from == $a) | .repo_id] | last // empty' --arg a "$1")
+  [ -n "$rid" ] || return 0
+  # Exactly one live successor, and never the sender.
+  seat_rows | jq -rs --arg sc "$scope" --arg rid "$rid" --arg gone "$1" --arg me "$ADDR" \
+    --arg sess "$SESSION" --arg tool "$TOOL" \
     --argjson cut "$((now - SEAT_TTL))" --argjson codex_cut "$(codex_idle_cut)" "$JQ_SEAT_LIVE"'
     [.[] | select(((.tool // "") + "/" + (.wt // "")) == $sc and .repo_id == $rid and .addr != $gone
-                  and buslive($cut; $codex_cut))] | sort_by(-(.epoch // 0)) | first | .addr // empty'
+                  and .addr != $me and ($sess == "local" or (.session // "") != $sess or (.tool // "") != $tool)
+                  and buslive($cut; $codex_cut))]
+    | if length == 1 then .[0].addr else empty end'
 }
 
 # Every live seat that owns packet $1, whatever its tool, for the delivery
@@ -1683,6 +1696,8 @@ cmd_post() {
       if [ -n "$heir" ]; then
         printf 'note: %s is gone; sending to %s (same tool and worktree)\n' "$to" "$heir" >&2
         to="$heir"
+      elif [ -z "$(peer_list)" ] || [ "${AGENT_BUS_NO_PEERS:-0}" = 1 ] || ! peer_of_seat "$to" >/dev/null 2>&1; then
+        printf 'note: recipient gone: %s has no live seat and no single successor; the packet waits for it. If it cannot wait, send it to a live seat (agent-bus who).\n' "$to" >&2
       fi
     fi ;;
   esac
@@ -1854,7 +1869,8 @@ deliver() { # rec src resume
   if [ -z "$owners" ]; then
     case "$to" in
       @*) printf 'delivery: nobody owns this, so nobody is woken. Agents see it only if they run agent-bus read. To get it acted on, send it --to a seat (agent-bus who).\n' ;;
-      *) if [ -n "$(peer_list)" ] && [ "${AGENT_BUS_NO_PEERS:-0}" != 1 ]; then local on_; on_=$(peer_of_seat "$to" || :); printf 'delivery: %s is %s; sending it there\n' "$to" "$(if [ -n "$on_" ]; then echo "on ${on_%.local}"; else echo "not on this Mac"; fi)"
+      *) local on_=''; [ -n "$(peer_list)" ] && [ "${AGENT_BUS_NO_PEERS:-0}" != 1 ] && on_=$(peer_of_seat "$to" || :)
+         if [ -n "$on_" ]; then printf 'delivery: %s is on %s; sending it there\n' "$to" "${on_%.local}"
          else printf 'delivery: %s is not running; this waits until it is (or hand it to a live seat: agent-bus who)\n' "$to"; fi ;;
     esac
   fi

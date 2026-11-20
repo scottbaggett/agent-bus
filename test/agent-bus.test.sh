@@ -780,6 +780,30 @@ PY_SOCKET
   out=$(AGENT_BUS_NO_PUSH=0 seat o3 claude wx post --to "$H1" --state handoff -m '# for the restarted seat' 2>&1)
   assert_has "a post to a gone seat goes to its live heir" "is gone; sending to $H2" "$out"
   assert_has "the heir owns it" "for the restarted seat" "$(seat h2 opencode wheir read --peek)"
+  # Never the sender, never a guess: the lead's replies went to itself.
+  seat r1 claude wself who >/dev/null; R1=$(addr seat r1 claude wself)
+  f="$BUS_HOME/seats/$(printf '%s' "$R1" | tr '/' '_').json"; jq '.epoch = 0' "$f" >"$f.t" && mv "$f.t" "$f"
+  out=$(AGENT_BUS_NO_PUSH=0 seat r2 claude wself post --to "$R1" --state question -m '# to my gone twin' 2>&1)
+  assert_lacks "a post never reroutes to the sender itself" "sending to $(addr seat r2 claude wself)" "$out"
+  assert_has "it says the recipient is gone instead" "recipient gone: $R1" "$out"
+  assert_eq "and the packet stays addressed to it" "$R1" "$(jq -Rr 'fromjson? // empty | select(.kind == "msg" and .subject == "to my gone twin") | .to' "$BUS_HOME/ledger.jsonl")"
+  seat m1 claude main who >/dev/null; M1=$(addr seat m1 claude main)
+  f="$BUS_HOME/seats/$(printf '%s' "$M1" | tr '/' '_').json"; rm -f "$f"
+  seat m2 claude main who >/dev/null
+  out=$(AGENT_BUS_NO_PUSH=0 seat o3 claude wx post --to "$M1" --state question -m '# to a gone PM' 2>&1)
+  assert_lacks "a main checkout's seat has no heir (many agents share it)" "is gone; sending to" "$out"
+  seat g1 opencode wamb who >/dev/null; G1=$(addr seat g1 opencode wamb)
+  f="$BUS_HOME/seats/$(printf '%s' "$G1" | tr '/' '_').json"; jq '.epoch = 0' "$f" >"$f.t" && mv "$f.t" "$f"
+  seat g2 opencode wamb who >/dev/null; seat g3 opencode wamb who >/dev/null
+  out=$(AGENT_BUS_NO_PUSH=0 seat o3 claude wx post --to "$G1" -m '# which one' 2>&1)
+  assert_lacks "two possible successors: no heir" "is gone; sending to" "$out"
+  # The gone seat's own repo decides, not the sender's.
+  seat x1 opencode wxr who >/dev/null; X1=$(addr seat x1 opencode wxr)
+  seat x1 opencode wxr post --to "$C" -m '# a row from its repo' >/dev/null
+  rm -f "$BUS_HOME/seats/$(printf '%s' "$X1" | tr '/' '_').json"
+  AGENT_BUS_REPO_ID=otherrepo000001 seat x2 opencode wxr who >/dev/null
+  out=$(AGENT_BUS_NO_PUSH=0 AGENT_BUS_REPO_ID=otherrepo000001 seat o4 claude wq post --to "$X1" -m '# from another repo' 2>&1)
+  assert_lacks "an heir is found in the gone seat's repo, not the sender's" "is gone; sending to" "$out"
   # OpenCode that isn't running is reported, not silently queued.
   AGENT_BUS_PID=999999 seat h3 opencode wstop who >/dev/null
   out=$(AGENT_BUS_NO_PUSH=0 seat o3 claude wx post --to "$(addr seat h3 opencode wstop)" -m '# are you there')

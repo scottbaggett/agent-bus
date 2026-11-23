@@ -183,7 +183,7 @@ resolve_identity() {
     if [ -n "${CLAUDECODE:-}" ]; then TOOL=claude
     elif [ -n "${OPENCODE:-}${OPENCODE_SESSION_ID:-}" ]; then TOOL=opencode
     elif [ -n "${CODEX_THREAD_ID:-}" ]; then TOOL=codex
-    else TOOL=shell; fi
+    else TOOL=$(ancestor_tool); fi
   fi
   TOP=$(git rev-parse --show-toplevel 2>/dev/null || true)
   if [ -n "$TOP" ]; then
@@ -244,12 +244,28 @@ resolve_identity() {
 # memory and child processes. Claude's inbox socket is named for its pid; other
 # hosts are found by walking up from the CLI to the first process named after
 # the tool. Empty when there is none (shell seats, or no match).
+# Hosts that set no environment marker, found by an ancestor process:
+# Antigravity's CLI (agy) runs its shell commands under itself.
+ancestor_tool() {
+  local p=$PPID i c
+  for i in 1 2 3 4 5 6 7 8; do
+    case "$p" in ''|*[!0-9]*|0|1) break ;; esac
+    c=$(ps -o comm= -p "$p" 2>/dev/null) || break
+    case "${c##*/}" in agy) echo antigravity; return 0 ;; esac
+    p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
+  done
+  echo shell
+}
+# The process name a host's agent runs as.
+tool_proc() { case "$1" in antigravity) echo agy ;; *) echo "$1" ;; esac; }
+
 agent_pid() {
   local p i c
   if [ -n "${AGENT_BUS_PID:-}" ]; then
     case "$AGENT_BUS_PID" in *[!0-9]*) ;; *) echo "$AGENT_BUS_PID" ;; esac; return 0
   fi
-  case "$TOOL" in claude|opencode|codex) ;; *) return 0 ;; esac
+  case "$TOOL" in claude|opencode|codex|antigravity) ;; *) return 0 ;; esac
+  local pn; pn=$(tool_proc "$TOOL")
   if [ "$TOOL" = claude ]; then
     p=${CLAUDE_CODE_MESSAGING_SOCKET##*/}; p=${p%.sock}
     case "$p" in ''|*[!0-9]*) ;; *) kill -0 "$p" 2>/dev/null && { echo "$p"; return 0; } ;; esac
@@ -259,7 +275,7 @@ agent_pid() {
     case "$p" in ''|*[!0-9]*|0|1) return 0 ;; esac
     c=$(ps -o comm= -p "$p" 2>/dev/null) || return 0
     c=$(printf '%s' "${c##*/}" | tr '[:upper:]' '[:lower:]')
-    case "$c" in "$TOOL"|"$TOOL "*|"$TOOL-"*|"$TOOL."*)
+    case "$c" in "$pn"|"$pn "*|"$pn-"*|"$pn."*)
       # A shared server (opencode serve) is not this session's process.
       case " $(ps -o args= -p "$p" 2>/dev/null) " in *" serve "*) return 0 ;; esac
       echo "$p"; return 0 ;;
@@ -1909,6 +1925,16 @@ deliver() { # rec src resume
           printf 'delivery: %s — its plugin picks this up if the session is open; if it has exited, post --resume restarts it\n' "$addr"
         fi ;;
       codex|grok) ;;  # reported by their own transports below
+      antigravity)
+        # No hooks: the only wake is a line typed into its Herdr terminal,
+        # under the watch's rules (a live, idle agent of its own kind; never a
+        # terminal a person types in). Fixed routing fields only.
+        local how_; how_=$(herdr_type "$row" "agent-bus: packet $id [$state] for $addr from $ADDR. Run: agent-bus read")
+        case "$how_" in
+          typed:*) printf 'delivery: %s — typed a wake line into its Herdr terminal %s\n' "$addr" "${how_#typed:}" ;;
+          busy) printf 'delivery: %s — mid-turn in its terminal; it sees this when it next runs agent-bus read (the supervisor wakes it if it stays unread)\n' "$addr" ;;
+          *) printf 'delivery: %s — has no hooks and no idle Herdr terminal; it sees this when it runs agent-bus read\n' "$addr" ;;
+        esac ;;
       *) printf 'delivery: %s — has no hooks; it sees this only when it runs agent-bus read\n' "$addr" ;;
     esac
   done <<<"$owners"
@@ -2843,7 +2869,7 @@ hc_terminals() {
 # its worktree (none when two share it).
 seat_terminal() { # seat-row terminals
   jq -r --argjson terms "$2" '. as $row
-    | ({claude: "claude-code", opencode: "opencode", codex: "codex"}[$row.tool // ""] // "") as $agent
+    | ({claude: "claude-code", opencode: "opencode", codex: "codex", antigravity: "antigravity"}[$row.tool // ""] // "") as $agent
     | if $agent == "" then empty
       elif $row.tool == "opencode" then
         [$terms | to_entries[] | select(.value.agent == "opencode" and .value.state == "live"
@@ -2888,7 +2914,7 @@ watch_wake() { # seat-row id state item-row terminals
     # Only type into a live agent. A terminal whose agent exited is a shell,
     # where the text would run as a command.
     if [ "$(jq -r '.state // ""' <<<"$info")" = live ] \
-       && in_list "$(jq -r '.agent // ""' <<<"$info")" 'claude-code opencode codex'; then
+       && in_list "$(jq -r '.agent // ""' <<<"$info")" 'claude-code opencode codex antigravity'; then
       case "$(jq -r '.status // ""' <<<"$info")" in
         working) printf busy; return 0 ;;
         idle|done) "$HC_BIN" send "$t" "$text" >/dev/null 2>&1 && { printf herdr; return 0; } ;;
@@ -2905,6 +2931,23 @@ watch_wake() { # seat-row id state item-row terminals
               && { printf queued; return 0; } ;;
   esac
   printf none
+}
+
+# Type a line into a seat's own Herdr terminal, for hosts with no other wake.
+# Prints typed:<terminal>, busy or none.
+herdr_type() { # seat-row text
+  local terms t info
+  terms=$(hc_terminals); t=$(seat_terminal "$1" "$terms")
+  [ -n "$t" ] || { printf none; return 0; }
+  local nt; nt="$(watch_conf lead @lead) $(watch_conf no_type '' | tr ',' ' ')"
+  { in_list "$t" "$nt" || in_list "$(jq -r .addr <<<"$1")" "$nt"; } && { printf none; return 0; }
+  info=$(jq -c --arg t "$t" '.[$t] // {}' <<<"$terms")
+  [ "$(jq -r '.state // ""' <<<"$info")" = live ] || { printf none; return 0; }
+  case "$(jq -r '.status // ""' <<<"$info")" in
+    working) printf busy ;;
+    idle|done) "$HC_BIN" send "$t" "$2" >/dev/null 2>&1 && printf 'typed:%s' "$t" || printf none ;;
+    *) printf none ;;
+  esac
 }
 
 # Post one alert as the watch seat. ALERT rides into the row as `alert`.
@@ -3338,6 +3381,7 @@ resume_hint() { # seat-row
     opencode) printf 'cd %s && opencode -s %s' "$cwd" "$sess" ;;
     claude) printf 'cd %s && claude --resume %s' "$cwd" "$sess" ;;
     codex) printf 'cd %s && codex resume %s' "$cwd" "$sess" ;;
+    antigravity) printf 'cd %s && agy --continue' "$cwd" ;;
   esac
 }
 
@@ -3421,7 +3465,7 @@ watch_retire() { # mode
     cmd_post --to "$target" --state fyi --subject "watch: retired $addr" \
       -m "Retired $addr: $done_why, idle $(( (now - act_at) / 60 ))m, worktree clean and pushed. Ended terminal $t${stacks:+ and took down ${stacks% }}.${left:+ Left running (not in watch.retire_stacks; take them down yourself if they are done): ${left% }.} The session is kept; resume with: $hint" >/dev/null 2>&1 || true
   done < <(jq -c --arg rid "$REPO_ID" --argjson pms "$(retire_never)" --argjson ex "$(printf '%s' "$exempt" | jq -Rc 'split(" ") | map(select(length > 0))')" '
-    .[] | select(.repo_id == $rid and .live and ((.tool // "") | IN("claude", "opencode", "codex")))
+    .[] | select(.repo_id == $rid and .live and ((.tool // "") | IN("claude", "opencode", "codex", "antigravity")))
     # Never a main checkout: builders work in ticket worktrees; PMs and the
     # lead sit in main.
     | select((.wt // "") != "main")

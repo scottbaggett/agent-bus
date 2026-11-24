@@ -1832,9 +1832,17 @@ cmd_post() {
   fi
   # An answer to open work (a reply carrying re: to a question, blocker,
   # review or handoff) always wakes: it is what the asker is waiting for.
-  if [ "$(policy_get fyi_wake)" = off ] && ! in_list "$state" 'needs-review blocked handoff question' \
-     && ! { [ -n "$re" ] && in_list "$(item_field "$re" state)" 'needs-review blocked handoff question'; }; then
-    printf 'delivery: a %s wakes nobody (team rule fyi_wake=off); it is in the recipient'"'"'s next digest and agent-bus read\n' "$state"
+  # fyi_wake=named: an fyi or done addressed to one seat by name wakes it;
+  # broadcasts, @pm, lanes and roles stay quiet (they were the noise).
+  local fw; fw=$(policy_get fyi_wake)
+  if [ "$fw" != on ] && ! in_list "$state" 'needs-review blocked handoff question' \
+     && ! { [ -n "$re" ] && in_list "$(item_field "$re" state)" 'needs-review blocked handoff question'; } \
+     && ! { [ "$fw" = named ] && case "$to" in */*.*) true ;; *) false ;; esac; }; then
+    if [ "$fw" = named ]; then
+      printf 'delivery: a %s to %s wakes nobody (team rule fyi_wake=named: only a packet to one seat by name wakes it); it is in the recipients'"'"' next digest\n' "$state" "$to"
+    else
+      printf 'delivery: a %s wakes nobody (team rule fyi_wake=off); it is in the recipient'"'"'s next digest and agent-bus read\n' "$state"
+    fi
     return 0
   fi
   [ "${AGENT_BUS_NO_PUSH:-0}" = 1 ] && return 0
@@ -2312,7 +2320,8 @@ policy_valid() { # key value
   case "$1" in
     owner) in_list "$2" 'refuse lead pm' ;;
     review) in_list "$2" 'requester lead none' ;;
-    decisions|supervise|fyi_wake|thread_reports) in_list "$2" 'on off' ;;
+    decisions|supervise|thread_reports) in_list "$2" 'on off' ;;
+    fyi_wake) in_list "$2" 'on named off' ;;
     retire) in_list "$2" 'off dry on' ;;
     proof) in_list "$2" 'off warn require' ;;
     ask_lead) [ "$2" = never ] || { local v; for v in ${2//,/ }; do in_list "$v" 'scope destructive disagreement' || return 1; done; } ;;

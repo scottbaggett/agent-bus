@@ -327,6 +327,10 @@ assert_has "but it is still in the digest" "just so you know" "$(w read --peek)"
 q=$(s post --to "$W" --state question -m "# which one?" | idof)
 out=$(AGENT_BUS_POLICY_FYI_WAKE=off AGENT_BUS_NO_PUSH=0 w reply "$q" -m "this one")
 assert_lacks "an answer to a question always wakes the asker" "wakes nobody" "$out"
+out=$(AGENT_BUS_POLICY_FYI_WAKE=named AGENT_BUS_NO_PUSH=0 s post --to "$W" -m "# by name")
+assert_lacks "fyi_wake=named: an fyi to one seat by name still wakes it" "wakes nobody" "$out"
+out=$(AGENT_BUS_POLICY_FYI_WAKE=named AGENT_BUS_NO_PUSH=0 s post --to @feat -m "# to the lane")
+assert_has "but an fyi to a lane stays quiet" "fyi_wake=named: only a packet to one seat by name wakes it" "$out"
 out=$(AGENT_BUS_NO_PUSH=0 s post --to "$W" -m "# default")
 assert_lacks "with the default an fyi still delivers" "wakes nobody" "$out"
 w read >/dev/null

@@ -155,7 +155,7 @@ overrides both. `agent-bus init --show` prints what applies.
 | `retire` | `off` · `dry` · `on` | The supervisor retires finished, idle builders (below); `dry` only lists them |
 | `proof` | `off` · `warn` · `require` | Review requests name their commit and carry proof without `--proof auto`; `warn` says what the reviewer will see, `require` refuses one without passing checks run at that commit |
 | `supervise` | `off` · `on` | Run the supervisor (`agent-bus watch`, below) and let a restarted PM take its lane's role back |
-| `fyi_wake` | `on` · `off` | Off: `fyi` and `done` packets wake nobody; they wait in the digest and `read`. An answer to open work (a reply to a question, blocker, review or handoff) always wakes |
+| `fyi_wake` | `on` · `named` · `off` | Named: an `fyi` or `done` addressed to one seat by name wakes it; broadcast, `@pm`, lane and role ones don't. Off: `fyi` and `done` packets wake nobody; they wait in the digest and `read`. An answer to open work (a reply to a question, blocker, review or handoff) always wakes |
 | `thread_reports` | `off` · `on` | On: a report rides on the sender's one open assignment from its recipient (`re`), and a second post of the same kind right behind an unread first one folds into it without waking again; `--new-thread` opts out |
 
 The last three change delivery for every seat, so they stay off until set,

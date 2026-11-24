@@ -811,6 +811,28 @@ PY_SOCKET
   AGENT_BUS_TOOL=shell AGENT_BUS_WT=wsh "$BIN" who >/dev/null
   out=$(AGENT_BUS_NO_PUSH=0 seat o3 claude wx post --to shell/wsh -m '# plain shell')
   assert_has "post says a hookless seat must read" "has no hooks" "$out"
+  # Antigravity (agy): found by its process, woken by typing into its Herdr terminal.
+  # A process named agy that runs a command as its child (a copied /bin/bash
+  # is killed by macOS code signing).
+  AG=$(mktemp -d); printf '#include <stdlib.h>\nint main(int c,char**v){return system(v[1])==0?0:1;}\n' >"$AG/agy.c"
+  cc -o "$AG/agy" "$AG/agy.c"
+  printf '#!/bin/sh\ncase "$1" in ls) cat "%s/hc.json" ;; send) echo "$2 $3" >>"%s/hc.sends" ;; esac\n' "$AG" "$AG" >"$AG/hc"; chmod +x "$AG/hc"
+  out=$(cd "$ROOT" && env -u AGENT_BUS_TOOL AGENT_BUS_SESSION=agy1 AGENT_BUS_WT=wagy HC_TERMINAL_ID=tA "$AG/agy" "\"$BIN\" whoami")
+  AGS=$(awk '/^seat/{print $2}' <<<"$out")
+  assert_eq "a seat run under agy is an antigravity seat" "antigravity/wagy" "${AGS%.*}"
+  (cd "$ROOT" && env -u AGENT_BUS_TOOL AGENT_BUS_SESSION=agy1 AGENT_BUS_WT=wagy HC_TERMINAL_ID=tA "$AG/agy" "\"$BIN\" who" >/dev/null)
+  printf '{"terminals":[{"address":"tA","agent":"antigravity","status":"idle","state":"live","cwd":"x"}]}' >"$AG/hc.json"
+  out=$(AGENT_BUS_HC="$AG/hc" AGENT_BUS_NO_PUSH=0 seat o3 claude wx post --to "$AGS" --state question -m '# secret body 42')
+  assert_has "an idle Antigravity seat is woken through its Herdr terminal" "typed a wake line into its Herdr terminal tA" "$out"
+  assert_has "with fixed routing fields only" "tA agent-bus: packet" "$(cat "$AG/hc.sends")"
+  assert_lacks "never the packet's text" "secret body 42" "$(cat "$AG/hc.sends")"
+  printf '{"terminals":[{"address":"tA","agent":"antigravity","status":"working","state":"live","cwd":"x"}]}' >"$AG/hc.json"
+  out=$(AGENT_BUS_HC="$AG/hc" AGENT_BUS_NO_PUSH=0 seat o3 claude wx post --to "$AGS" -m '# mid-turn')
+  assert_has "mid-turn it is left alone" "mid-turn in its terminal" "$out"
+  printf '{"terminals":[{"address":"tA","agent":"fish","status":"idle","state":"live","cwd":"x"}]}' >"$AG/hc.json"
+  out=$(AGENT_BUS_HC="$AG/hc" AGENT_BUS_NO_PUSH=0 seat o3 claude wx post --to "$AGS" -m '# agent exited')
+  assert_has "a terminal whose agent exited gets nothing typed" "no idle Herdr terminal" "$out"
+  rm -rf "$AG"
   # A claim left by an ended seat doesn't block.
   seat h2 opencode wheir claim src/left.ts >/dev/null
   f="$BUS_HOME/seats/$(printf '%s' "$H2" | tr '/' '_').json"; jq '.epoch = 0' "$f" >"$f.t" && mv "$f.t" "$f"

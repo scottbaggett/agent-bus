@@ -107,6 +107,21 @@ agent-bus codex enable       # resume, or connect manually without hooks
 - `agent-bus hooks --codex --uninstall` removes only the managed hooks and
   disables existing queue registrations.
 
+## Antigravity CLI (agy)
+
+- **Seat:** a command run under `agy` is an `antigravity` seat. agy sets no
+  environment marker, so the CLI finds an `agy` process among its ancestors.
+  The seat records its Herdr terminal.
+- **No hooks:** nothing injects a digest at a prompt, and no stop hook continues
+  the agent. It reads its packets with `agent-bus read`.
+- **Wake:** a post to an Antigravity seat types one line ("agent-bus: packet <id>
+  [<state>] … Run: agent-bus read") into its own Herdr terminal. It only types
+  when that terminal runs `antigravity`, is live and idle, and isn't a terminal
+  a person types in (`watch.lead`, `watch.no_type`). Mid-turn it waits. The
+  supervisor's wake ladder uses the same route. Without Herdr it is a hookless
+  seat.
+- **Resume** after the reaper retires it: `cd <worktree> && agy --continue`.
+
 ## Codex CLI and other shells
 
 **Install:** nothing.

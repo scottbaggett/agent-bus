@@ -831,8 +831,33 @@ PY_SOCKET
   assert_has "mid-turn it is left alone" "mid-turn in its terminal" "$out"
   printf '{"terminals":[{"address":"tA","agent":"fish","status":"idle","state":"live","cwd":"x"}]}' >"$AG/hc.json"
   out=$(AGENT_BUS_HC="$AG/hc" AGENT_BUS_NO_PUSH=0 seat o3 claude wx post --to "$AGS" -m '# agent exited')
-  assert_has "a terminal whose agent exited gets nothing typed" "no idle Herdr terminal" "$out"
+  assert_has "a terminal whose agent exited gets nothing typed (the plugin delivers instead)" "its Antigravity plugin delivers this" "$out"
   rm -rf "$AG"
+  # Antigravity desktop app: a plugin with SessionStart, PreInvocation and Stop hooks.
+  AGD=$(mktemp -d)
+  AGENT_BUS_ANTIGRAVITY_DIR="$AGD" AGENT_BUS_BIN="$BIN" "$ROOT/install-hooks.sh" --antigravity >/dev/null
+  assert_eq "agent-bus hooks installs an Antigravity plugin" "agent-bus" "$(jq -r .name "$AGD/plugins/agent-bus/plugin.json")"
+  assert_eq "with SessionStart, PreInvocation and Stop hooks" "PreInvocation SessionStart Stop" \
+    "$(jq -r '."agent-bus" | keys | join(" ")' "$AGD/plugins/agent-bus/hooks.json")"
+  agh() { printf '{"conversationId":"conv-1","cwd":"%s","hookEventName":"%s","continuationActive":false}' "$ROOT" "$2" \
+    | AGENT_BUS_WT=wagd "$BIN" antigravity-hook "$1"; }
+  agh session-start SessionStart >/dev/null
+  AGD_SEAT=$(AGENT_BUS_TOOL=antigravity AGENT_BUS_SESSION=local AGENT_BUS_WT=wagd "$BIN" whoami | awk '/^seat/{print $2}')
+  assert_eq "the hook's seat is the antigravity seat for that worktree" "antigravity/wagd" "$AGD_SEAT"
+  seat o3 claude wx post --to "$AGD_SEAT" --state needs-review -m '# review from the bus' >/dev/null
+  out=$(agh session-start SessionStart)
+  assert_has "SessionStart injects the packet as a system message" "review from the bus" "$(jq -r '.injectSteps[0].systemMessage.systemMessage' <<<"$out")"
+  seat o3 claude wx post --to "$AGD_SEAT" --state question -m '# a later question' >/dev/null
+  out=$(agh pre-invocation PreInvocation)
+  assert_has "PreInvocation injects what arrived since" "a later question" "$(jq -r '.injectSteps[0].systemMessage.systemMessage' <<<"$out")"
+  seat o3 claude wx post --to "$AGD_SEAT" --state question -m '# too soon' >/dev/null
+  assert_eq "PreInvocation reads the bus at most every 10s per conversation" "{}" "$(agh pre-invocation PreInvocation)"
+  out=$(agh stop Stop)
+  assert_eq "Stop continues the agent while it owns unread work" "continue" "$(jq -r .decision <<<"$out")"
+  assert_has "with the work as the reason" "too soon" "$(jq -r .reason <<<"$out")"
+  assert_eq "and lets it stop once nothing waits" "{}" "$(agh stop Stop)"
+  assert_eq "an unknown event answers {}" "{}" "$(agh nonsense X)"
+  rm -rf "$AGD"
   # A claim left by an ended seat doesn't block.
   seat h2 opencode wheir claim src/left.ts >/dev/null
   f="$BUS_HOME/seats/$(printf '%s' "$H2" | tr '/' '_').json"; jq '.epoch = 0' "$f" >"$f.t" && mv "$f.t" "$f"

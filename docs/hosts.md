@@ -107,19 +107,27 @@ agent-bus codex enable       # resume, or connect manually without hooks
 - `agent-bus hooks --codex --uninstall` removes only the managed hooks and
   disables existing queue registrations.
 
-## Antigravity CLI (agy)
+## Antigravity (desktop app, IDE and agy CLI)
 
-- **Seat:** a command run under `agy` is an `antigravity` seat. agy sets no
-  environment marker, so the CLI finds an `agy` process among its ancestors.
-  The seat records its Herdr terminal.
-- **No hooks:** nothing injects a digest at a prompt, and no stop hook continues
-  the agent. It reads its packets with `agent-bus read`.
-- **Wake:** a post to an Antigravity seat types one line ("agent-bus: packet <id>
-  [<state>] … Run: agent-bus read") into its own Herdr terminal. It only types
-  when that terminal runs `antigravity`, is live and idle, and isn't a terminal
-  a person types in (`watch.lead`, `watch.no_type`). Mid-turn it waits. The
-  supervisor's wake ladder uses the same route. Without Herdr it is a hookless
-  seat.
+- **Plugin:** `agent-bus hooks --antigravity` (included automatically when
+  Antigravity is installed) writes `~/.gemini/config/plugins/agent-bus/`, where
+  Antigravity discovers plugins. It holds `plugin.json`, the `/agent-bus` skill
+  and `hooks.json`. New conversations pick it up.
+- **Delivery** through three hooks, each calling `agent-bus antigravity-hook`:
+  - **SessionStart:** orientation, standing decisions and unread packets,
+    injected as a system message.
+  - **PreInvocation** (before each model call): packets that arrived since,
+    at most once every 10s per conversation (`AGENT_BUS_ANTIGRAVITY_POLL`).
+  - **Stop:** while the agent owns unread work, `decision: continue` with
+    that work as the reason, as Claude's Stop hook does.
+- **Seat:** commands run by the desktop app's agent (under its language
+  server) or under `agy` are an `antigravity` seat, so the hooks and the
+  agent's own `agent-bus read` share one seat per worktree.
+- **Idle:** no hook fires while a desktop conversation sits idle, and the app
+  offers no supported way to start a turn, so a packet waits for its next turn.
+  An `agy` session in a Herdr terminal is also woken by a typed line there
+  (only when the terminal runs `antigravity` and is idle, never a
+  `watch.no_type` or lead terminal).
 - **Resume** after the reaper retires it: `cd <worktree> && agy --continue`.
 
 ## Codex CLI and other shells

@@ -252,6 +252,8 @@ ancestor_tool() {
     case "$p" in ''|*[!0-9]*|0|1) break ;; esac
     c=$(ps -o comm= -p "$p" 2>/dev/null) || break
     case "${c##*/}" in agy) echo antigravity; return 0 ;; esac
+    # The desktop app runs its agent's commands under its language server.
+    case "$c" in */Antigravity.app/*) echo antigravity; return 0 ;; esac
     p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
   done
   echo shell
@@ -1376,6 +1378,7 @@ host_flags() {
   { [ -d "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" ] || command -v claude >/dev/null 2>&1; } && f="$f --claude"
   { [ -d "$HOME/.config/opencode" ] || command -v opencode >/dev/null 2>&1; } && f="$f --opencode"
   { [ -d "${CODEX_HOME:-$HOME/.codex}" ] && command -v python3 >/dev/null 2>&1; } && f="$f --codex"
+  { [ -d "${AGENT_BUS_ANTIGRAVITY_DIR:-$HOME/.gemini/config}" ] || [ -d /Applications/Antigravity.app ] || command -v agy >/dev/null 2>&1; } && f="$f --antigravity"
   printf '%s' "$f"
 }
 
@@ -1933,7 +1936,7 @@ deliver() { # rec src resume
         case "$how_" in
           typed:*) printf 'delivery: %s — typed a wake line into its Herdr terminal %s\n' "$addr" "${how_#typed:}" ;;
           busy) printf 'delivery: %s — mid-turn in its terminal; it sees this when it next runs agent-bus read (the supervisor wakes it if it stays unread)\n' "$addr" ;;
-          *) printf 'delivery: %s — has no hooks and no idle Herdr terminal; it sees this when it runs agent-bus read\n' "$addr" ;;
+          *) printf 'delivery: %s — its Antigravity plugin delivers this before its next model call or when its turn ends; an idle agent sees it when its next turn starts\n' "$addr" ;;
         esac ;;
       *) printf 'delivery: %s — has no hooks; it sees this only when it runs agent-bus read\n' "$addr" ;;
     esac
@@ -4882,6 +4885,35 @@ cmd_help() {
 # --------------------------------------------------------------------- main
 
 cmd="${1:-help}"; shift || true
+# Antigravity plugin hooks (SessionStart, PreInvocation, Stop): the event's
+# JSON arrives on stdin with the agent's cwd; the reply goes back in
+# Antigravity's shape. A bus failure never breaks the agent's turn.
+if [ "$cmd" = antigravity-hook ]; then
+  ev="${1:-}"; in=$(cat 2>/dev/null || true)
+  cwd=$(jq -r '.cwd // (.workspacePaths // [])[0] // empty' <<<"$in" 2>/dev/null || true)
+  conv=$(jq -r '.conversationId // empty' <<<"$in" 2>/dev/null | tr -cd 'A-Za-z0-9_-' || true)
+  [ -n "$cwd" ] && [ -d "$cwd" ] && cd "$cwd" 2>/dev/null || true
+  export AGENT_BUS_TOOL=antigravity AGENT_BUS_VIA=hook AGENT_BUS_SESSION=local
+  inject() { if [ -n "$1" ]; then jq -nc --arg t "$1" '{injectSteps: [{systemMessage: {systemMessage: $t}}]}'; else printf '{}\n'; fi; }
+  case "$ev" in
+    session-start)
+      inject "$(printf '{"hook_event_name":"SessionStart"}' | "${BASH_SOURCE[0]}" digest 2>/dev/null || true)" ;;
+    pre-invocation)
+      # Before every model call: at most once per conversation per
+      # AGENT_BUS_ANTIGRAVITY_POLL seconds (default 10), so a long turn
+      # isn't one bus read per step.
+      d="${AGENT_BUS_HOME:-$HOME/.agents/bus}/tmp/antigravity-poll"; f="$d/${conv:-none}"
+      now=$(date +%s); last=$(cat "$f" 2>/dev/null || echo 0); case "$last" in ''|*[!0-9]*) last=0 ;; esac
+      if [ $((now - last)) -lt "${AGENT_BUS_ANTIGRAVITY_POLL:-10}" ]; then printf '{}\n'; exit 0; fi
+      mkdir -p "$d" 2>/dev/null && printf '%s\n' "$now" >"$f" 2>/dev/null || true
+      inject "$("${BASH_SOURCE[0]}" digest </dev/null 2>/dev/null || true)" ;;
+    stop)
+      out=$("${BASH_SOURCE[0]}" stop-hook </dev/null 2>/dev/null || echo '{}')
+      jq -c 'if .decision == "block" then {decision: "continue", reason: .reason} else {} end' <<<"$out" 2>/dev/null || printf '{}\n' ;;
+    *) printf '{}\n' ;;
+  esac
+  exit 0
+fi
 if [ "$cmd" = codex-hook ]; then
   command -v python3 >/dev/null 2>&1 || exit 0
   python3 "$(dirname "$(codex_helper)")/codex_hook.py" "${BASH_SOURCE[0]}" || true

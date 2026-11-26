@@ -5,7 +5,7 @@
 # and is stripped before re-adding. Each config is backed up once, next to
 # itself, before the first write.
 #
-# Usage: install-hooks.sh [--claude] [--opencode] [--codex] [--uninstall] [--remove-legacy]
+# Usage: install-hooks.sh [--claude] [--opencode] [--codex] [--antigravity] [--uninstall] [--remove-legacy]
 #   Each host also gets the /agent-bus skill (linked from skills/agent-bus).
 #   default: --claude --opencode
 #   --remove-legacy strips hooks a v1 install left in Codex and Cursor configs.
@@ -34,19 +34,21 @@ CLAUDE_SETTINGS="$CLAUDE_DIR/settings.json"
 OPENCODE_DIR="$HOME/.config/opencode"
 PLUGIN_SRC="$ROOT/plugins/agent-bus"
 CODEX_SETTINGS="${AGENT_BUS_CODEX_SETTINGS:-${CODEX_HOME:-$HOME/.codex}/hooks.json}"
+ANTIGRAVITY_DIR="${AGENT_BUS_ANTIGRAVITY_DIR:-$HOME/.gemini/config}"
 
-do_claude=0 do_opencode=0 do_codex=0 uninstall=0 legacy=0
+do_claude=0 do_opencode=0 do_codex=0 do_antigravity=0 uninstall=0 legacy=0
 for a in "$@"; do
   case "$a" in
     --claude) do_claude=1 ;;
     --opencode) do_opencode=1 ;;
     --codex) do_codex=1 ;;
+    --antigravity) do_antigravity=1 ;;
     --uninstall) uninstall=1 ;;
     --remove-legacy) legacy=1 ;;
     *) echo "unknown flag: $a" >&2; exit 1 ;;
   esac
 done
-((do_claude || do_opencode || do_codex || legacy)) || { do_claude=1; do_opencode=1; }
+((do_claude || do_opencode || do_codex || do_antigravity || legacy)) || { do_claude=1; do_opencode=1; }
 
 # Configs are often symlinks into a dotfiles repo; write through the link.
 real() { [ -L "$1" ] && python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$1" || printf '%s' "$1"; }
@@ -167,6 +169,32 @@ link_skill() { # dir name
   [ "$2" = agent-bus ] && echo "skill:    /agent-bus installed ($dest)"
   return 0
 }
+# Antigravity (desktop app, IDE and agy CLI) discovers plugins in
+# ~/.gemini/config/plugins/<name>/ by their plugin.json. Hooks run via sh -c
+# with the app's environment, so the command carries this PATH and the CLI's
+# absolute path.
+install_antigravity() {
+  local dest="$ANTIGRAVITY_DIR/plugins/agent-bus" ev cmd
+  rm -rf "$dest"
+  if ((uninstall)); then echo "antigravity: removed ($dest)"; return 0; fi
+  mkdir -p "$dest/skills/agent-bus"
+  jq -n --arg v "$("$BIN" version 2>/dev/null | awk '{print $2; exit}')" '{name: "agent-bus", version: ($v | if . == "" then "0.0.0" else . end), description: "agent-bus delivery: packets for this agent at session start, before model calls, and when a turn ends with work waiting"}' >"$dest/plugin.json"
+  cp "$ROOT/skills/agent-bus/SKILL.md" "$dest/skills/agent-bus/SKILL.md" 2>/dev/null || true
+  sq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }   # POSIX sh quoting
+  # A clean PATH: where jq and git live, then the usual system dirs.
+  local p='' t
+  for t in jq git; do t=$(command -v "$t" 2>/dev/null) && p="$p${p:+:}$(dirname "$t")"; done
+  p="$p${p:+:}/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+  cmd() { printf 'PATH=%s %s antigravity-hook %s || echo "{}"' "$(sq "$p")" "$(sq "$BIN")" "$1"; }
+  jq -n --arg s "$(cmd session-start)" --arg p "$(cmd pre-invocation)" --arg t "$(cmd stop)" '{
+    "agent-bus": {
+      SessionStart: [{type: "command", command: $s, timeout: 20}],
+      PreInvocation: [{type: "command", command: $p, timeout: 20}],
+      Stop: [{type: "command", command: $t, timeout: 20}]
+    }}' >"$dest/hooks.json"
+  echo "antigravity: installed ($dest) — new conversations pick it up"
+}
+
 install_skills() {
   local dirs=''
   ((do_claude)) && dirs="$CLAUDE_DIR/skills"
@@ -179,6 +207,7 @@ install_skills() {
 ((do_claude)) && install_claude
 ((do_opencode)) && install_opencode
 ((do_codex)) && install_codex
+((do_antigravity)) && install_antigravity
 install_skills
 ((legacy)) && remove_legacy
 exit 0
